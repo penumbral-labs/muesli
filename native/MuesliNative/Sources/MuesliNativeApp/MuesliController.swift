@@ -181,7 +181,7 @@ final class MuesliController: NSObject {
         }) ?? self.selectedBackend
         self.selectedMeetingSummaryBackend = MeetingSummaryBackendOption.all.first(where: {
             $0.backend == loadedConfig.meetingSummaryBackend
-        }) ?? .openAI
+        }) ?? .chatGPT
         self.indicator = FloatingIndicatorController(configStore: configStore)
         ComputerUseCursorOverlay.shared.attachIndicator(self.indicator)
         super.init()
@@ -580,7 +580,7 @@ final class MuesliController: NSObject {
         }) ?? selectedBackend
         selectedMeetingSummaryBackend = MeetingSummaryBackendOption.all.first(where: {
             $0.backend == config.meetingSummaryBackend
-        }) ?? .openAI
+        }) ?? .chatGPT
         statusBarController?.refresh()
         statusBarController?.refreshIcon()
         indicator.refreshIcon()

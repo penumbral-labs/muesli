@@ -52,7 +52,7 @@ enum MeetingSummaryClient {
         manualNotesToRetain: String? = nil,
         visualContext: String? = nil
     ) async throws -> String {
-        let backend = (config.meetingSummaryBackend.isEmpty ? MeetingSummaryBackendOption.openAI.backend : config.meetingSummaryBackend).lowercased()
+        let backend = (config.meetingSummaryBackend.isEmpty ? MeetingSummaryBackendOption.chatGPT.backend : config.meetingSummaryBackend).lowercased()
         let generatedNotes: String
         if backend == MeetingSummaryBackendOption.chatGPT.backend {
             generatedNotes = try await summarizeWithChatGPT(
@@ -552,7 +552,7 @@ enum MeetingSummaryClient {
     }
 
     static func generateTitle(transcript: String, config: AppConfig) async -> String? {
-        let backend = (config.meetingSummaryBackend.isEmpty ? MeetingSummaryBackendOption.openAI.backend : config.meetingSummaryBackend).lowercased()
+        let backend = (config.meetingSummaryBackend.isEmpty ? MeetingSummaryBackendOption.chatGPT.backend : config.meetingSummaryBackend).lowercased()
 
         // Use a short prefix of the transcript for title generation (save tokens)
         let truncated = String(transcript.prefix(1500))

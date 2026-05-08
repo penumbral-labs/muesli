@@ -344,12 +344,12 @@ struct MeetingSummaryBackendTests {
         #expect(MeetingSummaryBackendOption.openRouter.backend == "openrouter")
     }
 
-    @Test("configured values resolve with OpenAI fallback")
+    @Test("configured values resolve with ChatGPT fallback")
     func resolvedValues() {
         #expect(MeetingSummaryBackendOption.resolved("chatgpt") == .chatGPT)
         #expect(MeetingSummaryBackendOption.resolved("openrouter") == .openRouter)
-        #expect(MeetingSummaryBackendOption.resolved("unknown") == .openAI)
-        #expect(MeetingSummaryBackendOption.resolved(nil) == .openAI)
+        #expect(MeetingSummaryBackendOption.resolved("unknown") == .chatGPT)
+        #expect(MeetingSummaryBackendOption.resolved(nil) == .chatGPT)
     }
 }
 
@@ -364,7 +364,7 @@ struct AppConfigTests {
         #expect(config.cohereLanguage == CohereTranscribeLanguage.defaultLanguage.rawValue)
         #expect(config.meetingTranscriptionBackend == BackendOption.whisper.backend)
         #expect(config.meetingTranscriptionModel == BackendOption.whisper.model)
-        #expect(config.meetingSummaryBackend == "openai")
+        #expect(config.meetingSummaryBackend == "chatgpt")
         #expect(config.defaultMeetingTemplateID == MeetingTemplates.autoID)
         #expect(config.meetingRecordingSavePolicy == .never)
         #expect(config.showScheduledMeetingNotifications == true)

@@ -12,7 +12,7 @@ struct OnboardingView: View {
     @State private var selectedUseCase: OnboardingUseCase
     @State private var selectedBackend: BackendOption
     @State private var selectedCohereLanguage: CohereTranscribeLanguage
-    @State private var summaryBackend: MeetingSummaryBackendOption = .openAI
+    @State private var summaryBackend: MeetingSummaryBackendOption = .chatGPT
     @State private var apiKey = ""
     @State private var isSigningInChatGPT = false
     @State private var chatGPTSignInDone = false
@@ -26,6 +26,7 @@ struct OnboardingView: View {
     @State private var systemAudioGranted = false
     @State private var permissionPollTimer: Timer?
     @State private var grantingPermissionName: String?
+    @State private var nativePermissionPromptName: String?
     @State private var recentlyGrantedPermissionName: String?
 
     // Hotkey recorder
@@ -92,7 +93,7 @@ struct OnboardingView: View {
         initialHotkey: HotkeyConfig = .default,
         initialSystemAudioRequested: Bool = false,
         initialUseCase: OnboardingUseCase = .dictation,
-        initialSummaryBackend: MeetingSummaryBackendOption = .openAI,
+        initialSummaryBackend: MeetingSummaryBackendOption = .chatGPT,
         initialModelDownloadProgress: Double? = nil,
         initialModelDownloadStatus: String? = nil
     ) {
@@ -757,10 +758,7 @@ struct OnboardingView: View {
         if selectedUseCase.includesPushToTalk {
             if selectedUseCase.includesDictation {
                 steps += [
-                    ("hand.raised.fill", "Accessibility", "Paste transcribed text into other apps", accessibilityGranted, {
-                        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-                        AXIsProcessTrustedWithOptions(opts)
-                    }),
+                    ("hand.raised.fill", "Accessibility", "Paste transcribed text into other apps", accessibilityGranted, requestAccessibilityPermission),
                 ]
             }
             steps += [
@@ -861,14 +859,20 @@ struct OnboardingView: View {
                     }
                 }
 
-                Button {
-                    openSystemSettingsForPermission(at: displayIndex)
-                } label: {
-                    Text("Not seeing a prompt? Open System Settings")
+                if isWaitingForNativePermissionPrompt(step.name) {
+                    Text("Respond to the macOS permission prompt")
                         .font(.system(size: 11))
-                        .foregroundStyle(MuesliTheme.accent)
+                        .foregroundStyle(MuesliTheme.textTertiary)
+                } else {
+                    Button {
+                        openSystemSettingsForPermission(at: displayIndex)
+                    } label: {
+                        Text("Not seeing a prompt? Open System Settings")
+                            .font(.system(size: 11))
+                            .foregroundStyle(MuesliTheme.accent)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
                 if step.name == "Input Monitoring", grantingPermissionName == step.name {
                     Button {
@@ -925,11 +929,30 @@ struct OnboardingView: View {
     }
 
     private func isWaitingForNativePermissionPrompt(_ permissionName: String) -> Bool {
-        permissionName == "Accessibility" && grantingPermissionName == permissionName
+        nativePermissionPromptName == permissionName
+    }
+
+    private func requestAccessibilityPermission() {
+        nativePermissionPromptName = "Accessibility"
+        controller.bringOnboardingToFront()
+        NSApplication.shared.activate(ignoringOtherApps: true)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+            AXIsProcessTrustedWithOptions(opts)
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(6))
+            if nativePermissionPromptName == "Accessibility", !accessibilityGranted {
+                nativePermissionPromptName = nil
+            }
+        }
     }
 
     private func switchToVoiceNotesOnly() {
         grantingPermissionName = nil
+        nativePermissionPromptName = nil
         recentlyGrantedPermissionName = nil
         selectedUseCase = .voiceNotes
         currentStep = OnboardingFlow.normalizedStep(currentStep, for: .voiceNotes)
@@ -1054,6 +1077,7 @@ struct OnboardingView: View {
     private func notePermissionGranted(_ permissionName: String) {
         guard recentlyGrantedPermissionName != permissionName else { return }
         grantingPermissionName = nil
+        nativePermissionPromptName = nil
         recentlyGrantedPermissionName = permissionName
         saveProgress(atStep: currentStep)
         controller.bringOnboardingToFront()
@@ -1095,6 +1119,7 @@ struct OnboardingView: View {
         let steps = permissionSteps
         if permissionIndex < steps.count {
             grantingPermissionName = steps[permissionIndex].name
+            nativePermissionPromptName = nil
             recentlyGrantedPermissionName = nil
             saveProgress(atStep: currentStep)
         }

@@ -71,7 +71,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
                 initialHotkey: hotkey,
                 initialSystemAudioRequested: progress.systemAudioRequested,
                 initialUseCase: OnboardingUseCase.resolved(progress.onboardingUseCaseRawValue),
-                initialSummaryBackend: MeetingSummaryBackendOption.resolved(controller.config.meetingSummaryBackend),
+                initialSummaryBackend: .chatGPT,
                 initialModelDownloadProgress: progress.modelDownloadProgress,
                 initialModelDownloadStatus: progress.modelDownloadStatus
             )
@@ -81,7 +81,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
                 appState: controller.appState,
                 initialCohereLanguage: controller.config.resolvedCohereLanguage,
                 initialUseCase: controller.config.resolvedOnboardingUseCase,
-                initialSummaryBackend: MeetingSummaryBackendOption.resolved(controller.config.meetingSummaryBackend)
+                initialSummaryBackend: .chatGPT
             )
         }
         window.contentView = NSHostingView(rootView: rootView)

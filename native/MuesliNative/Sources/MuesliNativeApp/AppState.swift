@@ -52,7 +52,7 @@ final class AppState {
     // Config-driven state
     var selectedBackend: BackendOption = .whisper
     var selectedMeetingTranscriptionBackend: BackendOption = .whisper
-    var selectedMeetingSummaryBackend: MeetingSummaryBackendOption = .openAI
+    var selectedMeetingSummaryBackend: MeetingSummaryBackendOption = .chatGPT
     var activePostProcessor: PostProcessorOption = PostProcessorOption.defaultOption
     var config: AppConfig = AppConfig()
 

@@ -318,11 +318,11 @@ struct MeetingSummaryBackendOption: Equatable {
         label: "ChatGPT"
     )
 
-    static let all: [MeetingSummaryBackendOption] = [.openAI, .openRouter, .chatGPT]
+    static let all: [MeetingSummaryBackendOption] = [.chatGPT, .openAI, .openRouter]
 
     static func resolved(_ backend: String?) -> MeetingSummaryBackendOption {
         guard let backend, let option = all.first(where: { $0.backend == backend }) else {
-            return .openAI
+            return .chatGPT
         }
         return option
     }
@@ -577,7 +577,7 @@ struct AppConfig: Codable {
     var cohereLanguage: String = CohereTranscribeLanguage.defaultLanguage.rawValue
     var meetingTranscriptionBackend: String = BackendOption.whisper.backend
     var meetingTranscriptionModel: String = BackendOption.whisper.model
-    var meetingSummaryBackend: String = MeetingSummaryBackendOption.openAI.backend
+    var meetingSummaryBackend: String = MeetingSummaryBackendOption.chatGPT.backend
     var defaultMeetingTemplateID: String = MeetingTemplates.autoID
     var whisperModel: String = BackendOption.whisper.model
     var idleTimeout: Double = 120

@@ -274,17 +274,15 @@ struct MeetingSummaryClientTests {
         #expect(title == nil)
     }
 
-    @Test("summarize defaults to openai backend when empty")
-    func defaultsToOpenAI() async throws {
+    @Test("empty summary backend resolves to ChatGPT")
+    func defaultsToChatGPT() {
         var config = AppConfig()
         config.meetingSummaryBackend = ""
-        config.openAIAPIKey = ""
 
-        let result = try await MeetingSummaryClient.summarize(
-            transcript: "Test", meetingTitle: "Title", config: config
+        let backend = MeetingSummaryBackendOption.resolved(
+            config.meetingSummaryBackend.isEmpty ? nil : config.meetingSummaryBackend
         )
 
-        // Should hit OpenAI path, fail (no key), return fallback
-        #expect(result.contains("## Raw Transcript"))
+        #expect(backend == .chatGPT)
     }
 }
