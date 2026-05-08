@@ -4,9 +4,13 @@ enum ComputerUseToolName: String, Codable, Equatable, CaseIterable {
     case listApps = "list_apps"
     case launchApp = "launch_app"
     case listWindows = "list_windows"
+    case getAppState = "get_app_state"
     case getWindowState = "get_window_state"
     case moveCursor = "move_cursor"
     case click
+    case clickElement = "click_element"
+    case clickPoint = "click_point"
+    case performSecondaryAction = "perform_secondary_action"
     case setValue = "set_value"
     case typeText = "type_text"
     case pasteText = "paste_text"
@@ -16,7 +20,9 @@ enum ComputerUseToolName: String, Codable, Equatable, CaseIterable {
     case drag
     case listBrowserTabs = "list_browser_tabs"
     case activateBrowserTab = "activate_browser_tab"
+    case openNewBrowserTab = "open_new_browser_tab"
     case navigateURL = "navigate_url"
+    case navigateActiveBrowserTab = "navigate_active_browser_tab"
     case pageGetText = "page_get_text"
     case pageQueryDOM = "page_query_dom"
     case finish
@@ -125,66 +131,112 @@ struct ComputerUseBrowserTabInfo: Codable, Equatable {
     }
 }
 
+enum ComputerUseVerificationStatus: String, Codable, Equatable {
+    case changed
+    case unchanged
+    case targetLost = "target_lost"
+    case blocked
+    case unknown
+}
+
+struct ComputerUseStateDelta: Codable, Equatable {
+    let status: ComputerUseVerificationStatus
+    let summary: String
+    let beforeStateID: String?
+    let afterStateID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case summary
+        case beforeStateID = "before_state_id"
+        case afterStateID = "after_state_id"
+    }
+}
+
 struct ComputerUseWindowState: Codable, Equatable {
+    let stateID: String
     let appName: String
     let bundleID: String
     let windowTitle: String
     let windowFrame: ComputerUseRect?
     let screenshot: ComputerUseScreenshotObservation?
     let cursorPosition: ComputerUseRect?
+    let focusedElement: ComputerUseFocusedElement?
+    let selectedText: String?
+    let appInstructions: String?
     let elements: [ComputerUseElementCandidate]
     let capturedAt: Date
 
     enum CodingKeys: String, CodingKey {
+        case stateID = "state_id"
         case appName = "app_name"
         case bundleID = "bundle_id"
         case windowTitle = "window_title"
         case windowFrame = "window_frame"
         case screenshot
         case cursorPosition = "cursor_position"
+        case focusedElement = "focused_element"
+        case selectedText = "selected_text"
+        case appInstructions = "app_instructions"
         case elements
         case capturedAt = "captured_at"
     }
 
     init(observation: ComputerUseObservation) {
+        stateID = observation.stateID
         appName = observation.appName
         bundleID = observation.bundleID
         windowTitle = observation.windowTitle
         windowFrame = observation.windowFrame
         screenshot = observation.screenshot
         cursorPosition = observation.cursorPosition
+        focusedElement = observation.focusedElement
+        selectedText = observation.selectedText
+        appInstructions = observation.appInstructions
         elements = observation.elements
         capturedAt = observation.capturedAt
     }
 
     init(
+        stateID: String = ComputerUseObservation.newStateID(),
         appName: String,
         bundleID: String,
         windowTitle: String,
         windowFrame: ComputerUseRect?,
         screenshot: ComputerUseScreenshotObservation?,
         cursorPosition: ComputerUseRect?,
+        focusedElement: ComputerUseFocusedElement? = nil,
+        selectedText: String? = nil,
+        appInstructions: String? = nil,
         elements: [ComputerUseElementCandidate],
         capturedAt: Date
     ) {
+        self.stateID = stateID
         self.appName = appName
         self.bundleID = bundleID
         self.windowTitle = windowTitle
         self.windowFrame = windowFrame
         self.screenshot = screenshot
         self.cursorPosition = cursorPosition
+        self.focusedElement = focusedElement
+        self.selectedText = selectedText
+        self.appInstructions = appInstructions
         self.elements = elements
         self.capturedAt = capturedAt
     }
 
     var observation: ComputerUseObservation {
         ComputerUseObservation(
+            stateID: stateID,
             appName: appName,
             bundleID: bundleID,
             windowTitle: windowTitle,
             windowFrame: windowFrame,
             screenshot: screenshot,
             cursorPosition: cursorPosition,
+            focusedElement: focusedElement,
+            selectedText: selectedText,
+            appInstructions: appInstructions,
             elements: elements,
             capturedAt: capturedAt
         )
@@ -203,6 +255,7 @@ struct ComputerUseToolInvocation: Codable, Equatable {
     let elementID: String?
     let elementIndex: Int?
     let screenshotID: String?
+    let actionName: String?
     let label: String?
     let x: Double?
     let y: Double?
@@ -233,6 +286,7 @@ struct ComputerUseToolInvocation: Codable, Equatable {
         case elementID = "element_id"
         case elementIndex = "element_index"
         case screenshotID = "screenshot_id"
+        case actionName = "action_name"
         case label
         case x
         case y
@@ -264,6 +318,7 @@ struct ComputerUseToolInvocation: Codable, Equatable {
         elementID: String? = nil,
         elementIndex: Int? = nil,
         screenshotID: String? = nil,
+        actionName: String? = nil,
         label: String? = nil,
         x: Double? = nil,
         y: Double? = nil,
@@ -293,6 +348,7 @@ struct ComputerUseToolInvocation: Codable, Equatable {
         self.elementID = elementID
         self.elementIndex = elementIndex
         self.screenshotID = screenshotID
+        self.actionName = actionName
         self.label = label
         self.x = x
         self.y = y
@@ -319,12 +375,21 @@ struct ComputerUseToolInvocation: Codable, Equatable {
     func normalizedPlannerOutput() -> ComputerUseToolInvocation {
         var normalizedElementID = elementID
         var normalizedElementIndex = elementIndex
+        var normalizedScreenshotID = screenshotID
+        var normalizedX = x
+        var normalizedY = y
         if tool == .click, x != nil, y != nil {
             if trimmed(normalizedElementID).isEmpty {
                 normalizedElementID = nil
             }
             if let index = normalizedElementIndex, index <= 0 {
                 normalizedElementIndex = nil
+            }
+            let hasElementTarget = normalizedElementIndex != nil || !trimmed(normalizedElementID).isEmpty
+            if hasElementTarget, trimmed(screenshotID).isEmpty {
+                normalizedScreenshotID = nil
+                normalizedX = nil
+                normalizedY = nil
             }
         }
         return ComputerUseToolInvocation(
@@ -338,10 +403,11 @@ struct ComputerUseToolInvocation: Codable, Equatable {
             tabIndex: tabIndex,
             elementID: normalizedElementID,
             elementIndex: normalizedElementIndex,
-            screenshotID: screenshotID,
+            screenshotID: normalizedScreenshotID,
+            actionName: actionName,
             label: label,
-            x: x,
-            y: y,
+            x: normalizedX,
+            y: normalizedY,
             toX: toX,
             toY: toY,
             clicks: clicks,
@@ -361,7 +427,7 @@ struct ComputerUseToolInvocation: Codable, Equatable {
 
     func validationFailure() -> String? {
         switch tool {
-        case .listApps, .listWindows, .getWindowState, .finish:
+        case .listApps, .listWindows, .getAppState, .getWindowState, .finish:
             return nil
         case .launchApp:
             return trimmed(appName).isEmpty && canonicalBundleID.isEmpty ? "launch_app requires app_name or app_bundle_id" : nil
@@ -390,6 +456,24 @@ struct ComputerUseToolInvocation: Codable, Equatable {
                 return "click coordinate mode requires screenshot_id"
             }
             return hasElementTarget || (hasX && hasY) ? nil : "click requires element_index, element_id, or x and y"
+        case .clickElement:
+            if let elementIndex, elementIndex <= 0 {
+                return "click_element element_index must be greater than 0"
+            }
+            return elementIndex == nil && trimmed(elementID).isEmpty ? "click_element requires element_index or element_id" : nil
+        case .clickPoint:
+            if x == nil || y == nil {
+                return "click_point requires x and y"
+            }
+            return trimmed(screenshotID).isEmpty ? "click_point requires screenshot_id" : nil
+        case .performSecondaryAction:
+            if trimmed(actionName).isEmpty {
+                return "perform_secondary_action requires action_name"
+            }
+            if let elementIndex, elementIndex <= 0 {
+                return "perform_secondary_action element_index must be greater than 0"
+            }
+            return elementIndex == nil && trimmed(elementID).isEmpty ? "perform_secondary_action requires element_index or element_id" : nil
         case .setValue:
             if trimmed(value).isEmpty {
                 return "set_value requires value"
@@ -405,6 +489,9 @@ struct ComputerUseToolInvocation: Codable, Equatable {
         case .pressKey, .hotkey:
             return trimmed(key).isEmpty ? "\(tool.rawValue) requires key" : nil
         case .scroll:
+            if let elementIndex, elementIndex <= 0 {
+                return "scroll element_index must be greater than 0"
+            }
             return direction == nil ? "scroll requires direction" : nil
         case .drag:
             if x == nil || y == nil || toX == nil || toY == nil {
@@ -418,9 +505,14 @@ struct ComputerUseToolInvocation: Codable, Equatable {
             if windowIndex == nil { return "activate_browser_tab requires window_index" }
             if tabIndex == nil { return "activate_browser_tab requires tab_index" }
             return nil
+        case .openNewBrowserTab:
+            return canonicalBundleID.isEmpty ? "open_new_browser_tab requires app_bundle_id" : nil
         case .navigateURL:
             if canonicalBundleID.isEmpty { return "navigate_url requires app_bundle_id" }
             return safeHTTPURL(trimmed(url)) == nil ? "navigate_url requires a safe http or https url" : nil
+        case .navigateActiveBrowserTab:
+            if canonicalBundleID.isEmpty { return "navigate_active_browser_tab requires app_bundle_id" }
+            return safeHTTPURL(trimmed(url)) == nil ? "navigate_active_browser_tab requires a safe http or https url" : nil
         case .pageGetText:
             if canonicalBundleID.isEmpty { return "page_get_text requires app_bundle_id" }
             return nil
@@ -436,18 +528,20 @@ struct ComputerUseToolInvocation: Codable, Equatable {
         switch tool {
         case .moveCursor:
             return false
-        case .click:
+        case .click, .clickPoint:
             if elementIndex == nil && trimmed(elementID).isEmpty {
                 if trimmed(label).isEmpty { return true }
                 if screenshotID == nil { return true }
             }
             return containsRiskyWord([label, reason].compactMap { $0 }.joined(separator: " "))
-        case .drag:
+        case .clickElement:
+            return containsRiskyWord([label, reason].compactMap { $0 }.joined(separator: " "))
+        case .performSecondaryAction, .drag:
             return containsRiskyWord([label, reason].compactMap { $0 }.joined(separator: " "))
         case .pressKey, .hotkey:
             let mods = modifiers ?? []
             return mods.contains(.command) && ["q", "w"].contains(canonical(key ?? ""))
-        case .navigateURL:
+        case .navigateURL, .navigateActiveBrowserTab:
             return safeHTTPURL(trimmed(url)) == nil
         default:
             return false
@@ -456,9 +550,9 @@ struct ComputerUseToolInvocation: Codable, Equatable {
 
     var isMutating: Bool {
         switch tool {
-        case .launchApp, .moveCursor, .click, .setValue, .typeText, .pasteText, .pressKey, .hotkey, .scroll, .drag, .activateBrowserTab, .navigateURL:
+        case .launchApp, .moveCursor, .click, .clickElement, .clickPoint, .performSecondaryAction, .setValue, .typeText, .pasteText, .pressKey, .hotkey, .scroll, .drag, .activateBrowserTab, .openNewBrowserTab, .navigateURL, .navigateActiveBrowserTab:
             return true
-        case .listApps, .listWindows, .getWindowState, .listBrowserTabs, .pageGetText, .pageQueryDOM, .finish, .fail:
+        case .listApps, .listWindows, .getAppState, .getWindowState, .listBrowserTabs, .pageGetText, .pageQueryDOM, .finish, .fail:
             return false
         }
     }
@@ -471,6 +565,8 @@ struct ComputerUseToolInvocation: Codable, Equatable {
             return "launch \(trimmed(appName).isEmpty ? canonicalBundleID : trimmed(appName))"
         case .listWindows:
             return "list windows"
+        case .getAppState:
+            return "get app state"
         case .getWindowState:
             return "get window state"
         case .moveCursor:
@@ -483,6 +579,16 @@ struct ComputerUseToolInvocation: Codable, Equatable {
                 return "click \(trimmed(label).isEmpty ? trimmed(elementID) : trimmed(label))"
             }
             return "click \(trimmed(label).isEmpty ? "point" : trimmed(label)) at \(coordinateSummary(x, y))"
+        case .clickElement:
+            if let elementIndex {
+                return "click element \(elementIndexLabel(elementIndex))"
+            }
+            return "click \(trimmed(label).isEmpty ? trimmed(elementID) : trimmed(label))"
+        case .clickPoint:
+            return "click \(trimmed(label).isEmpty ? "point" : trimmed(label)) at \(coordinateSummary(x, y))"
+        case .performSecondaryAction:
+            let target = elementIndex.map(elementIndexLabel) ?? trimmed(elementID)
+            return "perform \(trimmed(actionName)) on \(target)"
         case .setValue:
             let target = elementIndex.map(elementIndexLabel) ?? trimmed(elementID)
             return "set \(target) to \(truncateForSummary(trimmed(value)))"
@@ -494,15 +600,20 @@ struct ComputerUseToolInvocation: Codable, Equatable {
             let parts = (modifiers ?? []).map(\.rawValue) + [trimmed(key)]
             return "press \(parts.filter { !$0.isEmpty }.joined(separator: "+"))"
         case .scroll:
-            return "scroll \(direction?.rawValue ?? "")"
+            let target = elementIndex.map { " element \(elementIndexLabel($0))" } ?? (trimmed(elementID).isEmpty ? "" : " \(trimmed(elementID))")
+            return "scroll\(target) \(direction?.rawValue ?? "")"
         case .drag:
             return "drag \(coordinateSummary(x, y)) to \(coordinateSummary(toX, toY))"
         case .listBrowserTabs:
             return "list browser tabs"
         case .activateBrowserTab:
             return "activate browser tab \(windowIndex ?? 0):\(tabIndex ?? 0)"
+        case .openNewBrowserTab:
+            return "open new browser tab"
         case .navigateURL:
             return "navigate to \(truncateForSummary(trimmed(url)))"
+        case .navigateActiveBrowserTab:
+            return "navigate active browser tab to \(truncateForSummary(trimmed(url)))"
         case .pageGetText:
             return "get page text"
         case .pageQueryDOM:
@@ -719,6 +830,10 @@ struct ComputerUseToolOutcome: Codable, Equatable {
     let bundleID: String?
     let windowTitle: String?
     let snapshotID: String?
+    let verificationStatus: ComputerUseVerificationStatus?
+    let beforeStateID: String?
+    let afterStateID: String?
+    let stateDelta: ComputerUseStateDelta?
 
     enum CodingKeys: String, CodingKey {
         case step
@@ -729,6 +844,10 @@ struct ComputerUseToolOutcome: Codable, Equatable {
         case bundleID = "bundle_id"
         case windowTitle = "window_title"
         case snapshotID = "snapshot_id"
+        case verificationStatus = "verification_status"
+        case beforeStateID = "before_state_id"
+        case afterStateID = "after_state_id"
+        case stateDelta = "state_delta"
     }
 
     init(
@@ -739,7 +858,11 @@ struct ComputerUseToolOutcome: Codable, Equatable {
         appName: String? = nil,
         bundleID: String? = nil,
         windowTitle: String? = nil,
-        snapshotID: String? = nil
+        snapshotID: String? = nil,
+        verificationStatus: ComputerUseVerificationStatus? = nil,
+        beforeStateID: String? = nil,
+        afterStateID: String? = nil,
+        stateDelta: ComputerUseStateDelta? = nil
     ) {
         self.step = step
         self.tool = tool
@@ -749,6 +872,10 @@ struct ComputerUseToolOutcome: Codable, Equatable {
         self.bundleID = bundleID
         self.windowTitle = windowTitle
         self.snapshotID = snapshotID
+        self.verificationStatus = verificationStatus
+        self.beforeStateID = beforeStateID
+        self.afterStateID = afterStateID
+        self.stateDelta = stateDelta
     }
 }
 

@@ -45,7 +45,7 @@ struct DictationRowView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
 
                         if let trace = record.computerUseTrace {
-                            Text(trace.finalStatus.capitalized)
+                            Text(Self.displayFinalStatus(trace.finalStatus))
                                 .font(MuesliTheme.captionMedium())
                                 .foregroundStyle(statusColor(trace.finalStatus))
                         }
@@ -171,10 +171,29 @@ struct DictationRowView: View {
             return MuesliTheme.success
         case "confirm", "needsconfirmation":
             return MuesliTheme.transcribing
+        case "timed_out", "timedout":
+            return MuesliTheme.transcribing
         case "failed", "unsupported":
             return MuesliTheme.recording
         default:
             return MuesliTheme.textTertiary
+        }
+    }
+
+    private static func displayFinalStatus(_ status: String) -> String {
+        switch status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "done":
+            return "Done"
+        case "timed_out", "timedout":
+            return "Timed out"
+        case "failed", "fail":
+            return "Failed"
+        case "confirm", "needsconfirmation", "needs_confirmation":
+            return "Confirm"
+        case "cancelled", "canceled":
+            return "Cancelled"
+        default:
+            return status.capitalized
         }
     }
 }

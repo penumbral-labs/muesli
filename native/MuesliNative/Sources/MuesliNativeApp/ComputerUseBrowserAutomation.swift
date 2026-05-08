@@ -59,6 +59,32 @@ enum ComputerUseBrowserAutomation {
         }
     }
 
+    static func openNewTab(appBundleID: String) async -> ComputerUseExecutionResult {
+        guard supportsBrowser(appBundleID) else {
+            return .unsupported("Browser tools currently support Google Chrome only")
+        }
+        let script = """
+        tell application id "\(appleScriptString(appBundleID))"
+          activate
+          if (count of windows) is 0 then
+            make new window
+          else
+            set index of front window to 1
+            tell front window to make new tab
+            set active tab index of front window to (count of tabs of front window)
+          end if
+        end tell
+        """
+        do {
+            _ = try await runAppleScript(script)
+            return .executed("Opened new browser tab")
+        } catch is CancellationError {
+            return .cancelled()
+        } catch {
+            return .failed(browserScriptError(error))
+        }
+    }
+
     static func navigate(appBundleID: String, windowIndex: Int?, tabIndex: Int?, url: String) async -> ComputerUseExecutionResult {
         guard supportsBrowser(appBundleID) else {
             return .unsupported("Browser tools currently support Google Chrome only")

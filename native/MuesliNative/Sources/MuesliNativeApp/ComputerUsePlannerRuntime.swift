@@ -4,6 +4,7 @@ import MuesliCore
 struct ComputerUsePlannerRuntimeResult: Equatable {
     enum Status: Equatable {
         case done
+        case timedOut
         case needsConfirmation
         case failed
         case cancelled
@@ -36,6 +37,7 @@ final class ComputerUsePlannerRuntime {
     private let plan: PlanHandler
     private let execute: ExecuteHandler
     private let maxPlannerRetries = 1
+    private let maxUnchangedObservationLoops = 4
 
     init(
         config: AppConfig,
@@ -84,7 +86,10 @@ final class ComputerUsePlannerRuntime {
 
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         var priorResults: [ComputerUseToolOutcome] = []
-        var repeatedToolCounts: [String: Int] = [:]
+        var unchangedActionCounts: [String: Int] = [:]
+        var unchangedObservationCounts: [String: Int] = [:]
+        var invalidToolCallRepairCount = 0
+        let maxInvalidToolCallRepairs = 2
         // V1 keeps foreground activation, but state is scoped to a target app.
         // Later Codex-style work should replace this with background key-window tracking,
         // synthetic focus enforcement, and user-frontmost-app preservation.
@@ -100,8 +105,8 @@ final class ComputerUsePlannerRuntime {
                 return cancelledResult(traceEvents: traceEvents, step: step)
             }
             if Date() >= deadline {
-                traceEvents.append(traceEvent(kind: "failed", title: "Failed", body: "CUA timed out", status: "failed", step: step))
-                return .init(status: .failed, message: "CUA timed out", traceEvents: traceEvents)
+                traceEvents.append(traceEvent(kind: "timed_out", title: "Timed out", body: "CUA timed out", status: "timed_out", step: step))
+                return .init(status: .timedOut, message: "CUA timed out", traceEvents: traceEvents)
             }
             if let maxSteps, step > maxSteps {
                 traceEvents.append(traceEvent(kind: "failed", title: "Failed", body: "CUA reached its step limit", status: "failed", step: maxSteps))
@@ -122,6 +127,31 @@ final class ComputerUsePlannerRuntime {
                 response = try await planWithRetry(request, traceEvents: &traceEvents)
             } catch is CancellationError {
                 return cancelledResult(traceEvents: traceEvents, step: step)
+            } catch ComputerUsePlannerError.invalidToolCall(let name, let arguments, let message) {
+                let repairMessage = "Invalid tool call \(name): \(message). Raw arguments: \(String(arguments.prefix(800))). Choose exactly one valid tool from the current catalog and follow that tool's schema."
+                traceEvents.append(traceEvent(
+                    kind: "planner_repair",
+                    title: "Planner schema repair",
+                    body: repairMessage,
+                    status: "repair",
+                    step: step
+                ))
+                priorResults.append(ComputerUseToolOutcome(
+                    step: step,
+                    tool: .fail,
+                    status: "invalid_schema",
+                    message: repairMessage,
+                    appName: observation.appName,
+                    bundleID: observation.bundleID,
+                    windowTitle: observation.windowTitle,
+                    snapshotID: observation.screenshot?.screenshotID
+                ))
+                invalidToolCallRepairCount += 1
+                if invalidToolCallRepairCount <= maxInvalidToolCallRepairs {
+                    continue
+                }
+                traceEvents.append(traceEvent(kind: "failed", title: "Planner failed", body: repairMessage, status: "failed", step: step))
+                return .init(status: .failed, message: repairMessage, traceEvents: traceEvents)
             } catch {
                 traceEvents.append(traceEvent(
                     kind: "failed",
@@ -134,6 +164,7 @@ final class ComputerUsePlannerRuntime {
             }
 
             let toolCall = response.toolCall
+            invalidToolCallRepairCount = 0
             if let target = target(from: toolCall, fallback: currentTarget) {
                 currentTarget = target
             }
@@ -148,14 +179,6 @@ final class ComputerUsePlannerRuntime {
                 traceEvents.append(traceEvent(kind: "failed", title: "Schema rejected", body: validationFailure, status: "failed", step: step))
                 return .init(status: .failed, message: validationFailure, traceEvents: traceEvents)
             }
-            if let repeatedActionMessage = repeatedActionMessage(
-                toolCall: toolCall,
-                observation: observation,
-                repeatedToolCounts: &repeatedToolCounts
-            ) {
-                traceEvents.append(traceEvent(kind: "failed", title: "Repeated action stopped", body: repeatedActionMessage, status: "failed", step: step))
-                return .init(status: .failed, message: repeatedActionMessage, traceEvents: traceEvents)
-            }
             if toolCall.requiresConfirmation {
                 onStatus("Confirm")
                 let message = "Confirm: \(toolCall.summary)"
@@ -167,6 +190,11 @@ final class ComputerUsePlannerRuntime {
             case .finish:
                 onStatus("Done")
                 let message = toolCall.reason?.isEmpty == false ? toolCall.reason! : "Done"
+                if finishIndicatesFailure(message) {
+                    let blockedMessage = "Planner attempted to finish with an incomplete or blocked result: \(message)"
+                    traceEvents.append(traceEvent(kind: "failed", title: "Final output blocked", body: blockedMessage, status: "failed", step: step))
+                    return .init(status: .failed, message: blockedMessage, traceEvents: traceEvents)
+                }
                 traceEvents.append(traceEvent(kind: "finish", title: "Final output", body: message, status: "done", step: step))
                 return .init(status: .done, message: message, traceEvents: traceEvents)
             case .fail:
@@ -174,32 +202,51 @@ final class ComputerUsePlannerRuntime {
                 let message = toolCall.reason?.isEmpty == false ? toolCall.reason! : "Failed"
                 traceEvents.append(traceEvent(kind: "failed", title: "Final output", body: message, status: "failed", step: step))
                 return .init(status: .failed, message: message, traceEvents: traceEvents)
-            case .getWindowState:
+            case .getAppState, .getWindowState:
                 onStatus("Observing screen")
+                let beforeObservation = observation
                 let result = await execute(toolCall, registry)
                 if Task.isCancelled || result.status == .cancelled {
                     return cancelledResult(traceEvents: traceEvents, step: step)
                 }
-                let outcomeMessage = recoverableFallbackMessage(for: toolCall, result: result) ?? result.message
-                priorResults.append(ComputerUseToolOutcome(
-                    step: step,
-                    tool: toolCall.tool,
-                    status: "\(result.status)",
-                    message: outcomeMessage,
-                    appName: observation.appName,
-                    bundleID: observation.bundleID,
-                    windowTitle: observation.windowTitle,
-                    snapshotID: observation.screenshot?.screenshotID
-                ))
                 if result.status == .failed || result.status == .unsupported {
+                    let outcomeMessage = recoverableFallbackMessage(for: toolCall, result: result) ?? result.message
+                    priorResults.append(outcome(
+                        step: step,
+                        toolCall: toolCall,
+                        result: result,
+                        message: outcomeMessage,
+                        observation: beforeObservation,
+                        delta: nil
+                    ))
                     traceEvents.append(traceEvent(kind: "failed", title: "Failed", body: result.message, status: "failed", step: step))
                     return .init(status: .failed, message: result.message, traceEvents: traceEvents)
                 }
                 onStatus("Observing screen")
                 observation = observe(registry, true, currentTarget)
                 traceEvents.append(observationEvent(observation, step: step))
+                let feedback = observationToolFeedback(
+                    before: beforeObservation,
+                    after: observation,
+                    toolCall: toolCall,
+                    result: result,
+                    counts: &unchangedObservationCounts
+                )
+                priorResults.append(outcome(
+                    step: step,
+                    toolCall: toolCall,
+                    result: result,
+                    message: feedback.message,
+                    observation: observation,
+                    delta: nil
+                ))
+                if let blocked = feedback.blocked {
+                    traceEvents.append(traceEvent(kind: "failed", title: "Repeated action stopped", body: blocked, status: "failed", step: step))
+                    return .init(status: .failed, message: blocked, traceEvents: traceEvents)
+                }
                 continue
             default:
+                unchangedObservationCounts.removeAll()
                 onStatus(statusTitle(for: toolCall))
                 traceEvents.append(traceEvent(
                     kind: "tool_call",
@@ -208,18 +255,8 @@ final class ComputerUsePlannerRuntime {
                     status: "executing",
                     step: step
                 ))
+                let beforeObservation = observation
                 let result = await execute(toolCall, registry)
-                let outcomeMessage = recoverableFallbackMessage(for: toolCall, result: result) ?? result.message
-                priorResults.append(ComputerUseToolOutcome(
-                    step: step,
-                    tool: toolCall.tool,
-                    status: "\(result.status)",
-                    message: outcomeMessage,
-                    appName: observation.appName,
-                    bundleID: observation.bundleID,
-                    windowTitle: observation.windowTitle,
-                    snapshotID: observation.screenshot?.screenshotID
-                ))
                 traceEvents.append(traceEvent(
                     kind: "tool_result",
                     title: "Tool result",
@@ -237,16 +274,59 @@ final class ComputerUsePlannerRuntime {
                     if let resultTitle = resultStatusTitle(for: toolCall, result: result) {
                         onStatus(resultTitle)
                     }
+                    var delta: ComputerUseStateDelta?
                     if toolCall.isMutating {
                         onStatus("Observing screen")
                         observation = observe(registry, true, currentTarget)
                         traceEvents.append(observationEvent(observation, step: step))
+                        delta = stateDelta(
+                            before: beforeObservation,
+                            after: observation,
+                            toolCall: toolCall,
+                            result: result
+                        )
+                    }
+                    let outcomeMessage = verifiedOutcomeMessage(
+                        base: recoverableFallbackMessage(for: toolCall, result: result) ?? result.message,
+                        delta: delta
+                    )
+                    priorResults.append(outcome(
+                        step: step,
+                        toolCall: toolCall,
+                        result: result,
+                        message: outcomeMessage,
+                        observation: observation,
+                        delta: delta
+                    ))
+                    if let blocked = repeatedUnchangedMessage(
+                        toolCall: toolCall,
+                        delta: delta,
+                        counts: &unchangedActionCounts
+                    ) {
+                        traceEvents.append(traceEvent(kind: "failed", title: "Repeated action stopped", body: blocked, status: "failed", step: step))
+                        return .init(status: .failed, message: blocked, traceEvents: traceEvents)
                     }
                 case .needsConfirmation:
+                    priorResults.append(outcome(
+                        step: step,
+                        toolCall: toolCall,
+                        result: result,
+                        message: result.message,
+                        observation: beforeObservation,
+                        delta: nil
+                    ))
                     traceEvents.append(traceEvent(kind: "confirm", title: "Confirmation required", body: result.message, status: "confirm", step: step))
                     return .init(status: .needsConfirmation, message: result.message, traceEvents: traceEvents)
                 case .unsupported, .failed:
                     if let fallbackMessage = recoverableFallbackMessage(for: toolCall, result: result) {
+                        priorResults.append(outcome(
+                            step: step,
+                            toolCall: toolCall,
+                            result: result,
+                            message: fallbackMessage,
+                            observation: beforeObservation,
+                            delta: nil
+                        ))
                         onStatus("Screen fallback")
                         traceEvents.append(traceEvent(
                             kind: "fallback",
@@ -260,6 +340,14 @@ final class ComputerUsePlannerRuntime {
                         traceEvents.append(observationEvent(observation, step: step))
                         continue
                     }
+                    priorResults.append(outcome(
+                        step: step,
+                        toolCall: toolCall,
+                        result: result,
+                        message: result.message,
+                        observation: beforeObservation,
+                        delta: nil
+                    ))
                     traceEvents.append(traceEvent(kind: "failed", title: "Failed", body: result.message, status: "failed", step: step))
                     return .init(status: .failed, message: result.message, traceEvents: traceEvents)
                 case .cancelled:
@@ -275,12 +363,43 @@ final class ComputerUsePlannerRuntime {
         return .init(status: .cancelled, message: "CUA cancelled", traceEvents: events)
     }
 
+    private func outcome(
+        step: Int,
+        toolCall: ComputerUseToolCall,
+        result: ComputerUseExecutionResult,
+        message: String,
+        observation: ComputerUseObservation,
+        delta: ComputerUseStateDelta?
+    ) -> ComputerUseToolOutcome {
+        ComputerUseToolOutcome(
+            step: step,
+            tool: toolCall.tool,
+            status: "\(result.status)",
+            message: message,
+            appName: observation.appName,
+            bundleID: observation.bundleID,
+            windowTitle: observation.windowTitle,
+            snapshotID: observation.screenshot?.screenshotID,
+            verificationStatus: delta?.status,
+            beforeStateID: delta?.beforeStateID,
+            afterStateID: delta?.afterStateID,
+            stateDelta: delta
+        )
+    }
+
     private func observationEvent(_ observation: ComputerUseObservation, step: Int?) -> ComputerUseTraceEvent {
         let app = observation.appName.isEmpty ? "Unknown app" : observation.appName
         let window = observation.windowTitle.isEmpty ? "No focused window" : observation.windowTitle
-        var details = ["\(app) - \(window) - \(observation.elements.count) AX candidates"]
+        var details = ["state \(observation.stateID)", "\(app) - \(window) - \(observation.elements.count) AX candidates"]
         if let screenshot = observation.screenshot {
             details.append("screenshot \(screenshot.screenshotID) \(screenshot.width)x\(screenshot.height)")
+        }
+        if let focused = observation.focusedElement {
+            let text = focused.normalizedText.isEmpty ? focused.role : "\(focused.role) \(focused.normalizedText)"
+            details.append("focused \(String(text.prefix(80)))")
+        }
+        if let selectedText = observation.selectedText, !selectedText.isEmpty {
+            details.append("selected \(selectedText.count) chars")
         }
         if let cursor = observation.cursorPosition {
             details.append("cursor \(Int(cursor.x.rounded())),\(Int(cursor.y.rounded()))")
@@ -298,37 +417,149 @@ final class ComputerUsePlannerRuntime {
         maxSteps.map { " of \($0)" } ?? ""
     }
 
-    private func repeatedActionMessage(
+    private func stateDelta(
+        before: ComputerUseObservation,
+        after: ComputerUseObservation,
         toolCall: ComputerUseToolCall,
-        observation: ComputerUseObservation,
-        repeatedToolCounts: inout [String: Int]
+        result: ComputerUseExecutionResult
+    ) -> ComputerUseStateDelta {
+        if result.status != .executed {
+            return ComputerUseStateDelta(
+                status: .blocked,
+                summary: result.message,
+                beforeStateID: before.stateID,
+                afterStateID: after.stateID
+            )
+        }
+        if toolCall.tool != .launchApp,
+           !before.bundleID.isEmpty,
+           !after.bundleID.isEmpty,
+           before.bundleID != after.bundleID {
+            return ComputerUseStateDelta(
+                status: .targetLost,
+                summary: "Target app changed from \(before.appName) (\(before.bundleID)) to \(after.appName) (\(after.bundleID)); re-query state before acting again.",
+                beforeStateID: before.stateID,
+                afterStateID: after.stateID
+            )
+        }
+
+        let beforeSignature = observationSignature(before)
+        let afterSignature = observationSignature(after)
+        let status: ComputerUseVerificationStatus = beforeSignature == afterSignature ? .unchanged : .changed
+        let summary: String
+        if status == .changed {
+            summary = "Observed UI state changed after \(toolCall.summary)."
+        } else if toolCall.tool == .typeText || toolCall.tool == .pasteText || toolCall.tool == .setValue {
+            summary = "\(toolCall.summary) executed but no focused value, selected text, or visible AX text change was observed; refocus the editable target or use a different insertion primitive."
+        } else {
+            summary = "\(toolCall.summary) executed but no relevant UI change was observed; choose a different strategy."
+        }
+        return ComputerUseStateDelta(
+            status: status,
+            summary: summary,
+            beforeStateID: before.stateID,
+            afterStateID: after.stateID
+        )
+    }
+
+    private func verifiedOutcomeMessage(base: String, delta: ComputerUseStateDelta?) -> String {
+        guard let delta else { return base }
+        return "\(base). Verification: \(delta.summary)"
+    }
+
+    private func observationToolFeedback(
+        before: ComputerUseObservation,
+        after: ComputerUseObservation,
+        toolCall: ComputerUseToolCall,
+        result: ComputerUseExecutionResult,
+        counts: inout [String: Int]
+    ) -> (message: String, blocked: String?) {
+        let base = recoverableFallbackMessage(for: toolCall, result: result) ?? result.message
+        let key = repeatedActionKey(toolCall)
+        guard observationSignature(before) == observationSignature(after) else {
+            counts.removeValue(forKey: key)
+            return (
+                "\(base). Captured fresh state; continue from the visible AX/screenshot context.",
+                nil
+            )
+        }
+
+        let count = (counts[key] ?? 0) + 1
+        counts[key] = count
+        let message = "\(base). State is unchanged after \(toolCall.summary); choose a concrete action now and do not call get_app_state/get_window_state again unless the target app or window changes."
+        guard count >= maxUnchangedObservationLoops else {
+            return (message, nil)
+        }
+        return (
+            message,
+            "CUA stopped repeated \(toolCall.summary) after \(maxUnchangedObservationLoops) unchanged observations with no intervening action. Choose a concrete action instead of observing again."
+        )
+    }
+
+    private func repeatedUnchangedMessage(
+        toolCall: ComputerUseToolCall,
+        delta: ComputerUseStateDelta?,
+        counts: inout [String: Int]
     ) -> String? {
-        guard shouldTrackForRepetition(toolCall.tool) else { return nil }
-        var keyParts: [String] = []
-        keyParts.append(toolCall.tool.rawValue)
-        keyParts.append(toolCall.elementID ?? "")
-        keyParts.append(toolCall.elementIndex.map(String.init) ?? "")
-        keyParts.append(toolCall.appName ?? "")
-        keyParts.append(toolCall.canonicalBundleID)
-        keyParts.append(toolCall.label ?? "")
-        keyParts.append(toolCall.key ?? "")
-        keyParts.append(toolCall.text ?? "")
-        keyParts.append(toolCall.value ?? "")
-        keyParts.append(toolCall.url ?? "")
-        keyParts.append(toolCall.direction?.rawValue ?? "")
-        keyParts.append(observationSignature(observation))
-        let key = keyParts.joined(separator: "|")
-        let count = (repeatedToolCounts[key] ?? 0) + 1
-        repeatedToolCounts[key] = count
-        guard count > 2 else { return nil }
-        return "CUA stopped repeated \(toolCall.summary) after two unchanged attempts."
+        guard shouldTrackForRepetition(toolCall.tool), let delta else { return nil }
+        let key = repeatedActionKey(toolCall)
+        guard delta.status == .unchanged else {
+            if delta.status == .changed {
+                counts.removeAll()
+            } else {
+                counts.removeValue(forKey: key)
+            }
+            return nil
+        }
+        let count = (counts[key] ?? 0) + 1
+        counts[key] = count
+        guard count >= 2 else { return nil }
+        return "CUA stopped repeated \(toolCall.summary) after two unchanged attempts: no relevant UI change was observed. Choose a different strategy after running get_app_state."
+    }
+
+    private func repeatedActionKey(_ toolCall: ComputerUseToolCall) -> String {
+        let parts: [String] = [
+            toolCall.tool.rawValue,
+            toolCall.elementID ?? "",
+            toolCall.elementIndex.map(String.init) ?? "",
+            toolCall.appName ?? "",
+            toolCall.canonicalBundleID,
+            toolCall.label ?? "",
+            toolCall.actionName ?? "",
+            toolCall.key ?? "",
+            toolCall.text ?? "",
+            toolCall.value ?? "",
+            toolCall.url ?? "",
+            toolCall.direction?.rawValue ?? "",
+            toolCall.screenshotID ?? "",
+            toolCall.x.map { String($0) } ?? "",
+            toolCall.y.map { String($0) } ?? "",
+        ]
+        return parts.joined(separator: "|")
+    }
+
+    private func finishIndicatesFailure(_ reason: String) -> Bool {
+        let lowered = reason.lowercased()
+        let failurePatterns = [
+            #"^\s*(blocked|failed|unsupported|incomplete|not completed?)\s*[.!]?\s*$"#,
+            #"\b(requires|needs)\s+confirmation\b"#,
+            #"\b(task|request|command|workflow)\s+(is\s+)?(blocked|incomplete|not completed?|failed|unsupported)\b"#,
+            #"\b(cannot|can't|could not|unable to|was not able to)\s+(complete|finish|perform|do|continue|proceed|access|open|click|type|paste|navigate|find)\b"#,
+            #"\b(did not|didn't)\s+(complete|finish|perform|send|post|open|click|type|paste|navigate|find)\b"#,
+            #"\b(permission|permissions)\s+(required|needed|denied|missing|not granted)\b"#,
+            #"\b(not authorized|not allowed|access denied)\b"#,
+            #"\bfailed to\s+(complete|finish|perform|open|click|type|paste|navigate|send|post)\b"#,
+        ]
+        return failurePatterns.contains { pattern in
+            lowered.range(of: pattern, options: .regularExpression) != nil
+        }
     }
 
     private func shouldTrackForRepetition(_ tool: ComputerUseToolName) -> Bool {
         switch tool {
-        case .moveCursor, .click, .drag, .pressKey, .hotkey, .typeText, .pasteText, .setValue, .scroll, .navigateURL, .activateBrowserTab, .getWindowState:
+        case .moveCursor, .click, .clickElement, .clickPoint, .performSecondaryAction, .drag, .pressKey, .hotkey, .typeText, .pasteText, .setValue, .scroll, .navigateURL, .navigateActiveBrowserTab, .openNewBrowserTab, .activateBrowserTab:
             return true
-        case .listApps, .launchApp, .listWindows, .listBrowserTabs, .pageGetText, .pageQueryDOM, .finish, .fail:
+        case .listApps, .launchApp, .listWindows, .getAppState, .getWindowState, .listBrowserTabs, .pageGetText, .pageQueryDOM, .finish, .fail:
             return false
         }
     }
@@ -341,7 +572,7 @@ final class ComputerUsePlannerRuntime {
             return ComputerUseObservationTarget(appName: appName, bundleID: nil)
         }
         switch toolCall.tool {
-        case .moveCursor, .click, .setValue, .typeText, .pasteText, .pressKey, .hotkey, .scroll, .drag:
+        case .moveCursor, .click, .clickElement, .clickPoint, .performSecondaryAction, .setValue, .typeText, .pasteText, .pressKey, .hotkey, .scroll, .drag:
             return fallback
         default:
             return nil
@@ -368,6 +599,8 @@ final class ComputerUsePlannerRuntime {
             observation.appName,
             observation.windowTitle,
             "\(observation.elements.count)",
+            observation.focusedElement?.normalizedText ?? "",
+            observation.selectedText ?? "",
             screenshot,
             elementSignature,
         ].joined(separator: "|")
@@ -400,15 +633,19 @@ final class ComputerUsePlannerRuntime {
         switch toolCall.tool {
         case .launchApp:
             return result.message.hasPrefix("Opened") ? result.message : "Opened app"
-        case .click:
+        case .click, .clickElement, .clickPoint:
             return result.message.hasPrefix("Clicked") ? result.message : "Clicked"
+        case .performSecondaryAction:
+            return "Performed action"
         case .moveCursor:
             return "Moving cursor"
         case .typeText:
             return "Typed text"
         case .pasteText:
             return "Pasted text"
-        case .navigateURL:
+        case .openNewBrowserTab:
+            return "Opened new tab"
+        case .navigateURL, .navigateActiveBrowserTab:
             return "Navigated"
         case .pressKey, .hotkey:
             return "Pressed key"
@@ -430,8 +667,10 @@ final class ComputerUsePlannerRuntime {
         case .launchApp:
             let target = toolCall.appName?.trimmingCharacters(in: .whitespacesAndNewlines)
             return "Opening \(target?.isEmpty == false ? target! : "app")"
-        case .click:
+        case .click, .clickElement, .clickPoint:
             return "Clicking"
+        case .performSecondaryAction:
+            return "Performing action"
         case .moveCursor:
             return toolCall.label?.isEmpty == false ? "Moving to \(toolCall.label!)" : "Moving cursor"
         case .setValue:
@@ -446,13 +685,15 @@ final class ComputerUsePlannerRuntime {
             return "Scrolling"
         case .drag:
             return "Dragging"
-        case .navigateURL:
+        case .openNewBrowserTab:
+            return "Opening new tab"
+        case .navigateURL, .navigateActiveBrowserTab:
             return "Navigating"
         case .activateBrowserTab:
             return "Switching tab"
         case .listApps, .listWindows, .listBrowserTabs, .pageGetText, .pageQueryDOM:
             return "Reading"
-        case .getWindowState:
+        case .getAppState, .getWindowState:
             return "Observing"
         case .finish:
             return "Done"
@@ -505,7 +746,7 @@ final class ComputerUsePlannerRuntime {
                 return true
             case .backendFailed(let statusCode, _):
                 return statusCode == 408 || statusCode == 429 || statusCode >= 500
-            case .notAuthenticated, .invalidResponse:
+            case .notAuthenticated, .invalidResponse, .invalidToolCall:
                 return false
             }
         }
@@ -523,17 +764,17 @@ final class ComputerUsePlannerRuntime {
         guard result.status == .failed || result.status == .unsupported else { return nil }
         let message = result.message.trimmingCharacters(in: .whitespacesAndNewlines)
         if browserToolCanFallBackToScreen(toolCall.tool), isBrowserAutomationPermissionFailure(message) {
-            return "\(message). Continue with get_window_state plus AX/screenshot tools: click, paste_text/type_text, press_key/hotkey, and scroll. Do not retry browser page tools unless the user grants Chrome Apple Events JavaScript permission."
+            return "\(message). Continue with get_app_state plus AX/screenshot tools: click_element/click_point, paste_text/type_text, press_key/hotkey, and scroll. Do not retry browser page tools unless the user grants Chrome Apple Events JavaScript permission."
         }
         if (toolCall.tool == .typeText || toolCall.tool == .pasteText), isTextFocusFailure(message) {
-            return "\(message). Continue with get_window_state and focus an editable target using click or set_value before retrying text entry. Prefer paste_text for Apple Notes and native rich-text editors. Do not repeat text entry until the focused target changes."
+            return "\(message). Continue with get_app_state and focus an editable target using click_element or set_value before retrying text entry. Prefer paste_text for Apple Notes and native rich-text editors. Do not repeat text entry until the focused target changes."
         }
         return nil
     }
 
     private func browserToolCanFallBackToScreen(_ tool: ComputerUseToolName) -> Bool {
         switch tool {
-        case .listBrowserTabs, .activateBrowserTab, .navigateURL, .pageGetText, .pageQueryDOM:
+        case .listBrowserTabs, .activateBrowserTab, .openNewBrowserTab, .navigateURL, .navigateActiveBrowserTab, .pageGetText, .pageQueryDOM:
             return true
         default:
             return false

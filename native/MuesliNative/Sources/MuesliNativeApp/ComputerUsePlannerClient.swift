@@ -3,6 +3,7 @@ import Foundation
 enum ComputerUsePlannerError: LocalizedError, Equatable {
     case notAuthenticated
     case invalidResponse(String)
+    case invalidToolCall(name: String, arguments: String, message: String)
     case backendFailed(statusCode: Int, message: String)
     case requestFailed(String)
 
@@ -12,6 +13,8 @@ enum ComputerUsePlannerError: LocalizedError, Equatable {
             return "Connect ChatGPT to use model-driven computer use."
         case .invalidResponse(let message):
             return "CUA planner returned an invalid tool call. \(message)"
+        case .invalidToolCall(let name, let arguments, let message):
+            return "CUA planner returned an invalid tool call. \(message) Raw native tool call: \(name) \(String(arguments.prefix(800)))"
         case .backendFailed(let statusCode, let message):
             return "CUA planner failed with status \(statusCode). \(message)"
         case .requestFailed(let message):
@@ -29,27 +32,29 @@ enum ComputerUsePlannerClient {
     You are Muesli's computer-use planner. You do not execute actions. You must choose exactly one native tool call from the provided tool list.
 
     Rules:
-    - Only use element_index or element_id values present in latest_window_state. Element references expire after each new get_window_state or refreshed state.
+    - Only use element_index or element_id values present in latest_window_state. Element references expire after each new get_app_state/get_window_state or refreshed state.
     - Never invent AppleScript, shell commands, code, URLs, or tools.
     - For app launch/navigation, use launch_app with the requested app name or app bundle id. Do not substitute another app because it is frontmost, visible, or present in examples.
-    - After launch_app, Muesli will refresh the requested app's state automatically. If the next state is not the requested app, call get_window_state for that app before using fail.
-    - Prefer get_window_state when the current state is insufficient or appears to be for the wrong app.
-    - Prefer element-targeted click/set_value over coordinate clicks when a matching element exists.
+    - After launch_app, Muesli will refresh the requested app's state automatically. If the next state is not the requested app, call get_app_state for that app before using fail.
+    - Prefer get_app_state when the current state is insufficient or appears to be for the wrong app. get_window_state is a compatibility alias.
+    - Prefer click_element/set_value over coordinate clicks when a matching element exists.
     - For coordinate click/drag, use screenshot pixel coordinates from the current screenshot, not global screen coordinates.
     - Include screenshot_id from latest_window_state when using screenshot-coordinate tools.
-    - For click, choose exactly one addressing mode: either element_index/element_id OR x/y+screenshot_id. Never include both an element target and coordinates in the same click.
-    - For YouTube, Hacker News, and browser tasks in Chrome, prefer list_browser_tabs, activate_browser_tab, navigate_url, page_get_text, and page_query_dom before AX clicking when those tools are available.
-    - Browser page tools are optional shortcuts, not the only way to use a page. If page_get_text or page_query_dom fails, is blocked by Chrome Apple Events JavaScript permission, or returns insufficient content, continue with get_window_state plus AX/screenshot actions such as click, paste_text/type_text, press_key/hotkey, and scroll.
+    - Use click_element for AX candidates and click_point for screenshot coordinates. Never use legacy click unless it appears in an old prior trace.
+    - For new or separate browser tasks, prefer open_new_browser_tab and then navigate_active_browser_tab. Use list_browser_tabs and activate_browser_tab only when the user asks to continue, find, or reuse an existing tab.
+    - Browser DOM/page tools are optional accelerators. Use page_get_text/page_query_dom when useful, but do not depend on them as the control path.
+    - If page_get_text, page_query_dom, or list_browser_tabs fails, is blocked by Chrome Apple Events JavaScript permission, returns insufficient content, or returns no tabs, immediately continue with get_app_state plus AX/screenshot actions such as click_element/click_point, paste_text/type_text, press_key/hotkey, and scroll.
     - For text entry, prefer app-scoped calls: include app_name/app_bundle_id, and include element_index/element_id when an editable target is visible in the latest state.
     - type_text sends literal keyboard input after Muesli activates the requested app and verifies a focused editable target. Use it for normal typing into focused text fields.
     - For Apple Notes and native rich-text editors, first focus the editable note body/title, then prefer paste_text for multi-word text. Use type_text only for short direct key-event text entry when paste_text is inappropriate.
     - Do not use fail only because a browser DOM/page tool failed. Use fail only after trying the available AX/screenshot fallback path or when the requested task is unsafe or truly unsupported.
-    - After get_window_state returns a fresh state, act on the visible AX/screenshot evidence. Do not call get_window_state repeatedly unless a tool result indicates the app/window changed or a previous action needs verification.
-    - If browser page tools are blocked, use the screenshot and AX candidates to click, type, press keys, or scroll; do not loop on observation waiting for DOM access to appear.
-    - navigate_url may only use http or https URLs. Never output javascript:, file:, data:, shell text, or arbitrary code.
-    - For navigate_url, omit window_index and tab_index unless they came from a recent list_browser_tabs result. After hotkey command+t, call navigate_url without tab_index so Muesli navigates the active new tab.
+    - After get_app_state returns a fresh state, act on the visible AX/screenshot evidence. Do not call get_app_state/get_window_state repeatedly unless a tool result indicates the app/window changed or a previous action needs verification.
+    - Every mutating action result includes verification. If the prior outcome says no relevant UI change was observed, choose a different strategy such as a different target, different text primitive, keyboard navigation, or get_app_state before retrying.
+    - If browser page tools are blocked, use the screenshot and AX candidates to click_element/click_point, type, press keys, or scroll; do not loop on observation waiting for DOM access to appear.
+    - navigate_url and navigate_active_browser_tab may only use http or https URLs. Never output javascript:, file:, data:, shell text, or arbitrary code.
+    - For navigate_url, include window_index/tab_index only when they came from a recent list_browser_tabs result. After open_new_browser_tab, call navigate_active_browser_tab.
     - max_steps is a high safety ceiling, not a target. Use as few steps as needed.
-    - Use finish only when the user's command is complete. Use fail(reason) when blocked, unsafe, unsupported, or incomplete.
+    - Use finish only when the user's command is complete and successful. If the task could not be completed, is blocked, is unsafe, or needs missing permission/confirmation, use fail(reason); never put blocked or incomplete language in finish.
     - Risky actions are locally blocked by Muesli; do not try to bypass confirmation.
     """
     }
@@ -167,8 +172,10 @@ enum ComputerUsePlannerClient {
                     arguments: nativeToolCall.arguments
                 )
             } catch {
-                throw ComputerUsePlannerError.invalidResponse(
-                    "\(error.localizedDescription) Raw native tool call: \(nativeToolCall.name) \(String(nativeToolCall.arguments.prefix(800)))"
+                throw ComputerUsePlannerError.invalidToolCall(
+                    name: nativeToolCall.name,
+                    arguments: nativeToolCall.arguments,
+                    message: error.localizedDescription
                 )
             }
         }

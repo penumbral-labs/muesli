@@ -162,7 +162,7 @@ struct ShortcutsView: View {
                     Text("Hands-Free Mode")
                         .font(MuesliTheme.headline())
                         .foregroundStyle(MuesliTheme.textPrimary)
-                    Text("Double-tap to start, tap again to stop")
+                    Text("Double-tap dictation or CUA to start, tap again to stop")
                         .font(MuesliTheme.caption())
                         .foregroundStyle(MuesliTheme.textSecondary)
                 }

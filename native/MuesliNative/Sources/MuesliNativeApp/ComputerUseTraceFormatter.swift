@@ -12,7 +12,7 @@ enum ComputerUseTraceFormatter {
             record.rawText,
             "",
             "Final Status",
-            trace.finalStatus,
+            displayFinalStatus(trace.finalStatus),
             "",
             "Final Message",
             trace.finalMessage,
@@ -45,6 +45,23 @@ enum ComputerUseTraceFormatter {
              ("tool_call", "executing"),
              ("model_output", "planned"):
             return nil
+        default:
+            return status
+        }
+    }
+
+    static func displayFinalStatus(_ status: String) -> String {
+        switch status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "done":
+            return "done"
+        case "timed_out", "timedout":
+            return "timed_out"
+        case "failed", "fail":
+            return "failed"
+        case "confirm", "needsconfirmation", "needs_confirmation":
+            return "confirm"
+        case "cancelled", "canceled":
+            return "cancelled"
         default:
             return status
         }

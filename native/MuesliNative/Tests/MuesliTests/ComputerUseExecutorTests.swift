@@ -43,6 +43,32 @@ struct ComputerUseExecutorTests {
         #expect(result.message.contains("Stale or unknown element_index 9"))
     }
 
+    @Test("secondary action rejects stale snapshot")
+    @MainActor
+    func secondaryActionRejectsStaleSnapshot() async {
+        let registry = ComputerUseElementRegistry()
+        let result = await ComputerUseToolExecutor.execute(
+            ComputerUseToolCall(tool: .performSecondaryAction, elementIndex: 9, actionName: "AXShowMenu", label: "More"),
+            registry: registry
+        )
+
+        #expect(result.status == .failed)
+        #expect(result.message.contains("Stale or unknown element_index 9"))
+    }
+
+    @Test("element scroll rejects stale snapshot")
+    @MainActor
+    func elementScrollRejectsStaleSnapshot() async {
+        let registry = ComputerUseElementRegistry()
+        let result = await ComputerUseToolExecutor.execute(
+            ComputerUseToolCall(tool: .scroll, elementIndex: 9, direction: .down),
+            registry: registry
+        )
+
+        #expect(result.status == .failed)
+        #expect(result.message.contains("Stale or unknown element_index 9"))
+    }
+
     @Test("parses browser tab Apple Events output")
     func parsesBrowserTabs() {
         let tabs = ComputerUseBrowserAutomation.parseTabs(
@@ -137,6 +163,22 @@ struct ComputerUseExecutorTests {
         #expect(script.contains("set targetTab to tab 16 of targetWindow"))
         #expect(!script.contains("tab 16 of window 1"))
         #expect(script.contains("used active tab fallback"))
+    }
+
+    @Test("opens new browser tab with mocked Apple Events adapter")
+    func opensNewBrowserTab() async {
+        var capturedScript = ""
+        ComputerUseBrowserAutomation.runAppleScriptForTests = { script in
+            capturedScript = script
+            return ""
+        }
+        defer { ComputerUseBrowserAutomation.runAppleScriptForTests = nil }
+
+        let result = await ComputerUseBrowserAutomation.openNewTab(appBundleID: "com.google.Chrome")
+
+        #expect(result.status == .executed)
+        #expect(capturedScript.contains("make new tab"))
+        #expect(capturedScript.contains("active tab index of front window"))
     }
 
     @Test("page text and DOM query use read-only JavaScript")

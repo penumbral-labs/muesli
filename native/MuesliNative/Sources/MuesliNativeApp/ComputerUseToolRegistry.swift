@@ -81,7 +81,11 @@ enum ComputerUseToolRegistry {
         definition(.listWindows, "List visible windows, optionally scoped by app_bundle_id.", required: [], properties: [
             "app_bundle_id": .string("Optional bundle identifier to scope windows."),
         ], risk: "safe read-only"),
-        definition(.getWindowState, "Capture the active window state: screenshot metadata, screenshot image for the planner, AX candidates, cursor, app, and window metadata.", required: [], properties: [
+        definition(.getAppState, "Capture fresh app/window state: state_id, app/window identity, screenshot metadata/image for the planner, AX candidates, focused element, selected text, cursor, and app hints.", required: [], properties: [
+            "app_bundle_id": .string("Optional app bundle to activate before capture."),
+            "window_id": .integer("Optional window id hint."),
+        ], risk: "safe read-only"),
+        definition(.getWindowState, "Compatibility alias for get_app_state. Prefer get_app_state for new planner calls.", required: [], properties: [
             "app_bundle_id": .string("Optional app bundle to activate before capture."),
             "window_id": .integer("Optional window id hint."),
         ], risk: "safe read-only"),
@@ -91,16 +95,27 @@ enum ComputerUseToolRegistry {
             "y": .number("Screenshot pixel y coordinate."),
             "label": .string("Human target label for live feedback and trace."),
         ], risk: "visual feedback only"),
-        definition(.click, "Click exactly one target: either an AX element from the latest get_window_state by element_index/element_id, or a screenshot coordinate when no AX target exists. Do not send both an element target and x/y.", required: [], properties: [
-            "element_index": .integer("Temporary element index from the latest state. Element-indexed clicks are scoped to the current snapshot and expire after a new get_window_state."),
-            "element_id": .string("Temporary element id from the latest state, for example e12. Use only when x/y are absent."),
-            "screenshot_id": .string("Required current screenshot id when using x/y coordinates."),
-            "x": .number("Screenshot pixel x coordinate. Use only with y and screenshot_id, and only when element_index/element_id are absent."),
-            "y": .number("Screenshot pixel y coordinate. Use only with x and screenshot_id, and only when element_index/element_id are absent."),
+        definition(.clickElement, "Click an AX element from the latest get_app_state by element_index or element_id. Use this whenever a matching AX candidate exists.", required: [], properties: [
+            "element_index": .integer("Temporary element index from the latest state."),
+            "element_id": .string("Temporary element id from the latest state, for example e12."),
             "clicks": .integer("1 for single click, 2 for double click."),
             "button": .string("left or right."),
             "label": .string("Human target label for trace and safety."),
-        ], risk: "rejects mixed element/coordinate addressing; confirmation for risky labels or unknown coordinate targets"),
+        ], risk: "confirmation for risky labels"),
+        definition(.clickPoint, "Click a screenshot coordinate when no AX target exists. Requires screenshot_id plus x/y from the latest state.", required: ["screenshot_id", "x", "y"], properties: [
+            "screenshot_id": .string("Current screenshot id."),
+            "x": .number("Screenshot pixel x coordinate."),
+            "y": .number("Screenshot pixel y coordinate."),
+            "clicks": .integer("1 for single click, 2 for double click."),
+            "button": .string("left or right."),
+            "label": .string("Human target label for trace and safety."),
+        ], risk: "confirmation for risky labels or unknown coordinate targets"),
+        definition(.performSecondaryAction, "Perform an advertised AX action other than AXPress on an element from the latest get_app_state. Use only action_name values present on that element's action_names.", required: ["action_name"], properties: [
+            "element_index": .integer("Temporary element index from the latest state."),
+            "element_id": .string("Temporary element id from the latest state."),
+            "action_name": .string("Advertised AX action name, for example AXShowMenu, AXConfirm, AXCancel, AXIncrement, AXDecrement, or AXScrollDownByPage."),
+            "label": .string("Human target label for trace and safety."),
+        ], risk: "only invokes advertised AX actions; confirmation for risky labels"),
         definition(.setValue, "Set an AX element value by element_index/element_id from the latest state.", required: ["value"], properties: [
             "element_index": .integer("Temporary element index from the latest state."),
             "element_id": .string("Temporary element id from the latest state."),
@@ -131,7 +146,9 @@ enum ComputerUseToolRegistry {
             "key": .string("Key name."),
             "modifiers": .array("Required or optional modifiers.", item: .string("Modifier", enumValues: ComputerUseKeyModifier.allCases.map(\.rawValue))),
         ], risk: "confirmation for Cmd-Q and Cmd-W"),
-        definition(.scroll, "Scroll the current view.", required: ["direction"], properties: [
+        definition(.scroll, "Scroll the current view or a scrollable AX element from the latest state.", required: ["direction"], properties: [
+            "element_index": .integer("Optional temporary scrollable element index from the latest state."),
+            "element_id": .string("Optional temporary scrollable element id from the latest state."),
             "direction": .string("Scroll direction.", enumValues: ["up", "down", "left", "right"]),
             "pages": .number("Approximate page count, default 1."),
         ], risk: "safe primitive"),
@@ -151,10 +168,17 @@ enum ComputerUseToolRegistry {
             "window_index": .integer("1-based browser window index."),
             "tab_index": .integer("1-based tab index in the window."),
         ], risk: "foreground activation allowed"),
+        definition(.openNewBrowserTab, "Open a new tab in a supported browser and make it active. Prefer this for new or separate web tasks.", required: ["app_bundle_id"], properties: [
+            "app_bundle_id": .string("Browser bundle identifier, currently com.google.Chrome."),
+        ], risk: "foreground activation allowed"),
         definition(.navigateURL, "Navigate the selected browser tab to a safe http/https URL.", required: ["app_bundle_id", "url"], properties: [
             "app_bundle_id": .string("Browser bundle identifier, currently com.google.Chrome."),
             "window_index": .integer("Optional 1-based browser window index."),
             "tab_index": .integer("Optional 1-based tab index."),
+            "url": .string("http or https URL only."),
+        ], risk: "rejects javascript:, file:, data:, shell-like strings, and unsafe URLs"),
+        definition(.navigateActiveBrowserTab, "Navigate the active browser tab to a safe http/https URL without tab indexes. Prefer this immediately after open_new_browser_tab.", required: ["app_bundle_id", "url"], properties: [
+            "app_bundle_id": .string("Browser bundle identifier, currently com.google.Chrome."),
             "url": .string("http or https URL only."),
         ], risk: "rejects javascript:, file:, data:, shell-like strings, and unsafe URLs"),
         definition(.pageGetText, "Read visible/body text from a Chrome tab using read-only Apple Events JavaScript.", required: ["app_bundle_id"], properties: [

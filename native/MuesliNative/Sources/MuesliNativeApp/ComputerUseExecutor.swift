@@ -94,15 +94,17 @@ enum ComputerUseToolExecutor {
             return await openApp(named: toolCall.appName?.isEmpty == false ? toolCall.appName! : toolCall.canonicalBundleID)
         case .listWindows:
             return listWindows(appBundleID: toolCall.canonicalBundleID)
-        case .getWindowState:
+        case .getAppState, .getWindowState:
             if !toolCall.canonicalBundleID.isEmpty || toolCall.appName?.isEmpty == false {
                 return await focusApp(named: toolCall.appName?.isEmpty == false ? toolCall.appName! : toolCall.canonicalBundleID)
             }
             return .executed("Captured window state")
         case .moveCursor:
             return moveCursor(toolCall, registry: registry)
-        case .click:
+        case .click, .clickElement, .clickPoint:
             return click(toolCall, registry: registry)
+        case .performSecondaryAction:
+            return performSecondaryAction(toolCall, registry: registry)
         case .setValue:
             return setValue(toolCall, registry: registry)
         case .drag:
@@ -117,7 +119,7 @@ enum ComputerUseToolExecutor {
         case .pasteText:
             return await enterText(toolCall, registry: registry, mode: .paste)
         case .scroll:
-            return scroll(direction: toolCall.direction ?? .down, pages: toolCall.pages ?? 1)
+            return scroll(toolCall, registry: registry)
         case .listBrowserTabs:
             return await ComputerUseBrowserAutomation.listTabs(appBundleID: toolCall.canonicalBundleID)
         case .activateBrowserTab:
@@ -126,11 +128,20 @@ enum ComputerUseToolExecutor {
                 windowIndex: toolCall.windowIndex ?? 1,
                 tabIndex: toolCall.tabIndex ?? 1
             )
+        case .openNewBrowserTab:
+            return await ComputerUseBrowserAutomation.openNewTab(appBundleID: toolCall.canonicalBundleID)
         case .navigateURL:
             return await ComputerUseBrowserAutomation.navigate(
                 appBundleID: toolCall.canonicalBundleID,
                 windowIndex: toolCall.windowIndex,
                 tabIndex: toolCall.tabIndex,
+                url: toolCall.url ?? ""
+            )
+        case .navigateActiveBrowserTab:
+            return await ComputerUseBrowserAutomation.navigate(
+                appBundleID: toolCall.canonicalBundleID,
+                windowIndex: nil,
+                tabIndex: nil,
                 url: toolCall.url ?? ""
             )
         case .pageGetText:
@@ -278,6 +289,20 @@ enum ComputerUseToolExecutor {
         return .executed("Pressed key")
     }
 
+    private static func scroll(_ toolCall: ComputerUseToolCall, registry: ComputerUseElementRegistry?) -> ComputerUseExecutionResult {
+        let direction = toolCall.direction ?? .down
+        let pages = toolCall.pages ?? 1
+        if let elementResult = elementTarget(toolCall, registry: registry) {
+            switch elementResult {
+            case .failure(let message):
+                return .failed(message)
+            case .success(let element):
+                return scrollElement(element, direction: direction, pages: pages, label: toolCall.label)
+            }
+        }
+        return scroll(direction: direction, pages: pages)
+    }
+
     private static func scroll(direction: ComputerUseScrollDirection, pages: Double) -> ComputerUseExecutionResult {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             return .failed("Could not create scroll event")
@@ -297,6 +322,43 @@ enum ComputerUseToolExecutor {
         return .executed("Scrolled \(direction.rawValue)")
     }
 
+    private static func scrollElement(
+        _ element: AXUIElement,
+        direction: ComputerUseScrollDirection,
+        pages: Double,
+        label: String?
+    ) -> ComputerUseExecutionResult {
+        let action = scrollActionName(direction: direction)
+        let advertisedActions = actionNames(of: element) ?? []
+        guard advertisedActions.contains(action) else {
+            let actions = advertisedActions.isEmpty ? "none" : advertisedActions.joined(separator: ", ")
+            return .unsupported("Element does not advertise \(action) for element-scoped scroll (actions: \(actions)).")
+        }
+        let count = max(1, min(8, Int(pages.rounded(.up))))
+        for _ in 0..<count {
+            guard AXUIElementPerformAction(element, action as CFString) == .success else {
+                return .failed("Could not perform \(action) on scroll target")
+            }
+        }
+        if let rect = rect(of: element) {
+            ComputerUseCursorOverlay.shared.show(at: CGPoint(x: rect.midX, y: rect.midY), label: label)
+        }
+        return .executed("Scrolled element \(direction.rawValue)")
+    }
+
+    private static func scrollActionName(direction: ComputerUseScrollDirection) -> String {
+        switch direction {
+        case .up:
+            return "AXScrollUpByPage"
+        case .down:
+            return "AXScrollDownByPage"
+        case .left:
+            return "AXScrollLeftByPage"
+        case .right:
+            return "AXScrollRightByPage"
+        }
+    }
+
     static func scrollDeltas(direction: ComputerUseScrollDirection, pages: Double) -> (vertical: Int32, horizontal: Int32) {
         let units = Int32(max(1, min(8, pages)) * 8)
         switch direction {
@@ -312,17 +374,13 @@ enum ComputerUseToolExecutor {
     }
 
     private static func click(_ toolCall: ComputerUseToolCall, registry: ComputerUseElementRegistry?) -> ComputerUseExecutionResult {
-        if let index = toolCall.elementIndex {
-            guard let element = registry?.element(for: index) else {
-                return .failed("Stale or unknown element_index \(index). Run get_window_state again and use an element from the fresh snapshot.")
+        if toolCall.tool != .clickPoint, let elementResult = elementTarget(toolCall, registry: registry) {
+            switch elementResult {
+            case .failure(let message):
+                return .failed(message)
+            case .success(let element):
+                return clickElement(element, fallbackLabel: toolCall.label ?? elementTargetLabel(toolCall))
             }
-            return clickElement(element, fallbackLabel: toolCall.label ?? "e\(index)")
-        }
-        if let elementID = toolCall.elementID, !elementID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            guard let element = registry?.element(for: elementID) else {
-                return .failed("Stale or unknown element_id \(elementID). Run get_window_state again and use an element from the fresh snapshot.")
-            }
-            return clickElement(element, fallbackLabel: toolCall.label ?? elementID)
         }
         if toolCall.x != nil, toolCall.y != nil {
             return clickPoint(toolCall, registry: registry)
@@ -330,23 +388,51 @@ enum ComputerUseToolExecutor {
         return .needsConfirmation("Confirm: unknown click target")
     }
 
-    private static func setValue(_ toolCall: ComputerUseToolCall, registry: ComputerUseElementRegistry?) -> ComputerUseExecutionResult {
-        let element: AXUIElement?
-        if let index = toolCall.elementIndex {
-            guard let resolved = registry?.element(for: index) else {
-                return .failed("Stale or unknown element_index \(index). Run get_window_state again and use an element from the fresh snapshot.")
-            }
-            element = resolved
-        } else if let elementID = toolCall.elementID {
-            guard let resolved = registry?.element(for: elementID) else {
-                return .failed("Stale or unknown element_id \(elementID). Run get_window_state again and use an element from the fresh snapshot.")
-            }
-            element = resolved
-        } else {
-            element = nil
+    private static func performSecondaryAction(
+        _ toolCall: ComputerUseToolCall,
+        registry: ComputerUseElementRegistry?
+    ) -> ComputerUseExecutionResult {
+        guard let elementResult = elementTarget(toolCall, registry: registry) else {
+            return .failed("perform_secondary_action requires element_index or element_id")
         }
-        guard let element else {
+        let element: AXUIElement
+        switch elementResult {
+        case .failure(let message):
+            return .failed(message)
+        case .success(let resolved):
+            element = resolved
+        }
+        let actionName = toolCall.actionName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !actionName.isEmpty else {
+            return .failed("perform_secondary_action requires action_name")
+        }
+        guard actionName != (kAXPressAction as String) else {
+            return .unsupported("Use click for AXPress; perform_secondary_action only invokes non-press advertised actions.")
+        }
+        let advertisedActions = actionNames(of: element) ?? []
+        guard advertisedActions.contains(actionName) else {
+            let actions = advertisedActions.isEmpty ? "none" : advertisedActions.joined(separator: ", ")
+            return .unsupported("Element does not advertise \(actionName) (actions: \(actions)). Run get_app_state again if the target changed.")
+        }
+        if let rect = rect(of: element) {
+            ComputerUseCursorOverlay.shared.show(at: CGPoint(x: rect.midX, y: rect.midY), label: toolCall.label)
+        }
+        guard AXUIElementPerformAction(element, actionName as CFString) == .success else {
+            return .failed("Could not perform \(actionName) on \(elementTargetLabel(toolCall))")
+        }
+        return .executed("Performed \(actionName) on \(elementTargetLabel(toolCall))")
+    }
+
+    private static func setValue(_ toolCall: ComputerUseToolCall, registry: ComputerUseElementRegistry?) -> ComputerUseExecutionResult {
+        guard let elementResult = elementTarget(toolCall, registry: registry) else {
             return .failed("Stale or unknown element target")
+        }
+        let element: AXUIElement
+        switch elementResult {
+        case .failure(let message):
+            return .failed(message)
+        case .success(let resolved):
+            element = resolved
         }
         let value = toolCall.value ?? ""
         let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFTypeRef)
@@ -354,6 +440,38 @@ enum ComputerUseToolExecutor {
             return .executed("Set value")
         }
         return .unsupported("Element does not support set_value")
+    }
+
+    private static func elementTarget(
+        _ toolCall: ComputerUseToolCall,
+        registry: ComputerUseElementRegistry?
+    ) -> ElementTargetResult? {
+        if let index = toolCall.elementIndex {
+            guard let element = registry?.element(for: index) else {
+                return .failure("Stale or unknown element_index \(index). Run get_app_state again and use an element from the fresh snapshot.")
+            }
+            return .success(element)
+        }
+        if let elementID = toolCall.elementID?.trimmingCharacters(in: .whitespacesAndNewlines), !elementID.isEmpty {
+            guard let element = registry?.element(for: elementID) else {
+                return .failure("Stale or unknown element_id \(elementID). Run get_app_state again and use an element from the fresh snapshot.")
+            }
+            return .success(element)
+        }
+        return nil
+    }
+
+    private static func elementTargetLabel(_ toolCall: ComputerUseToolCall) -> String {
+        if let label = toolCall.label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
+            return label
+        }
+        if let index = toolCall.elementIndex {
+            return "e\(index)"
+        }
+        if let elementID = toolCall.elementID?.trimmingCharacters(in: .whitespacesAndNewlines), !elementID.isEmpty {
+            return elementID
+        }
+        return "element"
     }
 
     private enum TextEntryMode {
@@ -443,6 +561,11 @@ enum ComputerUseToolExecutor {
         case cancelled
     }
 
+    private enum ElementTargetResult {
+        case success(AXUIElement)
+        case failure(String)
+    }
+
     private static func prepareTextEntryApp(_ toolCall: ComputerUseToolCall) async -> AppPreparationResult {
         let target = textEntryAppName(toolCall)
         guard !target.isEmpty else {
@@ -476,12 +599,12 @@ enum ComputerUseToolExecutor {
         let element: AXUIElement?
         if let index = toolCall.elementIndex, index > 0 {
             guard let resolved = registry?.element(for: index) else {
-                return .failure("Stale or unknown element_index \(index). Run get_window_state again and use an element from the fresh snapshot.")
+                return .failure("Stale or unknown element_index \(index). Run get_app_state again and use an element from the fresh snapshot.")
             }
             element = resolved
         } else if let elementID = toolCall.elementID, !elementID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard let resolved = registry?.element(for: elementID) else {
-                return .failure("Stale or unknown element_id \(elementID). Run get_window_state again and use an element from the fresh snapshot.")
+                return .failure("Stale or unknown element_id \(elementID). Run get_app_state again and use an element from the fresh snapshot.")
             }
             element = resolved
         } else {

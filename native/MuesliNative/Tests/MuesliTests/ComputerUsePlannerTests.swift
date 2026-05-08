@@ -8,7 +8,8 @@ import Testing
 struct ComputerUseToolRegistryTests {
     @Test("emits schemas and descriptions for every tool")
     func emitsSchemasAndDescriptions() {
-        #expect(ComputerUseToolRegistry.definitions.count == ComputerUseToolName.allCases.count)
+        #expect(ComputerUseToolRegistry.definitions.count == ComputerUseToolName.allCases.count - 1)
+        #expect(ComputerUseToolRegistry.definition(for: .click) == nil)
         for definition in ComputerUseToolRegistry.definitions {
             #expect(!definition.description.isEmpty)
             #expect(definition.schema.type == "object")
@@ -17,7 +18,14 @@ struct ComputerUseToolRegistryTests {
             #expect(definition.schema.properties["tool"]?.enumValues == [definition.name.rawValue])
         }
         let docs = ComputerUseToolRegistry.promptDocumentation()
+        #expect(docs.contains("Tool: get_app_state"))
         #expect(docs.contains("Tool: get_window_state"))
+        #expect(docs.contains("Tool: click_element"))
+        #expect(docs.contains("Tool: click_point"))
+        #expect(!docs.contains("Tool: click\n"))
+        #expect(docs.contains("Tool: perform_secondary_action"))
+        #expect(docs.contains("Tool: open_new_browser_tab"))
+        #expect(docs.contains("Tool: navigate_active_browser_tab"))
         #expect(docs.contains("Tool: page_query_dom"))
     }
 
@@ -25,8 +33,9 @@ struct ComputerUseToolRegistryTests {
     func emitsNativeToolDefinitions() {
         let tools = ComputerUseToolRegistry.nativeToolDefinitions()
 
-        #expect(tools.count == ComputerUseToolName.allCases.count)
+        #expect(tools.count == ComputerUseToolRegistry.definitions.count)
         #expect(JSONSerialization.isValidJSONObject(tools))
+        #expect(!tools.contains { ($0["name"] as? String) == "click" })
         let launch = tools.first { ($0["name"] as? String) == "launch_app" }
         #expect(launch?["type"] as? String == "function")
         let parameters = launch?["parameters"] as? [String: Any]
@@ -47,14 +56,15 @@ struct ComputerUseToolRegistryTests {
         let instructions = ComputerUsePlannerClient.instructions
 
         #expect(instructions.contains("native tool call"))
-        #expect(instructions.contains("Browser page tools are optional shortcuts"))
+        #expect(instructions.contains("Browser DOM/page tools are optional accelerators"))
         #expect(instructions.contains("Chrome Apple Events JavaScript permission"))
         #expect(instructions.contains("AX/screenshot fallback"))
         #expect(instructions.contains("Do not use fail only because a browser DOM/page tool failed"))
-        #expect(instructions.contains("Do not call get_window_state repeatedly"))
+        #expect(instructions.contains("Do not call get_app_state/get_window_state repeatedly"))
         #expect(instructions.contains("do not loop on observation"))
-        #expect(instructions.contains("After hotkey command+t, call navigate_url without tab_index"))
+        #expect(instructions.contains("After open_new_browser_tab, call navigate_active_browser_tab"))
         #expect(instructions.contains("prefer paste_text for multi-word text"))
+        #expect(instructions.contains("Use finish only when the user's command is complete and successful"))
     }
 }
 
@@ -120,6 +130,25 @@ struct ComputerUsePlannerResponseTests {
         #expect(!response.toolCall.requiresConfirmation)
     }
 
+    @Test("decodes split click tools")
+    func decodesSplitClickTools() throws {
+        let element = try ComputerUsePlannerResponse.decodeNativeToolCall(
+            name: "click_element",
+            arguments: #"{"element_index":12,"label":"Tweet composer"}"#
+        )
+        let point = try ComputerUsePlannerResponse.decodeNativeToolCall(
+            name: "click_point",
+            arguments: #"{"screenshot_id":"s1","x":120,"y":240,"label":"fallback target"}"#
+        )
+
+        #expect(element.toolCall.tool == .clickElement)
+        #expect(element.toolCall.elementIndex == 12)
+        #expect(element.toolCall.x == nil)
+        #expect(point.toolCall.tool == .clickPoint)
+        #expect(point.toolCall.screenshotID == "s1")
+        #expect(point.toolCall.elementIndex == nil)
+    }
+
     @Test("coordinate clicks require screenshot id")
     func coordinateClicksRequireScreenshotID() {
         #expect(throws: Error.self) {
@@ -152,6 +181,22 @@ struct ComputerUsePlannerResponseTests {
         #expect(response.toolCall.y == 871)
         #expect(response.toolCall.screenshotID == "s1778148270271")
         #expect(response.toolCall.summary == "click reply text field on X post at 1050,871")
+    }
+
+    @Test("element click ignores placeholder coordinates without screenshot")
+    func elementClickIgnoresPlaceholderCoordinatesWithoutScreenshot() throws {
+        let response = try ComputerUsePlannerResponse.decodeNativeToolCall(
+            name: "click",
+            arguments: #"{"button":"left","clicks":1,"label":"New tab","y":0,"x":0,"element_id":"e46","element_index":46,"screenshot_id":""}"#
+        )
+
+        #expect(response.toolCall.tool == .click)
+        #expect(response.toolCall.elementIndex == 46)
+        #expect(response.toolCall.elementID == "e46")
+        #expect(response.toolCall.x == nil)
+        #expect(response.toolCall.y == nil)
+        #expect(response.toolCall.screenshotID == nil)
+        #expect(response.toolCall.summary == "click element e46")
     }
 
     @Test("click rejects invalid element index")
@@ -219,6 +264,51 @@ struct ComputerUsePlannerResponseTests {
         #expect(response.toolCall.tool == .pasteText)
         #expect(response.toolCall.elementIndex == 0)
         #expect(response.toolCall.canonicalBundleID == "com.apple.Notes")
+    }
+
+    @Test("decodes get app state compatibility alias")
+    func decodesGetAppStateCompatibilityAlias() throws {
+        let appState = try ComputerUsePlannerResponse.decodeJSON(
+            from: #"{"tool":"get_app_state","app_bundle_id":"com.google.Chrome"}"#
+        )
+        let windowState = try ComputerUsePlannerResponse.decodeJSON(
+            from: #"{"tool":"get_window_state","app_bundle_id":"com.google.Chrome"}"#
+        )
+
+        #expect(appState.toolCall.tool == .getAppState)
+        #expect(windowState.toolCall.tool == .getWindowState)
+        #expect(appState.toolCall.canonicalBundleID == windowState.toolCall.canonicalBundleID)
+    }
+
+    @Test("decodes secondary action and element scroll")
+    func decodesSecondaryActionAndElementScroll() throws {
+        let secondary = try ComputerUsePlannerResponse.decodeJSON(
+            from: #"{"tool":"perform_secondary_action","element_index":3,"action_name":"AXShowMenu","label":"More"}"#
+        )
+        let scroll = try ComputerUsePlannerResponse.decodeJSON(
+            from: #"{"tool":"scroll","element_id":"e7","direction":"down","pages":1}"#
+        )
+
+        #expect(secondary.toolCall.tool == .performSecondaryAction)
+        #expect(secondary.toolCall.actionName == "AXShowMenu")
+        #expect(scroll.toolCall.tool == .scroll)
+        #expect(scroll.toolCall.elementID == "e7")
+    }
+
+    @Test("decodes browser intent tools")
+    func decodesBrowserIntentTools() throws {
+        let newTab = try ComputerUsePlannerResponse.decodeNativeToolCall(
+            name: "open_new_browser_tab",
+            arguments: #"{"app_bundle_id":"com.google.Chrome"}"#
+        )
+        let navigate = try ComputerUsePlannerResponse.decodeNativeToolCall(
+            name: "navigate_active_browser_tab",
+            arguments: #"{"app_bundle_id":"com.google.Chrome","url":"https://twitter.com/compose/tweet"}"#
+        )
+
+        #expect(newTab.toolCall.tool == .openNewBrowserTab)
+        #expect(navigate.toolCall.tool == .navigateActiveBrowserTab)
+        #expect(navigate.toolCall.url == "https://twitter.com/compose/tweet")
     }
 
     @Test("native tool call rejects unsupported fields")
@@ -363,6 +453,13 @@ struct ComputerUseTraceFormatterTests {
         #expect(ComputerUseTraceFormatter.displayStatus(for: planning) == nil)
         #expect(ComputerUseTraceFormatter.displayStatus(for: result) == "executed")
     }
+
+    @Test("formats final CUA status buckets")
+    func formatsFinalStatusBuckets() {
+        #expect(ComputerUseTraceFormatter.displayFinalStatus("done") == "done")
+        #expect(ComputerUseTraceFormatter.displayFinalStatus("timedout") == "timed_out")
+        #expect(ComputerUseTraceFormatter.displayFinalStatus("fail") == "failed")
+    }
 }
 
 @Suite("Computer Use planner runtime")
@@ -399,6 +496,24 @@ struct ComputerUsePlannerRuntimeTests {
 
         #expect(result.status == ComputerUsePlannerRuntimeResult.Status.failed)
         #expect(result.message == "blocked")
+    }
+
+    @Test("timeout produces timed out runtime result")
+    @MainActor
+    func timeoutProducesTimedOutResult() async {
+        let runtime = ComputerUsePlannerRuntime(
+            config: AppConfig(),
+            timeoutSeconds: -1,
+            observe: { _, _, _ in Self.observation() },
+            plan: { _ in ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .finish, reason: "done")) },
+            execute: { _, _ in .executed("unexpected") }
+        )
+
+        let result = await runtime.run(command: "do something")
+
+        #expect(result.status == ComputerUsePlannerRuntimeResult.Status.timedOut)
+        #expect(result.message == "CUA timed out")
+        #expect(result.traceEvents.contains { $0.kind == "timed_out" && $0.status == "timed_out" })
     }
 
     @Test("cancelled executor result produces cancelled runtime result")
@@ -445,8 +560,8 @@ struct ComputerUsePlannerRuntimeTests {
             config: AppConfig(),
             maxSteps: 2,
             observe: { _, _, _ in Self.observation() },
-            plan: { _ in ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .getWindowState)) },
-            execute: { _, _ in .executed("unexpected") }
+            plan: { _ in ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .listApps)) },
+            execute: { _, _ in .executed("Apps") }
         )
 
         let result = await runtime.run(command: "look around")
@@ -483,9 +598,58 @@ struct ComputerUsePlannerRuntimeTests {
         #expect(result.traceEvents.contains { $0.title == "Repeated action stopped" })
     }
 
-    @Test("stops repeated get window state loops")
+    @Test("repeated get window state gives planner feedback before stopping")
     @MainActor
-    func stopsRepeatedGetWindowStateLoops() async {
+    func repeatedGetWindowStateGivesPlannerFeedbackBeforeStopping() async {
+        var executionCount = 0
+        let runtime = ComputerUsePlannerRuntime(
+            config: AppConfig(),
+            observe: { _, _, _ in
+                Self.observation(
+                    appName: "Google Chrome",
+                    bundleID: "com.google.Chrome",
+                    windowTitle: "YouTube",
+                    screenshot: ComputerUseScreenshotObservation(
+                        screenshotID: "s\(executionCount)",
+                        width: 2940,
+                        height: 1800,
+                        windowFrame: ComputerUseRect(x: 0, y: 0, width: 1470, height: 900),
+                        scaleX: 2,
+                        scaleY: 2,
+                        imageDataURL: "data:image/jpeg;base64,abc"
+                    )
+                )
+            },
+            plan: { request in
+                if request.step == 2 {
+                    #expect(request.priorOutcomes.last?.message.contains("State is unchanged after get window state") == true)
+                    #expect(request.priorOutcomes.last?.message.contains("choose a concrete action now") == true)
+                }
+                if request.step <= 2 {
+                    return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(
+                        tool: .getWindowState,
+                        appBundleID: "com.google.Chrome"
+                    ))
+                }
+                #expect(request.priorOutcomes.last?.message.contains("do not call get_app_state/get_window_state again") == true)
+                return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .finish, reason: "done"))
+            },
+            execute: { _, _ in
+                executionCount += 1
+                return .executed("Observed")
+            }
+        )
+
+        let result = await runtime.run(command: "use the visible page")
+
+        #expect(result.status == ComputerUsePlannerRuntimeResult.Status.done)
+        #expect(executionCount == 2)
+        #expect(!result.traceEvents.contains { $0.title == "Repeated action stopped" })
+    }
+
+    @Test("stops observation-only loops after larger budget")
+    @MainActor
+    func stopsObservationOnlyLoopsAfterLargerBudget() async {
         var executionCount = 0
         let runtime = ComputerUsePlannerRuntime(
             config: AppConfig(),
@@ -520,8 +684,8 @@ struct ComputerUsePlannerRuntimeTests {
         let result = await runtime.run(command: "use the visible page")
 
         #expect(result.status == ComputerUsePlannerRuntimeResult.Status.failed)
-        #expect(result.message.contains("repeated get window state after two unchanged attempts"))
-        #expect(executionCount == 2)
+        #expect(result.message.contains("repeated get window state after 4 unchanged observations"))
+        #expect(executionCount == 4)
         #expect(result.traceEvents.contains { $0.title == "Repeated action stopped" })
     }
 
@@ -705,6 +869,150 @@ struct ComputerUsePlannerRuntimeTests {
         #expect(result.traceEvents.contains { $0.body.contains("screenshot s1") })
     }
 
+    @Test("window state carries observation state ids")
+    @MainActor
+    func windowStateCarriesObservationStateIDs() {
+        let observation = Self.observation(stateID: "state-test-1", screenshot: Self.screenshot())
+        let state = ComputerUseWindowState(observation: observation)
+
+        #expect(state.stateID == "state-test-1")
+        #expect(state.observation.stateID == "state-test-1")
+    }
+
+    @Test("mutating action records verification state ids")
+    @MainActor
+    func mutatingActionRecordsVerificationStateIDs() async {
+        var observeCount = 0
+        let runtime = ComputerUsePlannerRuntime(
+            config: AppConfig(),
+            observe: { _, _, _ in
+                observeCount += 1
+                if observeCount == 1 {
+                    return Self.observation(stateID: "state-before", windowTitle: "Before", screenshot: Self.screenshot())
+                }
+                return Self.observation(stateID: "state-after", windowTitle: "After", screenshot: Self.screenshot())
+            },
+            plan: { request in
+                if request.step == 1 {
+                    return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .click, elementID: "e1", label: "Search"))
+                }
+                let outcome = request.priorOutcomes.last
+                #expect(outcome?.verificationStatus == .changed)
+                #expect(outcome?.beforeStateID == "state-before")
+                #expect(outcome?.afterStateID == "state-after")
+                #expect(outcome?.stateDelta?.summary.contains("Observed UI state changed") == true)
+                return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .finish, reason: "done"))
+            },
+            execute: { _, _ in .executed("Clicked") }
+        )
+
+        let result = await runtime.run(command: "click search")
+
+        #expect(result.status == ComputerUsePlannerRuntimeResult.Status.done)
+    }
+
+    @Test("first unchanged action is planner feedback")
+    @MainActor
+    func firstUnchangedActionIsPlannerFeedback() async {
+        let runtime = ComputerUsePlannerRuntime(
+            config: AppConfig(),
+            observe: { _, _, _ in Self.observation(screenshot: Self.screenshot()) },
+            plan: { request in
+                if request.step == 1 {
+                    return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .pasteText, text: "hello"))
+                }
+                let outcome = request.priorOutcomes.last
+                #expect(outcome?.verificationStatus == .unchanged)
+                #expect(outcome?.message.contains("no focused value, selected text, or visible AX text change was observed") == true)
+                return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .finish, reason: "done"))
+            },
+            execute: { _, _ in .executed("Pasted text") }
+        )
+
+        let result = await runtime.run(command: "write hello")
+
+        #expect(result.status == ComputerUsePlannerRuntimeResult.Status.done)
+    }
+
+    @Test("changed action clears previous unchanged action counts")
+    @MainActor
+    func changedActionClearsPreviousUnchangedActionCounts() async {
+        var observeCount = 0
+        let runtime = ComputerUsePlannerRuntime(
+            config: AppConfig(),
+            observe: { _, _, _ in
+                observeCount += 1
+                let title = observeCount <= 2 ? "Before" : "After"
+                return Self.observation(windowTitle: title, screenshot: Self.screenshot())
+            },
+            plan: { request in
+                switch request.step {
+                case 1:
+                    return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .click, elementID: "e1", label: "Action A"))
+                case 2:
+                    #expect(request.priorOutcomes.last?.verificationStatus == .unchanged)
+                    return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .click, elementID: "e2", label: "Action B"))
+                case 3:
+                    #expect(request.priorOutcomes.last?.verificationStatus == .changed)
+                    return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .click, elementID: "e1", label: "Action A"))
+                default:
+                    #expect(request.priorOutcomes.last?.verificationStatus == .unchanged)
+                    return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .finish, reason: "done"))
+                }
+            },
+            execute: { _, _ in .executed("Clicked") }
+        )
+
+        let result = await runtime.run(command: "try alternate actions")
+
+        #expect(result.status == ComputerUsePlannerRuntimeResult.Status.done)
+        #expect(observeCount == 4)
+    }
+
+    @Test("finish with incomplete language becomes failed")
+    @MainActor
+    func finishWithIncompleteLanguageBecomesFailed() async {
+        let runtime = ComputerUsePlannerRuntime(
+            config: AppConfig(),
+            observe: { _, _, _ in Self.observation() },
+            plan: { _ in
+                ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .finish, reason: "Could not complete the task."))
+            },
+            execute: { _, _ in .executed("unexpected") }
+        )
+
+        let result = await runtime.run(command: "do something")
+
+        #expect(result.status == ComputerUsePlannerRuntimeResult.Status.failed)
+        #expect(result.message.contains("attempted to finish with an incomplete or blocked result"))
+    }
+
+    @Test("finish failure heuristic avoids success false positives")
+    @MainActor
+    func finishFailureHeuristicAvoidsSuccessFalsePositives() async {
+        var finishReasons = [
+            "Granted the camera permission.",
+            "The modal did not have a cancel button so I pressed Escape instead; task is complete.",
+        ]
+        let runtime = ComputerUsePlannerRuntime(
+            config: AppConfig(),
+            observe: { _, _, _ in Self.observation() },
+            plan: { _ in
+                ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(
+                    tool: .finish,
+                    reason: finishReasons.removeFirst()
+                ))
+            },
+            execute: { _, _ in .executed("unexpected") }
+        )
+
+        let permissionResult = await runtime.run(command: "grant permission")
+        let didNotResult = await runtime.run(command: "dismiss modal")
+
+        #expect(permissionResult.status == ComputerUsePlannerRuntimeResult.Status.done)
+        #expect(didNotResult.status == ComputerUsePlannerRuntimeResult.Status.done)
+    }
+
     @Test("browser page permission failures continue with screen fallback")
     @MainActor
     func browserPagePermissionFailuresContinueWithScreenFallback() async {
@@ -729,7 +1037,7 @@ struct ComputerUsePlannerRuntimeTests {
                 }
                 #expect(request.priorOutcomes.last?.tool == .pageGetText)
                 #expect(request.priorOutcomes.last?.status == "failed")
-                #expect(request.priorOutcomes.last?.message.contains("Continue with get_window_state plus AX/screenshot tools") == true)
+                #expect(request.priorOutcomes.last?.message.contains("Continue with get_app_state plus AX/screenshot tools") == true)
                 return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .finish, reason: "used screen fallback"))
             },
             execute: { toolCall, _ in
@@ -744,6 +1052,36 @@ struct ComputerUsePlannerRuntimeTests {
         #expect(result.message == "used screen fallback")
         #expect(observeCount == 2)
         #expect(result.traceEvents.contains { $0.title == "Screen fallback" })
+    }
+
+    @Test("invalid tool call is repaired through planner feedback")
+    @MainActor
+    func invalidToolCallIsRepairedThroughPlannerFeedback() async {
+        var planCalls = 0
+        let runtime = ComputerUsePlannerRuntime(
+            config: AppConfig(),
+            observe: { _, _, _ in Self.observation(screenshot: Self.screenshot()) },
+            plan: { request in
+                planCalls += 1
+                if planCalls == 1 {
+                    throw ComputerUsePlannerError.invalidToolCall(
+                        name: "click_point",
+                        arguments: #"{"x":0,"y":0}"#,
+                        message: "click_point requires screenshot_id"
+                    )
+                }
+                #expect(request.priorOutcomes.last?.status == "invalid_schema")
+                #expect(request.priorOutcomes.last?.message.contains("Choose exactly one valid tool") == true)
+                return ComputerUsePlannerResponse(toolCall: ComputerUseToolCall(tool: .finish, reason: "done"))
+            },
+            execute: { _, _ in .executed("unexpected") }
+        )
+
+        let result = await runtime.run(command: "click something")
+
+        #expect(result.status == ComputerUsePlannerRuntimeResult.Status.done)
+        #expect(planCalls == 2)
+        #expect(result.traceEvents.contains { $0.title == "Planner schema repair" })
     }
 
     @Test("type text focus failures continue with focus fallback")
@@ -906,12 +1244,14 @@ struct ComputerUsePlannerRuntimeTests {
     }
 
     static func observation(
+        stateID: String = ComputerUseObservation.newStateID(),
         appName: String = "Test",
         bundleID: String = "com.example.Test",
         windowTitle: String = "Window",
         screenshot: ComputerUseScreenshotObservation? = nil
     ) -> ComputerUseObservation {
         ComputerUseObservation(
+            stateID: stateID,
             appName: appName,
             bundleID: bundleID,
             windowTitle: windowTitle,

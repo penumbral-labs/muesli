@@ -34,6 +34,8 @@ struct ComputerUseElementCandidate: Codable, Equatable {
     let enabled: Bool
     let frame: ComputerUseRect?
     let path: String
+    let actionNames: [String]
+    let processID: Int?
 
     enum CodingKeys: String, CodingKey {
         case elementID = "element_id"
@@ -46,6 +48,36 @@ struct ComputerUseElementCandidate: Codable, Equatable {
         case enabled
         case frame
         case path
+        case actionNames = "action_names"
+        case processID = "process_id"
+    }
+
+    init(
+        elementID: String,
+        elementIndex: Int,
+        role: String,
+        title: String,
+        label: String,
+        value: String,
+        help: String,
+        enabled: Bool,
+        frame: ComputerUseRect?,
+        path: String,
+        actionNames: [String] = [],
+        processID: Int? = nil
+    ) {
+        self.elementID = elementID
+        self.elementIndex = elementIndex
+        self.role = role
+        self.title = title
+        self.label = label
+        self.value = value
+        self.help = help
+        self.enabled = enabled
+        self.frame = frame
+        self.path = path
+        self.actionNames = actionNames
+        self.processID = processID
     }
 
     var normalizedText: String {
@@ -57,6 +89,28 @@ struct ComputerUseElementCandidate: Codable, Equatable {
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+struct ComputerUseFocusedElement: Codable, Equatable {
+    let role: String
+    let title: String
+    let label: String
+    let value: String
+    let frame: ComputerUseRect?
+    let processID: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case role
+        case title
+        case label
+        case value
+        case frame
+        case processID = "process_id"
+    }
+
+    var normalizedText: String {
+        ComputerUseElementCandidate.normalizedText([title, label, value].joined(separator: " "))
     }
 }
 
@@ -105,24 +159,64 @@ extension ComputerUseScreenshotObservation: Codable {
 }
 
 struct ComputerUseObservation: Codable, Equatable {
+    let stateID: String
     let appName: String
     let bundleID: String
     let windowTitle: String
     let windowFrame: ComputerUseRect?
     let screenshot: ComputerUseScreenshotObservation?
     let cursorPosition: ComputerUseRect?
+    let focusedElement: ComputerUseFocusedElement?
+    let selectedText: String?
+    let appInstructions: String?
     let elements: [ComputerUseElementCandidate]
     let capturedAt: Date
 
     enum CodingKeys: String, CodingKey {
+        case stateID = "state_id"
         case appName = "app_name"
         case bundleID = "bundle_id"
         case windowTitle = "window_title"
         case windowFrame = "window_frame"
         case screenshot
         case cursorPosition = "cursor_position"
+        case focusedElement = "focused_element"
+        case selectedText = "selected_text"
+        case appInstructions = "app_instructions"
         case elements
         case capturedAt = "captured_at"
+    }
+
+    init(
+        stateID: String = Self.newStateID(),
+        appName: String,
+        bundleID: String,
+        windowTitle: String,
+        windowFrame: ComputerUseRect?,
+        screenshot: ComputerUseScreenshotObservation?,
+        cursorPosition: ComputerUseRect?,
+        focusedElement: ComputerUseFocusedElement? = nil,
+        selectedText: String? = nil,
+        appInstructions: String? = nil,
+        elements: [ComputerUseElementCandidate],
+        capturedAt: Date
+    ) {
+        self.stateID = stateID
+        self.appName = appName
+        self.bundleID = bundleID
+        self.windowTitle = windowTitle
+        self.windowFrame = windowFrame
+        self.screenshot = screenshot
+        self.cursorPosition = cursorPosition
+        self.focusedElement = focusedElement
+        self.selectedText = selectedText
+        self.appInstructions = appInstructions
+        self.elements = elements
+        self.capturedAt = capturedAt
+    }
+
+    static func newStateID() -> String {
+        "state-\(Int(Date().timeIntervalSince1970 * 1000))-\(UUID().uuidString.prefix(8))"
     }
 }
 
@@ -140,27 +234,44 @@ struct ComputerUseObservationTarget: Codable, Equatable {
 
 @MainActor
 final class ComputerUseElementRegistry {
+    struct Fingerprint: Equatable {
+        let role: String
+        let path: String
+        let normalizedText: String
+        let frame: ComputerUseRect?
+        let processID: Int?
+    }
+
     private var elements: [String: AXUIElement] = [:]
     private var indexedElements: [Int: AXUIElement] = [:]
+    private var elementFingerprintsByID: [String: Fingerprint] = [:]
+    private var elementFingerprintsByIndex: [Int: Fingerprint] = [:]
     private var screenshot: ComputerUseScreenshotObservation?
 
     func clear() {
         elements.removeAll()
         indexedElements.removeAll()
+        elementFingerprintsByID.removeAll()
+        elementFingerprintsByIndex.removeAll()
         screenshot = nil
     }
 
-    func register(_ element: AXUIElement, id: String, index: Int) {
+    func register(_ element: AXUIElement, candidate: ComputerUseElementCandidate) {
+        let id = candidate.elementID
+        let index = candidate.elementIndex
         elements[id] = element
         indexedElements[index] = element
+        let fingerprint = Fingerprint(candidate)
+        elementFingerprintsByID[id] = fingerprint
+        elementFingerprintsByIndex[index] = fingerprint
     }
 
     func element(for id: String) -> AXUIElement? {
-        elements[id]
+        resolve(elements[id], fingerprint: elementFingerprintsByID[id])
     }
 
     func element(for index: Int) -> AXUIElement? {
-        indexedElements[index]
+        resolve(indexedElements[index], fingerprint: elementFingerprintsByIndex[index])
     }
 
     func registerScreenshot(_ screenshot: ComputerUseScreenshotObservation?) {
@@ -173,6 +284,49 @@ final class ComputerUseElementRegistry {
 
     var registeredIDsForTests: Set<String> {
         Set(elements.keys)
+    }
+
+    private func resolve(_ element: AXUIElement?, fingerprint: Fingerprint?) -> AXUIElement? {
+        guard let element else { return nil }
+        guard let fingerprint else { return element }
+        if Self.isValid(element) {
+            return element
+        }
+        let matches = elements.values.filter { candidate in
+            Self.isValid(candidate) && Self.fingerprint(for: candidate) == fingerprint
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    private static func isValid(_ element: AXUIElement) -> Bool {
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .success
+    }
+
+    private static func fingerprint(for element: AXUIElement) -> Fingerprint {
+        let role = ComputerUseObservationCapture.axString(element, kAXRoleAttribute)
+        let title = ComputerUseObservationCapture.axString(element, kAXTitleAttribute)
+        let label = ComputerUseObservationCapture.axString(element, kAXDescriptionAttribute)
+        let value = ComputerUseObservationCapture.axString(element, kAXValueAttribute)
+        let help = ComputerUseObservationCapture.axString(element, kAXHelpAttribute)
+        let text = ComputerUseElementCandidate.normalizedText([title, label, value, help].joined(separator: " "))
+        return Fingerprint(
+            role: role,
+            path: "",
+            normalizedText: text,
+            frame: ComputerUseObservationCapture.rect(element).map(ComputerUseRect.init),
+            processID: ComputerUseObservationCapture.processID(of: element).map(Int.init)
+        )
+    }
+}
+
+extension ComputerUseElementRegistry.Fingerprint {
+    init(_ candidate: ComputerUseElementCandidate) {
+        role = candidate.role
+        path = ""
+        normalizedText = candidate.normalizedText
+        frame = candidate.frame
+        processID = candidate.processID
     }
 }
 
@@ -202,6 +356,9 @@ enum ComputerUseObservationCapture {
                 windowFrame: nil,
                 screenshot: nil,
                 cursorPosition: cursorPositionObservation(),
+                focusedElement: nil,
+                selectedText: nil,
+                appInstructions: ComputerUseAppInstructionProvider.instructions(for: bundleID, appName: appName),
                 elements: [],
                 capturedAt: capturedAt
             )
@@ -214,6 +371,10 @@ enum ComputerUseObservationCapture {
         let windowFrame = window.flatMap(rect)
         let screenshot = includeScreenshot ? captureScreenshot(for: app, fallbackFrame: windowFrame) : nil
         registry.registerScreenshot(screenshot)
+        let focusedElementSnapshot = focusedElementSnapshot(requiredPID: app.processIdentifier)
+        let focusedElement = focusedElementSnapshot?.observation
+        let selectedText = selectedTextObservation(from: focusedElementSnapshot?.element)
+        let appInstructions = ComputerUseAppInstructionProvider.instructions(for: bundleID, appName: appName)
 
         var candidates: [ComputerUseElementCandidate] = []
         var visited = Set<AXUIElement>()
@@ -235,6 +396,9 @@ enum ComputerUseObservationCapture {
             windowFrame: windowFrame.map(ComputerUseRect.init),
             screenshot: screenshot,
             cursorPosition: cursorPositionObservation(),
+            focusedElement: focusedElement,
+            selectedText: selectedText,
+            appInstructions: appInstructions,
             elements: candidates,
             capturedAt: capturedAt
         )
@@ -281,7 +445,7 @@ enum ComputerUseObservationCapture {
 
         let nextIndex = candidates.count + 1
         if let candidate = candidate(from: element, id: "e\(nextIndex)", index: nextIndex, path: path) {
-            registry.register(element, id: candidate.elementID, index: candidate.elementIndex)
+            registry.register(element, candidate: candidate)
             candidates.append(candidate)
         }
 
@@ -308,6 +472,8 @@ enum ComputerUseObservationCapture {
         let help = axString(element, kAXHelpAttribute)
         let enabled = axBool(element, kAXEnabledAttribute) ?? true
         let frame = rect(element).map(ComputerUseRect.init)
+        let actions = actionNames(of: element)
+        let pid = processID(of: element).map(Int.init)
 
         let text = ComputerUseElementCandidate.normalizedText([title, label, value, help].joined(separator: " "))
         guard !role.isEmpty || !text.isEmpty else { return nil }
@@ -322,7 +488,9 @@ enum ComputerUseObservationCapture {
             help: truncate(help, limit: 80),
             enabled: enabled,
             frame: frame,
-            path: path
+            path: path,
+            actionNames: actions,
+            processID: pid
         )
     }
 
@@ -367,7 +535,7 @@ enum ComputerUseObservationCapture {
         return rawChildren
     }
 
-    private static func axString(_ element: AXUIElement, _ attribute: String) -> String {
+    static func axString(_ element: AXUIElement, _ attribute: String) -> String {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return "" }
         if let string = value as? String {
@@ -385,7 +553,7 @@ enum ComputerUseObservationCapture {
         return value as? Bool
     }
 
-    private static func rect(_ element: AXUIElement) -> CGRect? {
+    static func rect(_ element: AXUIElement) -> CGRect? {
         var positionRef: CFTypeRef?
         var sizeRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef) == .success,
@@ -402,6 +570,51 @@ enum ComputerUseObservationCapture {
               AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
         else { return nil }
         return CGRect(origin: position, size: size)
+    }
+
+    static func processID(of element: AXUIElement) -> pid_t? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success else { return nil }
+        return pid
+    }
+
+    private static func actionNames(of element: AXUIElement) -> [String] {
+        var rawActions: CFArray?
+        guard AXUIElementCopyActionNames(element, &rawActions) == .success else { return [] }
+        return (rawActions as? [String]) ?? []
+    }
+
+    private struct FocusedElementSnapshot {
+        let element: AXUIElement
+        let observation: ComputerUseFocusedElement
+    }
+
+    private static func focusedElementSnapshot(requiredPID: pid_t) -> FocusedElementSnapshot? {
+        let system = AXUIElementCreateSystemWide()
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &value) == .success,
+              let rawElement = value,
+              CFGetTypeID(rawElement) == AXUIElementGetTypeID()
+        else { return nil }
+
+        let element = rawElement as! AXUIElement
+        guard processID(of: element) == requiredPID else { return nil }
+        let observation = ComputerUseFocusedElement(
+            role: axString(element, kAXRoleAttribute),
+            title: truncate(axString(element, kAXTitleAttribute), limit: 80),
+            label: truncate(axString(element, kAXDescriptionAttribute), limit: 80),
+            value: truncate(axString(element, kAXValueAttribute), limit: 160),
+            frame: rect(element).map(ComputerUseRect.init),
+            processID: processID(of: element).map(Int.init)
+        )
+        return FocusedElementSnapshot(element: element, observation: observation)
+    }
+
+    private static func selectedTextObservation(from focusedElement: AXUIElement?) -> String? {
+        guard let focusedElement else { return nil }
+        let selected = axString(focusedElement, kAXSelectedTextAttribute)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return selected.isEmpty ? nil : truncate(selected, limit: 240)
     }
 
     private static func cursorPositionObservation() -> ComputerUseRect {
@@ -547,6 +760,54 @@ enum ComputerUseObservationCapture {
             .split(whereSeparator: { $0.isWhitespace })
             .joined(separator: " ")
             .replacingOccurrences(of: #" app$"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+enum ComputerUseAppInstructionProvider {
+    static func instructions(for bundleID: String, appName: String) -> String? {
+        var hints: [String] = []
+        if isBrowser(bundleID: bundleID, appName: appName) {
+            hints.append("Browser hint: for a new web task, open a fresh tab with command+t, then use navigate_url on the active tab without tab indexes. Use tab listing only when continuing or finding an existing tab. If DOM/page tools fail or return nothing, continue with AX, screenshot, keyboard, and mouse control.")
+        }
+        if isNativeRichTextApp(bundleID: bundleID, appName: appName) {
+            hints.append("Native rich-text hint: focus the editable title/body before insertion, prefer paste_text for multi-word text, and verify the focused value or visible AX text changed before proceeding.")
+        }
+        return hints.isEmpty ? nil : hints.joined(separator: "\n")
+    }
+
+    private static func isBrowser(bundleID: String, appName: String) -> Bool {
+        let identifiers = Set([
+            "com.google.Chrome",
+            "com.apple.Safari",
+            "org.mozilla.firefox",
+            "company.thebrowser.Browser",
+            "com.microsoft.edgemac",
+        ])
+        if identifiers.contains(bundleID) {
+            return true
+        }
+        let name = canonical(appName)
+        return ["chrome", "google chrome", "safari", "firefox", "arc", "edge", "microsoft edge"].contains(name)
+    }
+
+    private static func isNativeRichTextApp(bundleID: String, appName: String) -> Bool {
+        let identifiers = Set([
+            "com.apple.Notes",
+            "com.apple.TextEdit",
+            "com.apple.mail",
+        ])
+        if identifiers.contains(bundleID) {
+            return true
+        }
+        let name = canonical(appName)
+        return ["notes", "textedit", "text edit", "mail"].contains(name)
+    }
+
+    private static func canonical(_ value: String) -> String {
+        value.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
