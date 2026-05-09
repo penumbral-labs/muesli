@@ -279,7 +279,7 @@ struct SettingsView: View {
             settingsSection("General") {
                 settingsRow("Launch at login") {
                     settingsSwitch(isOn: appState.config.launchAtLogin) { newValue in
-                        controller.updateConfig { $0.launchAtLogin = newValue }
+                        controller.setLaunchAtLogin(newValue)
                     }
                 }
                 Divider().background(MuesliTheme.surfaceBorder)
