@@ -1,4 +1,5 @@
 import AppKit
+import Atomics
 import AudioToolbox
 import CoreAudio
 import Foundation
@@ -29,14 +30,23 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
     private var aggregateDeviceID: AudioDeviceID = kAudioObjectUnknown
     private var audioUnit: AudioUnit?
     private let processingQueue = DispatchQueue(label: "com.muesli.system-audio-tap")
+    private var defaultOutputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var renderBuffer: UnsafeMutableRawPointer?
     private var renderBufferCapacity = 0
 
     private var outputFile: FileHandle?
     private var outputURL: URL?
     private var totalBytesWritten = 0
-    private(set) var isRecording = false
-    private(set) var isPaused = false
+    private let recordingFlag = ManagedAtomic(false)
+    private let pausedFlag = ManagedAtomic(false)
+    private(set) var isRecording: Bool {
+        get { recordingFlag.load(ordering: .acquiring) }
+        set { recordingFlag.store(newValue, ordering: .releasing) }
+    }
+    private(set) var isPaused: Bool {
+        get { pausedFlag.load(ordering: .acquiring) }
+        set { pausedFlag.store(newValue, ordering: .releasing) }
+    }
 
     private static let targetSampleRate: Double = 16_000
     private static let maxRenderFrames: UInt32 = 4096
@@ -46,7 +56,11 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
     private var sourceChannels: UInt32 = 2
 
     deinit {
-        if isRecording || aggregateDeviceID != kAudioObjectUnknown || tapID != kAudioObjectUnknown {
+        if isRecording
+            || outputFile != nil
+            || aggregateDeviceID != kAudioObjectUnknown
+            || tapID != kAudioObjectUnknown
+        {
             _ = stop()
         }
     }
@@ -72,6 +86,7 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
         do {
             try createTapAndAggregateDevice()
             try setupAndStartAudioUnit()
+            installDefaultOutputDeviceListener()
             fputs("[system-audio] CoreAudio tap capture started\n", stderr)
         } catch {
             fputs("[system-audio] CoreAudio tap start failed: \(error)\n", stderr)
@@ -84,28 +99,12 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
         guard isRecording || outputFile != nil || outputURL != nil else { return nil }
         isRecording = false
         isPaused = false
-        onPCMSamples = nil
 
-        if let au = audioUnit {
-            AudioOutputUnitStop(au)
-            AudioUnitUninitialize(au)
-            AudioComponentInstanceDispose(au)
+        removeDefaultOutputDeviceListener()
+        processingQueue.sync {
+            teardownTapAndAudioUnit()
+            onPCMSamples = nil
         }
-        audioUnit = nil
-        releaseRenderBuffer()
-
-        if aggregateDeviceID != kAudioObjectUnknown {
-            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-            aggregateDeviceID = kAudioObjectUnknown
-        }
-
-        if tapID != kAudioObjectUnknown {
-            AudioHardwareDestroyProcessTap(tapID)
-            tapID = kAudioObjectUnknown
-        }
-
-        // Drain any in-flight processing blocks before touching the file
-        processingQueue.sync {}
 
         if let file = outputFile {
             let header = WAVHeader.create(dataSize: totalBytesWritten)
@@ -137,12 +136,19 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
     // MARK: - Tap + Aggregate Device Setup
 
     private func createTapAndAggregateDevice() throws {
-        // Tap all system audio output, excluding our own process
-        // CATapDescription takes AudioObjectIDs from kAudioHardwarePropertyProcessObjectList,
-        // NOT raw PIDs. Look up our process's AudioObjectID to exclude self.
-        let excludeList: [AudioObjectID] = Self.currentProcessAudioObjectID().map { [$0] } ?? []
-        let tapDesc = CATapDescription(stereoGlobalTapButExcludeProcesses: excludeList)
-        tapDesc.name = "Muesli System Audio Tap"
+        // Tap the default output device directly rather than the stereo global mix.
+        // Native call clients (Zoom, Teams) route audio through private pipelines
+        // (virtual devices, custom AudioUnits for AEC/noise suppression) that bypass
+        // the system's stereo mix. A device-level tap captures all audio flowing
+        // through the output device regardless of which app or pipeline produces it.
+        guard let outputDevice = Self.defaultOutputDeviceTapTarget() else {
+            throw RecorderError.noDefaultOutputDevice
+        }
+        let tapDesc = Self.makeOutputDeviceTapDescription(
+            deviceUID: outputDevice.uid,
+            excludingProcessID: Self.currentProcessAudioObjectID(),
+            name: "Muesli System Audio Tap"
+        )
 
         // Register the tap with the audio system first — this triggers the
         // system permission dialog on first use ("… would like to record audio
@@ -175,6 +181,18 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
             throw RecorderError.aggregateDeviceCreationFailed(status)
         }
         fputs("[system-audio] aggregate device \(aggregateDeviceID) created (uid: \(aggUID))\n", stderr)
+    }
+
+    static func makeOutputDeviceTapDescription(
+        deviceUID: String,
+        excludingProcessID: AudioObjectID?,
+        name: String
+    ) -> CATapDescription {
+        let excludeList = excludingProcessID.map { [$0] } ?? []
+        // Default output devices expose the render stream we need at index 0 on supported macOS hardware.
+        let tapDesc = CATapDescription(excludingProcesses: excludeList, deviceUID: deviceUID, stream: 0)
+        tapDesc.name = name
+        return tapDesc
     }
 
     private func setupAndStartAudioUnit() throws {
@@ -375,13 +393,16 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
     // MARK: - Permission
 
     /// Check whether system audio capture permission (`kTCCServiceAudioCapture`)
-    /// is granted by attempting to create a process tap with self-exclusion.
-    /// An empty exclude list bypasses the permission check entirely — only
-    /// non-empty lists (process filtering) require `kTCCServiceAudioCapture`.
+    /// is granted by attempting to create a device tap on the default output device.
     static func checkSystemAudioPermission() -> Bool {
-        guard let selfObjectID = currentProcessAudioObjectID() else { return false }
-        let tapDesc = CATapDescription(stereoGlobalTapButExcludeProcesses: [selfObjectID])
-        tapDesc.name = "Muesli Permission Check"
+        guard let outputDevice = defaultOutputDeviceTapTarget(),
+              let selfObjectID = currentProcessAudioObjectID()
+        else { return false }
+        let tapDesc = makeOutputDeviceTapDescription(
+            deviceUID: outputDevice.uid,
+            excludingProcessID: selfObjectID,
+            name: "Muesli Permission Check"
+        )
 
         var testTapID: AudioObjectID = kAudioObjectUnknown
         let status = AudioHardwareCreateProcessTap(tapDesc, &testTapID)
@@ -390,6 +411,50 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
             return true
         }
         return false
+    }
+
+    private struct OutputDeviceTapTarget {
+        let uid: String
+    }
+
+    private static func defaultOutputDeviceTapTarget() -> OutputDeviceTapTarget? {
+        guard let deviceID = defaultOutputDeviceID(),
+              let uid = deviceUID(for: deviceID)
+        else { return nil }
+        return OutputDeviceTapTarget(uid: uid)
+    }
+
+    /// Look up the default audio output device ID.
+    private static func defaultOutputDeviceID() -> AudioDeviceID? {
+        var deviceID: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID
+        ) == noErr, deviceID != 0 else {
+            return nil
+        }
+        return deviceID
+    }
+
+    private static func deviceUID(for deviceID: AudioDeviceID) -> String? {
+        var uid: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            deviceID, &address, 0, nil, &size, &uid
+        ) == noErr, let uid else {
+            return nil
+        }
+        return uid.takeRetainedValue() as String
     }
 
     /// Look up our process's AudioObjectID from the HAL process object list.
@@ -494,8 +559,8 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
         ) == noErr else { return }
 
         for deviceID in devices {
-            var name: CFString = "" as CFString
-            var nameSize = UInt32(MemoryLayout<CFString>.size)
+            var name: Unmanaged<CFString>?
+            var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
             var nameAddr = AudioObjectPropertyAddress(
                 mSelector: kAudioObjectPropertyName,
                 mScope: kAudioObjectPropertyScopeGlobal,
@@ -503,12 +568,71 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
             )
             guard AudioObjectGetPropertyData(
                 deviceID, &nameAddr, 0, nil, &nameSize, &name
-            ) == noErr else { continue }
+            ) == noErr, let name else { continue }
 
-            if (name as String) == "Muesli System Audio" {
+            if (name.takeRetainedValue() as String) == "Muesli System Audio" {
                 fputs("[system-audio] cleaning up stale aggregate device \(deviceID)\n", stderr)
                 AudioHardwareDestroyAggregateDevice(deviceID)
             }
+        }
+    }
+
+    private func installDefaultOutputDeviceListener() {
+        guard defaultOutputDeviceListenerBlock == nil else { return }
+
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.processingQueue.async { [weak self] in
+                self?.restartTapForDefaultOutputDeviceChange()
+            }
+        }
+        defaultOutputDeviceListenerBlock = block
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            nil,
+            block
+        )
+    }
+
+    private func removeDefaultOutputDeviceListener() {
+        guard let block = defaultOutputDeviceListenerBlock else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            nil,
+            block
+        )
+        defaultOutputDeviceListenerBlock = nil
+    }
+
+    private func restartTapForDefaultOutputDeviceChange() {
+        guard isRecording else { return }
+
+        fputs("[system-audio] default output device changed; rebuilding tap\n", stderr)
+        teardownTapAndAudioUnit()
+        guard isRecording else { return }
+
+        do {
+            try createTapAndAggregateDevice()
+            try setupAndStartAudioUnit()
+            fputs("[system-audio] CoreAudio tap capture restarted for default output device\n", stderr)
+        } catch {
+            teardownTapAndAudioUnit()
+            isRecording = false
+            isPaused = false
+            onPCMSamples = nil
+            fputs("[system-audio] failed to restart after default output device change: \(error)\n", stderr)
         }
     }
 
@@ -516,6 +640,7 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
 
     enum RecorderError: LocalizedError {
         case fileCreationFailed
+        case noDefaultOutputDevice
         case tapCreationFailed(OSStatus)
         case aggregateDeviceCreationFailed(OSStatus)
         case auhalNotFound
@@ -525,6 +650,8 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
             switch self {
             case .fileCreationFailed:
                 return "Could not create output file"
+            case .noDefaultOutputDevice:
+                return "No default audio output device found"
             case .tapCreationFailed(let s):
                 return "Process tap creation failed (status: \(s))"
             case .aggregateDeviceCreationFailed(let s):
@@ -560,11 +687,7 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
         renderBufferCapacity = 0
     }
 
-    private func cleanupFailedStart() {
-        isRecording = false
-        isPaused = false
-        onPCMSamples = nil
-
+    private func teardownTapAndAudioUnit() {
         if let au = audioUnit {
             AudioOutputUnitStop(au)
             AudioUnitUninitialize(au)
@@ -582,6 +705,15 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing {
             AudioHardwareDestroyProcessTap(tapID)
             tapID = kAudioObjectUnknown
         }
+    }
+
+    private func cleanupFailedStart() {
+        isRecording = false
+        isPaused = false
+        onPCMSamples = nil
+
+        removeDefaultOutputDeviceListener()
+        teardownTapAndAudioUnit()
 
         if let file = outputFile {
             file.closeFile()
