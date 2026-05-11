@@ -478,6 +478,25 @@ struct SettingsView: View {
                         }
                     }
                 }
+                Divider().background(MuesliTheme.surfaceBorder)
+                settingsRow("Voice speed", controlWidth: meetingControlWidth) {
+                    Stepper(
+                        value: Binding(
+                            get: { min(max(appState.config.computerUseTTSSpeed, 0.5), 2.0) },
+                            set: { newValue in
+                                controller.updateConfig {
+                                    $0.computerUseTTSSpeed = min(max(newValue, 0.5), 2.0)
+                                }
+                            }
+                        ),
+                        in: 0.5...2.0,
+                        step: 0.05
+                    ) {
+                        Text("\(appState.config.computerUseTTSSpeed.formatted(.number.precision(.fractionLength(2))))x")
+                            .font(MuesliTheme.body())
+                            .foregroundStyle(MuesliTheme.textPrimary)
+                    }
+                }
             }
         }
     }

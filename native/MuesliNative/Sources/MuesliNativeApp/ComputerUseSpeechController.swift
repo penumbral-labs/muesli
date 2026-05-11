@@ -117,8 +117,7 @@ enum ComputerUseTTSVoiceOption: String, CaseIterable, Equatable {
 
 enum ComputerUseSpeechPolicy {
     static func commandHeardSpeech(for transcript: String) -> String? {
-        let text = sanitized(transcript, maxCharacters: 120)
-        guard !text.isEmpty else { return nil }
+        guard !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return "Got it."
     }
 
@@ -175,8 +174,6 @@ final class ComputerUseSpeechController {
 
     private struct SpeechConfigKey: Equatable {
         let modelID: String
-        let voiceID: String
-        let speed: Double
     }
 
     private struct SpeechRequest {
@@ -188,6 +185,7 @@ final class ComputerUseSpeechController {
     private var ttsConfigKey: SpeechConfigKey?
     private var queue: [SpeechRequest] = []
     private var drainTask: Task<Void, Never>?
+    private var drainID: UUID?
     private var lastQueuedText = ""
     private let speechHandler: SpeechHandler?
 
@@ -212,6 +210,7 @@ final class ComputerUseSpeechController {
         lastQueuedText = ""
         drainTask?.cancel()
         drainTask = nil
+        drainID = nil
         if let tts {
             Task {
                 await tts.stopSpeaking()
@@ -232,12 +231,14 @@ final class ComputerUseSpeechController {
 
     private func startDrainingIfNeeded() {
         guard drainTask == nil else { return }
+        let id = UUID()
+        drainID = id
         drainTask = Task { [weak self] in
-            await self?.drainQueue()
+            await self?.drainQueue(id: id)
         }
     }
 
-    private func drainQueue() async {
+    private func drainQueue(id: UUID) async {
         while !Task.isCancelled, !queue.isEmpty {
             let request = queue.removeFirst()
             do {
@@ -255,25 +256,26 @@ final class ComputerUseSpeechController {
                 fputs("[cua-tts] speech failed: \(error)\n", stderr)
             }
         }
-        drainTask = nil
+        if drainID == id {
+            drainTask = nil
+            drainID = nil
+        }
     }
 
     private func resolveTTS(for appConfig: AppConfig) async throws -> KittenTTS {
         let key = SpeechConfigKey(
-            modelID: ComputerUseTTSModelOption.resolveID(appConfig.computerUseTTSModel),
-            voiceID: ComputerUseTTSVoiceOption.resolveID(appConfig.computerUseTTSVoice),
-            speed: min(max(appConfig.computerUseTTSSpeed, 0.5), 2.0)
+            modelID: ComputerUseTTSModelOption.resolveID(appConfig.computerUseTTSModel)
         )
         if let tts, ttsConfigKey == key {
             return tts
         }
 
         let model = ComputerUseTTSModelOption.resolve(key.modelID).kittenModel
-        let voice = ComputerUseTTSVoiceOption.resolve(key.voiceID).kittenVoice
+        let voice = ComputerUseTTSVoiceOption.resolve(appConfig.computerUseTTSVoice).kittenVoice
         let config = KittenTTSConfig(
             model: model,
             defaultVoice: voice,
-            speed: Float(key.speed),
+            speed: Float(min(max(appConfig.computerUseTTSSpeed, 0.5), 2.0)),
             storageDirectory: nil,
             ortNumThreads: 4,
             maxTokensPerChunk: 160

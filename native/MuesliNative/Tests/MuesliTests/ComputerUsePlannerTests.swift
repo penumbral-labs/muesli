@@ -464,6 +464,62 @@ struct ComputerUseTraceFormatterTests {
 
 @Suite("Computer Use speech feedback")
 struct ComputerUseSpeechFeedbackTests {
+    private actor SpeechDrainProbe {
+        private var calls: [String] = []
+        private var activeCount = 0
+        private var releaseContinuations: [Int: CheckedContinuation<Void, Never>] = [:]
+        private var callWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+        private var activeWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+        func record(_ text: String) async {
+            let index = calls.count
+            calls.append(text)
+            activeCount += 1
+            resumeWaiters()
+
+            if index < 2 {
+                await withCheckedContinuation { continuation in
+                    releaseContinuations[index] = continuation
+                }
+            }
+
+            activeCount -= 1
+            resumeWaiters()
+        }
+
+        func waitForCallCount(_ count: Int) async {
+            guard calls.count < count else { return }
+            await withCheckedContinuation { continuation in
+                callWaiters.append((count, continuation))
+            }
+        }
+
+        func waitForActiveCount(_ count: Int) async {
+            guard activeCount != count else { return }
+            await withCheckedContinuation { continuation in
+                activeWaiters.append((count, continuation))
+            }
+        }
+
+        func releaseCall(at index: Int) {
+            releaseContinuations.removeValue(forKey: index)?.resume()
+        }
+
+        func recordedCalls() -> [String] {
+            calls
+        }
+
+        private func resumeWaiters() {
+            let readyCallWaiters = callWaiters.filter { calls.count >= $0.0 }
+            callWaiters.removeAll { calls.count >= $0.0 }
+            readyCallWaiters.forEach { $0.1.resume() }
+
+            let readyActiveWaiters = activeWaiters.filter { activeCount == $0.0 }
+            activeWaiters.removeAll { activeCount == $0.0 }
+            readyActiveWaiters.forEach { $0.1.resume() }
+        }
+    }
+
     @Test("older configs decode with CUA TTS defaults")
     func olderConfigsDecodeWithCUATTSDefaults() throws {
         let data = #"{"enable_computer_use_planner":true}"#.data(using: .utf8)!
@@ -496,6 +552,7 @@ struct ComputerUseSpeechFeedbackTests {
     @Test("status speech suppresses intermediate updates and keeps decision states")
     func statusSpeechPolicy() {
         #expect(ComputerUseSpeechPolicy.commandHeardSpeech(for: "Open Chrome") == "Got it.")
+        #expect(ComputerUseSpeechPolicy.commandHeardSpeech(for: "   ") == nil)
         #expect(ComputerUseSpeechPolicy.speech(forStatus: "Planning step 1") == nil)
         #expect(ComputerUseSpeechPolicy.speech(forStatus: "Observing screen") == nil)
         #expect(ComputerUseSpeechPolicy.speech(forStatus: "Screen fallback") == nil)
@@ -548,6 +605,41 @@ struct ComputerUseSpeechFeedbackTests {
         try await Task.sleep(nanoseconds: 100_000_000)
 
         #expect(spoken.isEmpty)
+    }
+
+    @Test("cancelled drain task cannot clear a newer drain task")
+    @MainActor
+    func cancelledDrainTaskDoesNotClearNewerDrainTask() async throws {
+        let probe = SpeechDrainProbe()
+        let controller = ComputerUseSpeechController { text, _ in
+            await probe.record(text)
+        }
+        let config = AppConfig()
+
+        controller.speakStatus("Confirm", config: config)
+        await probe.waitForCallCount(1)
+
+        controller.stop()
+        controller.speakStatus("Failed", config: config)
+        await probe.waitForCallCount(2)
+
+        await probe.releaseCall(at: 0)
+        await probe.waitForActiveCount(1)
+
+        controller.speakFinalResult(.init(status: .done, message: "Done"), config: config)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(await probe.recordedCalls() == [
+            "I need confirmation before continuing.",
+            "CUA failed.",
+        ])
+
+        await probe.releaseCall(at: 1)
+        await probe.waitForCallCount(3)
+        #expect(await probe.recordedCalls() == [
+            "I need confirmation before continuing.",
+            "CUA failed.",
+            "Done.",
+        ])
     }
 }
 
