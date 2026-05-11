@@ -607,6 +607,33 @@ struct ComputerUseSpeechFeedbackTests {
         #expect(spoken.isEmpty)
     }
 
+    @Test("muted idle status clears duplicate state without speaking")
+    @MainActor
+    func mutedIdleStatusClearsDuplicateStateWithoutSpeaking() async throws {
+        var spoken: [String] = []
+        let controller = ComputerUseSpeechController { text, _ in
+            spoken.append(text)
+        }
+        var config = AppConfig()
+
+        controller.speakStatus("Confirm", config: config)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(spoken == ["I need confirmation before continuing."])
+
+        config.soundEnabled = false
+        controller.speakStatus("Confirm", config: config)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(spoken == ["I need confirmation before continuing."])
+
+        config.soundEnabled = true
+        controller.speakStatus("Confirm", config: config)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(spoken == [
+            "I need confirmation before continuing.",
+            "I need confirmation before continuing.",
+        ])
+    }
+
     @Test("cancelled drain task cannot clear a newer drain task")
     @MainActor
     func cancelledDrainTaskDoesNotClearNewerDrainTask() async throws {

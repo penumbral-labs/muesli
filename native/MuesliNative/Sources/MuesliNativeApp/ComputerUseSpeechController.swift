@@ -220,7 +220,11 @@ final class ComputerUseSpeechController {
 
     private func enqueue(_ text: String?, config: AppConfig) {
         guard config.soundEnabled, config.enableComputerUseVoiceFeedback else {
-            stop()
+            if drainTask != nil || !queue.isEmpty {
+                stop()
+            } else {
+                lastQueuedText = ""
+            }
             return
         }
         guard let text, !text.isEmpty, text != lastQueuedText else { return }
