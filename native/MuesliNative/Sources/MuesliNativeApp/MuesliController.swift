@@ -122,6 +122,7 @@ final class MuesliController: NSObject {
     private let meetingMonitor = MeetingMonitor()
     private let meetingNotification = MeetingNotificationController()
     private let meetingSourceWindowLocator = MeetingSourceWindowLocator()
+    private let computerUseSpeech = ComputerUseSpeechController()
 
     private let chatGPTAuth = ChatGPTAuthManager.shared
     private let googleCalAuth = GoogleCalendarAuthManager.shared
@@ -433,6 +434,7 @@ final class MuesliController: NSObject {
         computerUseHotkeyMonitor.stop()
         computerUseCommandTask?.cancel()
         computerUseCommandTask = nil
+        computerUseSpeech.stop()
         calendarMonitor.stop()
         meetingStartingNowTimers.values.forEach { $0.invalidate() }
         meetingStartingNowTimers.removeAll()
@@ -3382,6 +3384,7 @@ final class MuesliController: NSObject {
         fputs("[cua] cancel\n", stderr)
         computerUseCommandTask?.cancel()
         computerUseCommandTask = nil
+        computerUseSpeech.stop()
         recorder.cancel()
         computerUseCommandStartedAt = nil
         indicator.isToggleDictation = false
@@ -3495,6 +3498,7 @@ final class MuesliController: NSObject {
     private func handleComputerUseCommand(transcript: String, dictationID: Int64?) async {
         resetComputerUseFloatingStatus()
         presentComputerUseTranscript(transcript)
+        computerUseSpeech.speakCommandHeard(transcript, config: config)
         setState(.transcribing)
         let runtime = ComputerUsePlannerRuntime(config: config) { [weak self] status in
             guard let self else { return }
@@ -3504,6 +3508,7 @@ final class MuesliController: NSObject {
         let result = await runtime.run(command: transcript)
         indicator.hideComputerUseCursor()
         if result.status == .cancelled {
+            computerUseSpeech.stop()
             computerUseCommandTask = nil
             setState(.idle)
             meetingMonitor.resumeAfterCooldown()
@@ -3529,6 +3534,7 @@ final class MuesliController: NSObject {
         computerUseLastFloatingStatusAt = .distantPast
         computerUseLastFloatingStatus = ""
         computerUseTranscriptVisible = false
+        computerUseSpeech.stop()
     }
 
     @MainActor
@@ -3551,6 +3557,7 @@ final class MuesliController: NSObject {
             return
         }
         guard floatingStatus != computerUseLastFloatingStatus else { return }
+        computerUseSpeech.speakStatus(floatingStatus, config: config)
 
         let now = Date()
         let elapsed = now.timeIntervalSince(computerUseLastFloatingStatusAt)
@@ -3708,6 +3715,7 @@ final class MuesliController: NSObject {
             icon = ""
         }
         statusBarController?.setStatus(message)
+        computerUseSpeech.speakFinalResult(result, config: config)
         indicator.showWarning(floatingMessage, icon: icon, duration: 3.0)
     }
 

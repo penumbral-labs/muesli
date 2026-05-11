@@ -450,6 +450,34 @@ struct SettingsView: View {
                             .foregroundStyle(MuesliTheme.textPrimary)
                     }
                 }
+                Divider().background(MuesliTheme.surfaceBorder)
+                settingsRow("Voice feedback", controlWidth: meetingControlWidth) {
+                    settingsSwitch(isOn: appState.config.enableComputerUseVoiceFeedback) { newValue in
+                        controller.updateConfig { $0.enableComputerUseVoiceFeedback = newValue }
+                    }
+                }
+                Divider().background(MuesliTheme.surfaceBorder)
+                settingsRow("Voice model", controlWidth: meetingControlWidth) {
+                    settingsMenu(
+                        selection: ComputerUseTTSModelOption.resolve(appState.config.computerUseTTSModel).label,
+                        options: ComputerUseTTSModelOption.labels
+                    ) { label in
+                        controller.updateConfig {
+                            $0.computerUseTTSModel = ComputerUseTTSModelOption.option(forLabel: label).rawValue
+                        }
+                    }
+                }
+                Divider().background(MuesliTheme.surfaceBorder)
+                settingsRow("Voice", controlWidth: meetingControlWidth) {
+                    settingsMenu(
+                        selection: ComputerUseTTSVoiceOption.resolve(appState.config.computerUseTTSVoice).label,
+                        options: ComputerUseTTSVoiceOption.labels
+                    ) { label in
+                        controller.updateConfig {
+                            $0.computerUseTTSVoice = ComputerUseTTSVoiceOption.option(forLabel: label).rawValue
+                        }
+                    }
+                }
             }
         }
     }
