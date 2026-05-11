@@ -29,6 +29,24 @@ enum SparkleUpdateStatus: Equatable {
     case failed(message: String)
 }
 
+enum UserInitiatedUpdateAction: Equatable {
+    case presentStandardUpdater
+    case showBusy(message: String)
+}
+
+enum UpdateInteractionPolicy {
+    static let busyMessage = "Sparkle is still finishing the previous update check. Try again in a moment."
+
+    static func installAction(for status: SparkleUpdateStatus) -> UserInitiatedUpdateAction {
+        switch status {
+        case .checking, .busy, .installing:
+            return .showBusy(message: busyMessage)
+        case .idle, .available, .downloaded, .upToDate, .disabled, .failed:
+            return .presentStandardUpdater
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class AppState {

@@ -116,7 +116,6 @@ final class MuesliController: NSObject {
     private var preferencesWindowController: PreferencesWindowController?
     private var onboardingWindowController: OnboardingWindowController?
     var updaterController: SPUStandardUpdaterController?
-    private var updateCheckStatusGeneration = 0
     private var busyStatusGeneration = 0
 
     let appState = AppState()
@@ -1631,25 +1630,19 @@ final class MuesliController: NSObject {
     }
 
     func retryUpdateCheck() {
-        checkForUpdateInformation()
+        presentStandardUpdateCheck()
     }
 
     func installAvailableUpdate() {
-        switch appState.sparkleUpdateStatus {
-        case .available, .downloaded:
-            break
-        case .checking, .busy, .installing:
+        switch UpdateInteractionPolicy.installAction(for: appState.sparkleUpdateStatus) {
+        case .presentStandardUpdater:
+            presentStandardUpdateCheck()
+        case .showBusy(let message):
             showBusyStatus(
-                "Sparkle is still finishing the previous update check. Try again in a moment.",
+                message,
                 restoring: appState.sparkleUpdateStatus
             )
-            return
-        case .idle, .upToDate, .disabled, .failed:
-            checkForUpdateInformation()
-            return
         }
-
-        presentStandardUpdateCheck()
     }
 
     private func presentStandardUpdateCheck() {
@@ -1665,44 +1658,6 @@ final class MuesliController: NSObject {
             return
         }
         updaterController.checkForUpdates(nil)
-    }
-
-    private func checkForUpdateInformation() {
-        guard let updater = updaterController?.updater else {
-            appState.sparkleUpdateStatus = .disabled(message: "Update checks are disabled for this build.")
-            return
-        }
-        guard updater.canCheckForUpdates else {
-            showBusyStatus(
-                "Sparkle cannot start a new update check yet. Try again in a moment.",
-                restoring: appState.sparkleUpdateStatus
-            )
-            return
-        }
-        guard !updater.sessionInProgress else {
-            showBusyStatus(
-                "Sparkle is still finishing the previous update check. Try again in a moment.",
-                restoring: appState.sparkleUpdateStatus
-            )
-            return
-        }
-        beginUpdateCheckStatusTimeout()
-        updater.checkForUpdateInformation()
-    }
-
-    private func beginUpdateCheckStatusTimeout() {
-        updateCheckStatusGeneration += 1
-        let generation = updateCheckStatusGeneration
-        appState.sparkleUpdateStatus = .checking
-
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 30_000_000_000)
-            guard let self, self.updateCheckStatusGeneration == generation else { return }
-            guard case .checking = self.appState.sparkleUpdateStatus else { return }
-            self.appState.sparkleUpdateStatus = .failed(
-                message: "The updater did not finish checking. Please try again in a moment, or quit and reopen Muesli if it stays stuck."
-            )
-        }
     }
 
     private func showBusyStatus(_ message: String, restoring previousStatus: SparkleUpdateStatus) {

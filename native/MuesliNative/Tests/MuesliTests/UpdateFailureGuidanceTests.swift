@@ -72,3 +72,36 @@ struct UpdateFailureGuidanceTests {
         #expect(!UpdateFailureGuidance.shouldShowFallback(for: error))
     }
 }
+
+@Suite("Update interaction policy")
+struct UpdateInteractionPolicyTests {
+    @Test(
+        "user install action opens standard Sparkle UI for actionable states",
+        arguments: [
+            SparkleUpdateStatus.idle,
+            .available(version: "0.6.7"),
+            .downloaded(version: "0.6.7"),
+            .upToDate,
+            .disabled(message: "disabled"),
+            .failed(message: "network"),
+        ]
+    )
+    func installActionUsesStandardUpdater(status: SparkleUpdateStatus) {
+        #expect(UpdateInteractionPolicy.installAction(for: status) == .presentStandardUpdater)
+    }
+
+    @Test(
+        "user install action stays busy while Sparkle is already in a session",
+        arguments: [
+            SparkleUpdateStatus.checking,
+            .busy(message: "busy"),
+            .installing(version: "0.6.7"),
+        ]
+    )
+    func installActionStaysBusy(status: SparkleUpdateStatus) {
+        #expect(
+            UpdateInteractionPolicy.installAction(for: status)
+                == .showBusy(message: UpdateInteractionPolicy.busyMessage)
+        )
+    }
+}
