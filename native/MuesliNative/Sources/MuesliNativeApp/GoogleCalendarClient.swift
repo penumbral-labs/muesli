@@ -92,7 +92,8 @@ final class GoogleCalendarClient {
         // Drop cached events for any calendar that's now disabled or absent so
         // we don't leak stale events into the merged result.
         let keepIDs = Set(enabled.map(\.id))
-        for calID in cachedEventsByCalendar.keys where !keepIDs.contains(calID) {
+        let calendarIDsToRemove = cachedEventsByCalendar.keys.filter { !keepIDs.contains($0) }
+        for calID in calendarIDsToRemove {
             cachedEventsByCalendar.removeValue(forKey: calID)
             syncTokens.removeValue(forKey: calID)
         }

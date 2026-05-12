@@ -3912,7 +3912,9 @@ final class MuesliController: NSObject {
                 // Match by event ID prefix so deleted/cancelled events (no longer
                 // in upcomingCalendarEvents) still get their timers cancelled.
                 let prefix = "\(info.id)|"
-                for (key, timer) in self.meetingStartingNowTimers where key.hasPrefix(prefix) {
+                let matchingTimerKeys = self.meetingStartingNowTimers.keys.filter { $0.hasPrefix(prefix) }
+                for key in matchingTimerKeys {
+                    guard let timer = self.meetingStartingNowTimers[key] else { continue }
                     timer.invalidate()
                     self.meetingStartingNowTimers.removeValue(forKey: key)
                 }
