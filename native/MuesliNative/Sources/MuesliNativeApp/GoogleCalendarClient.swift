@@ -43,6 +43,17 @@ struct GoogleCalendarSummary: Identifiable, Equatable {
     let colorHex: String?
 }
 
+enum GoogleCalendarClientError: Error, LocalizedError {
+    case requestFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .requestFailed(let message):
+            return "Google Calendar request failed: \(message)"
+        }
+    }
+}
+
 // MARK: - Google Calendar API Client
 
 @MainActor
@@ -169,7 +180,7 @@ final class GoogleCalendarClient {
                 if statusCode == 401 || statusCode == 403 {
                     throw GoogleCalendarAuthError.notAuthenticated
                 }
-                throw GoogleCalendarAuthError.refreshFailed("Calendar API returned \(statusCode)")
+                throw GoogleCalendarClientError.requestFailed("events returned \(statusCode)")
             }
 
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -239,7 +250,7 @@ final class GoogleCalendarClient {
                 if statusCode == 401 || statusCode == 403 {
                     throw GoogleCalendarAuthError.notAuthenticated
                 }
-                throw GoogleCalendarAuthError.refreshFailed("calendarList returned \(statusCode)")
+                throw GoogleCalendarClientError.requestFailed("calendarList returned \(statusCode)")
             }
 
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

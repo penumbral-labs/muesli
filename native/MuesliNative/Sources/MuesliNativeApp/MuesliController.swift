@@ -939,9 +939,9 @@ final class MuesliController: NSObject {
         } catch GoogleCalendarAuthError.notAuthenticated {
             invalidateGoogleCalendarAuth()
             fputs("[muesli-native] Google Calendar token invalid while loading calendar list, signed out\n", stderr)
-        } catch GoogleCalendarAuthError.refreshFailed {
-            invalidateGoogleCalendarAuth()
-            fputs("[muesli-native] Google Calendar refresh token invalid while loading calendar list, signed out\n", stderr)
+        } catch GoogleCalendarAuthError.refreshFailed(let message) {
+            fputs("[muesli-native] Google Calendar token refresh failed while loading calendar list: \(message)\n", stderr)
+            appState.googleCalendarListLoadState = .failed("Token refresh failed: \(message)")
         } catch {
             fputs("[muesli-native] Google calendarList fetch failed: \(error)\n", stderr)
             appState.googleCalendarListLoadState = .failed(error.localizedDescription)
@@ -962,9 +962,8 @@ final class MuesliController: NSObject {
             } catch GoogleCalendarAuthError.notAuthenticated {
                 invalidateGoogleCalendarAuth()
                 fputs("[muesli-native] Google Calendar token invalid, signed out\n", stderr)
-            } catch GoogleCalendarAuthError.refreshFailed {
-                invalidateGoogleCalendarAuth()
-                fputs("[muesli-native] Google Calendar refresh token invalid, signed out\n", stderr)
+            } catch GoogleCalendarAuthError.refreshFailed(let message) {
+                fputs("[muesli-native] Google Calendar token refresh failed: \(message)\n", stderr)
             } catch {
                 fputs("[muesli-native] Google Calendar fetch failed: \(error)\n", stderr)
             }
