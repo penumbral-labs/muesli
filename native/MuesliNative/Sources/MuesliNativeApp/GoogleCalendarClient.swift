@@ -73,6 +73,10 @@ final class GoogleCalendarClient {
     /// sync does not include a new time range, so changing the selected window
     /// requires a full re-fetch.
     private var cachedEventWindowDayCount: Int?
+    /// The local day that anchored the current event window. The selected
+    /// window may stay at the same day count while the query range advances at
+    /// midnight, which also requires a full re-fetch.
+    private var cachedEventWindowStartOfDay: Date?
     /// Last fetched calendar list. Refreshed each time `fetchUpcomingEvents` runs
     /// so calendars added in the Google web UI get picked up automatically.
     private var cachedCalendarList: [GoogleCalendarSummary] = []
@@ -86,9 +90,9 @@ final class GoogleCalendarClient {
         disabledCalendarIDs: Set<String> = []
     ) async throws -> [UnifiedCalendarEvent] {
         let resolvedDayCount = UpcomingMeetingsWindow.resolve(dayCount: daysAhead).dayCount
-        resetEventSyncIfNeededForWindow(daysAhead: resolvedDayCount)
-
         let now = Date()
+        resetEventSyncIfNeededForWindow(daysAhead: resolvedDayCount, now: now)
+
         guard let future = UpcomingMeetingsWindow.endDate(from: now, dayCount: resolvedDayCount) else { return [] }
 
         // Refresh the calendar list. If this fails, fall back to whatever we
@@ -309,16 +313,24 @@ final class GoogleCalendarClient {
         syncTokens.removeAll()
         cachedEventsByCalendar.removeAll()
         cachedEventWindowDayCount = nil
+        cachedEventWindowStartOfDay = nil
         cachedCalendarList.removeAll()
     }
 
     @discardableResult
-    func resetEventSyncIfNeededForWindow(daysAhead: Int) -> Bool {
+    func resetEventSyncIfNeededForWindow(
+        daysAhead: Int,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> Bool {
         let resolvedDayCount = UpcomingMeetingsWindow.resolve(dayCount: daysAhead).dayCount
-        guard cachedEventWindowDayCount != resolvedDayCount else { return false }
+        let windowStartOfDay = calendar.startOfDay(for: now)
+        guard cachedEventWindowDayCount != resolvedDayCount ||
+            cachedEventWindowStartOfDay != windowStartOfDay else { return false }
         syncTokens.removeAll()
         cachedEventsByCalendar.removeAll()
         cachedEventWindowDayCount = resolvedDayCount
+        cachedEventWindowStartOfDay = windowStartOfDay
         return true
     }
 
