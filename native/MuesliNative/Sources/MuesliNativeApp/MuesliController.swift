@@ -1070,6 +1070,7 @@ final class MuesliController: NSObject {
         let disabledIDs = Set(config.disabledCalendarIDs)
         let dayCount = UpcomingMeetingsWindow.resolve(dayCount: config.upcomingMeetingsDayCount).dayCount
         var ekEvents = calendarMonitor.upcomingEvents(daysAhead: dayCount, disabledCalendarIDs: disabledIDs)
+        var canConfirmMissingCalendarEvents = true
 
         if googleCalAuth.isAuthenticated {
             do {
@@ -1077,13 +1078,17 @@ final class MuesliController: NSObject {
                     daysAhead: dayCount,
                     disabledCalendarIDs: disabledIDs
                 )
+                canConfirmMissingCalendarEvents = googleCalClient.lastUpcomingEventsFetchWasComplete
                 ekEvents = GoogleCalendarClient.mergeEvents(eventKit: ekEvents, google: googleEvents)
             } catch GoogleCalendarAuthError.notAuthenticated {
+                canConfirmMissingCalendarEvents = false
                 invalidateGoogleCalendarAuth()
                 fputs("[muesli-native] Google Calendar token invalid, signed out\n", stderr)
             } catch GoogleCalendarAuthError.refreshFailed(let message) {
+                canConfirmMissingCalendarEvents = false
                 fputs("[muesli-native] Google Calendar token refresh failed: \(message)\n", stderr)
             } catch {
+                canConfirmMissingCalendarEvents = false
                 fputs("[muesli-native] Google Calendar fetch failed: \(error)\n", stderr)
             }
         }
@@ -1095,7 +1100,8 @@ final class MuesliController: NSObject {
         let staleIDs = UpcomingMeetingsWindow.staleHiddenEventIDs(
             hiddenIDs: appState.hiddenCalendarEventIDs,
             visibleEventIDs: currentEventIDs,
-            dayCount: dayCount
+            dayCount: dayCount,
+            canConfirmMissingEvents: canConfirmMissingCalendarEvents
         )
         if !staleIDs.isEmpty {
             appState.hiddenCalendarEventIDs.subtract(staleIDs)

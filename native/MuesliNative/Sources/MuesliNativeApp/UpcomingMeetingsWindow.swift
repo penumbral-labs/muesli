@@ -45,8 +45,13 @@ enum UpcomingMeetingsWindow: Int, CaseIterable, Identifiable {
     static func staleHiddenEventIDs(
         hiddenIDs: Set<String>,
         visibleEventIDs: Set<String>,
-        dayCount: Int
+        dayCount: Int,
+        canConfirmMissingEvents: Bool = true
     ) -> Set<String> {
+        guard canConfirmMissingEvents else {
+            return []
+        }
+
         let resolvedDayCount = resolve(dayCount: dayCount).dayCount
         guard resolvedDayCount >= maxDayCount else {
             return []

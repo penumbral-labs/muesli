@@ -71,6 +71,18 @@ struct UpcomingMeetingsWindowTests {
         #expect(staleIDs == ["deleted"])
     }
 
+    @Test("hidden events are preserved after incomplete source refresh")
+    func hiddenEventsArePreservedAfterIncompleteSourceRefresh() {
+        let staleIDs = UpcomingMeetingsWindow.staleHiddenEventIDs(
+            hiddenIDs: ["google-event"],
+            visibleEventIDs: [],
+            dayCount: UpcomingMeetingsWindow.defaultDayCount,
+            canConfirmMissingEvents: false
+        )
+
+        #expect(staleIDs.isEmpty)
+    }
+
     private var calendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
