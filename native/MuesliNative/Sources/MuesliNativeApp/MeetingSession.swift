@@ -91,7 +91,7 @@ final class MeetingSession {
     private let config: AppConfig
     private let transcriptionCoordinator: TranscriptionCoordinator
     private let systemAudioRecorder: SystemAudioCapturing
-    private let fullSessionMicRecorder = MicrophoneRecorder()
+    private let fullSessionMicRecorder = MeetingMicrophoneRecorder()
     private let neuralAec = MeetingNeuralAec()
 
     /// Streaming mic recorder with real-time buffer access (AVAudioEngine)
