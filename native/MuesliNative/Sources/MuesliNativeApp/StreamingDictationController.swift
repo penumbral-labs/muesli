@@ -42,6 +42,11 @@ private final class NemotronStreamingTranscriberAdapter: NemotronStreamingTransc
 
 @available(macOS 15, *)
 final class StreamingDictationController {
+    private enum DrainResult {
+        case finished
+        case waitingForStreamState
+    }
+
     /// Called with the full accumulated transcript so far (on a background thread).
     var onPartialText: ((String) -> Void)?
     var onFailure: ((Error) -> Void)?
@@ -257,12 +262,29 @@ final class StreamingDictationController {
         }
         guard shouldStart else { return }
         Task { [weak self] in
-            await self?.drainQueue(sessionID: sessionID)
-            self?.markDrainFinished(sessionID: sessionID)
+            let result = await self?.drainQueue(sessionID: sessionID)
+            switch result {
+            case .finished:
+                self?.markDrainFinished(sessionID: sessionID)
+            case .waitingForStreamState:
+                self?.markDrainPausedForStreamState(sessionID: sessionID)
+            case .none:
+                break
+            }
         }
     }
 
     private func markDrainFinished(sessionID: UUID) {
+        let shouldContinue = streamState != nil && queueLock.withLock { !chunkQueue.isEmpty }
+        drainLock.withLock {
+            isDraining = false
+        }
+        if shouldContinue {
+            startDrainIfNeeded(sessionID: sessionID)
+        }
+    }
+
+    private func markDrainPausedForStreamState(sessionID: UUID) {
         let shouldContinue = streamState != nil && queueLock.withLock { !chunkQueue.isEmpty }
         drainLock.withLock {
             isDraining = false
@@ -327,26 +349,26 @@ final class StreamingDictationController {
     }
 
     /// Process all queued chunks serially, one at a time.
-    private func drainQueue(sessionID: UUID) async {
+    private func drainQueue(sessionID: UUID) async -> DrainResult {
         while true {
-            guard isCurrentSession(sessionID) else { return }
+            guard isCurrentSession(sessionID) else { return .finished }
             let chunk: [Float]? = queueLock.withLock {
                 chunkQueue.isEmpty ? nil : chunkQueue.removeFirst()
             }
-            guard let chunk else { return }
+            guard let chunk else { return .finished }
 
             guard var state = streamState else {
-                guard isCurrentSession(sessionID) else { return }
+                guard isCurrentSession(sessionID) else { return .finished }
                 queueLock.withLock {
                     chunkQueue.insert(chunk, at: 0)
                 }
-                return
+                return .waitingForStreamState
             }
 
             let start = CFAbsoluteTimeGetCurrent()
             do {
                 let newText = try await transcriber.transcribeChunk(samples: chunk, state: &state)
-                guard isCurrentSession(sessionID) else { return }
+                guard isCurrentSession(sessionID) else { return .finished }
                 streamState = state
                 let elapsed = CFAbsoluteTimeGetCurrent() - start
 

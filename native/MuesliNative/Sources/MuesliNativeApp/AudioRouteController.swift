@@ -64,15 +64,16 @@ enum AudioRouteClassifier {
             // If CoreAudio only exposes generic Bluetooth metadata, a high-rate
             // output with an input stream is more likely a speakerphone/soundbar
             // profile than a headset microphone profile.
-            // Known limitation: low-rate Bluetooth speakers with embedded mics
-            // can look headset-like when CoreAudio omits terminal/data-source
-            // metadata.
             if device.hasInputStreams,
                let sampleRate = device.nominalSampleRate,
                sampleRate > 24_000 {
                 return .speakerLike
             }
-            return device.hasInputStreams ? .headphoneLike : .speakerLike
+            // Only apply the headset fallback when CoreAudio gives us no
+            // terminal/data-source signal at all. Unknown Bluetooth devices
+            // with any non-headphone metadata stay speaker-like so opt-in
+            // ducking still protects against external speaker bleed.
+            return device.hasInputStreams && routeKinds.isEmpty ? .headphoneLike : .speakerLike
         }
 
         // Conservative fallback: wired headphones, USB headsets, or DACs that

@@ -222,7 +222,9 @@ final class MicrophoneRecorder: @unchecked Sendable {
         // AVAudioEngine.stop() must happen before waiting here: after it returns,
         // CoreAudio will not enter new tap callbacks, so this wait only drains
         // callbacks that already reached the dispatch group.
-        tapCallbackGroup.wait()
+        if tapCallbackGroup.wait(timeout: .now() + 2.0) == .timedOut {
+            fputs("[audio-recorder] timed out waiting for tap callbacks during stop\n", stderr)
+        }
         waitForPendingWrites()
         // Second drain is defensive if future write work ever enqueues another
         // writerQueue block before the WAV header is finalized.

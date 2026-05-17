@@ -4354,13 +4354,12 @@ final class MuesliController: NSObject {
             )
             controller.onPartialText = { [weak self] fullText in
                 guard let self else { return }
-                guard self.nemotronStreamingSessionID == sessionID else { return }
-                let delta = String(fullText.dropFirst(self.previousStreamText.count))
-                fputs("[muesli-native] streaming partial: +\"\(delta)\" (total \(fullText.count) chars)\n", stderr)
-                if !delta.isEmpty {
-                    self.previousStreamText = fullText
-                    DispatchQueue.main.async {
-                        guard self.nemotronStreamingSessionID == sessionID else { return }
+                DispatchQueue.main.async {
+                    guard self.isNemotronStreaming, self.nemotronStreamingSessionID == sessionID else { return }
+                    let delta = String(fullText.dropFirst(self.previousStreamText.count))
+                    fputs("[muesli-native] streaming partial: +\"\(delta)\" (total \(fullText.count) chars)\n", stderr)
+                    if !delta.isEmpty {
+                        self.previousStreamText = fullText
                         if self.currentDictationOutputMode != .voiceNote {
                             PasteController.typeText(delta)
                         }
@@ -4519,7 +4518,6 @@ final class MuesliController: NSObject {
         // Nemotron streaming: text already typed — just finalize and store
         if isNemotronStreaming {
             let sessionID = nemotronStreamingSessionID
-            isNemotronStreaming = false
             if #available(macOS 15, *), let controller = _streamingDictationController as? StreamingDictationController {
                 controller.stop { [weak self] finalText in
                     DispatchQueue.main.async {
@@ -4558,10 +4556,11 @@ final class MuesliController: NSObject {
         startedAt: Date,
         sessionID: UUID?
     ) {
-        guard nemotronStreamingSessionID == sessionID else {
+        guard isNemotronStreaming, nemotronStreamingSessionID == sessionID else {
             fputs("[muesli-native] ignoring stale Nemotron stop completion\n", stderr)
             return
         }
+        isNemotronStreaming = false
         _streamingDictationController = nil
         nemotronStreamingSessionID = nil
         previousStreamText = ""

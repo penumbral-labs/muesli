@@ -292,6 +292,7 @@ final class HotkeyMonitor {
 
                 if active {
                     active = false
+                    prepared = false
                     onStop?()
                 } else if prepared {
                     prepared = false
@@ -313,6 +314,7 @@ final class HotkeyMonitor {
             cancelTimers()
             if active {
                 active = false
+                prepared = false
                 onStop?()
             } else if prepared {
                 prepared = false
@@ -347,6 +349,7 @@ final class HotkeyMonitor {
             if active {
                 fputs("[hotkey] escape → cancel hold\n", stderr)
                 active = false
+                prepared = false
                 targetKeyDown = false
                 armed = false
                 cancelTimers()
@@ -374,6 +377,7 @@ final class HotkeyMonitor {
                 cancelTimers()
                 if active {
                     active = false
+                    prepared = false
                     onStop?()
                 } else if prepared {
                     prepared = false
