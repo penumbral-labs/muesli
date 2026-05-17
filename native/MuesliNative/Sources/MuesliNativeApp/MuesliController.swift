@@ -4560,9 +4560,22 @@ final class MuesliController: NSObject {
     }
 
     private func cancelDictationAudioSessionForMeetingRecordingIfNeeded() {
-        guard dictationAudioSessionManager.hasActiveSession else { return }
+        guard dictationAudioSessionManager.hasActiveSession || isNemotronStreaming else { return }
         fputs("[muesli-native] cancelling dictation audio session because meeting is active\n", stderr)
-        dictationAudioSessionManager.cancel(reason: "meeting-active")
+
+        if isNemotronStreaming {
+            isNemotronStreaming = false
+            if #available(macOS 15, *), let controller = _streamingDictationController as? StreamingDictationController {
+                controller.cancel()
+            }
+            _streamingDictationController = nil
+            nemotronStreamingSessionID = nil
+            previousStreamText = ""
+            dictationAudioSessionManager.endExternalSession(reason: "meeting-active")
+        } else {
+            dictationAudioSessionManager.cancel(reason: "meeting-active")
+        }
+
         dictationStartedAt = nil
         capturedDictationContext = nil
         pendingDictationStopSessionID = nil
