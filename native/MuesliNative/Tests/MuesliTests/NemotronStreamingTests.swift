@@ -190,6 +190,32 @@ struct StreamingDictationControllerTests {
     }
 
     @available(macOS 15, *)
+    @Test("start during stop does not drop pending stop completion")
+    func startDuringStopDoesNotDropPendingStopCompletion() async {
+        let transcriber = DelayedNemotronStreamingTranscriber()
+        let recorder = InspectableStreamingDictationRecorder()
+        let controller = StreamingDictationController(
+            transcriber: transcriber,
+            recorder: recorder
+        )
+
+        #expect(controller.start() == true)
+        recorder.emit(samples: [Float](repeating: 0.2, count: 8960))
+
+        async let stoppedText = stop(controller)
+        try? await Task.sleep(for: .milliseconds(25))
+        #expect(controller.start() == false)
+        #expect(recorder.stopCalls == 1)
+        #expect(recorder.startCalls == 1)
+
+        await transcriber.releaseState()
+        let text = await stoppedText
+        #expect(text == " hello")
+        #expect(controller.start() == true)
+        controller.cancel()
+    }
+
+    @available(macOS 15, *)
     @Test("stop completes when stream state initialization stalls")
     func stopCompletesWhenStreamStateInitializationStalls() async {
         let transcriber = HangingNemotronStreamingTranscriber()

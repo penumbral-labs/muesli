@@ -109,6 +109,7 @@ final class StreamingDictationController {
     @discardableResult
     func start() -> Bool {
         guard !isActive else { return true }
+        guard stopLock.withLock({ !isStopping }) else { return false }
         let sessionID = UUID()
         isActive = true
         activeSessionID = sessionID
@@ -116,7 +117,6 @@ final class StreamingDictationController {
         sampleBuffer.removeAll()
         chunkQueue.removeAll()
         stopLock.withLock {
-            isStopping = false
             stopCompletions.removeAll()
         }
         streamState = nil
