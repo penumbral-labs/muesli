@@ -199,8 +199,8 @@ struct AudioRouteClassifierTests {
         #expect(route == .speakerLike)
     }
 
-    @Test("USB headset without terminal metadata is headphone-like")
-    func usbHeadsetWithoutTerminalMetadataIsHeadphoneLike() {
+    @Test("USB headset without terminal metadata is speaker-like")
+    func usbHeadsetWithoutTerminalMetadataIsSpeakerLike() {
         let route = AudioRouteClassifier.outputRouteKind(
             for: AudioOutputDeviceDescription(
                 name: "USB Audio Device",
@@ -210,7 +210,7 @@ struct AudioRouteClassifierTests {
             )
         )
 
-        #expect(route == .headphoneLike)
+        #expect(route == .speakerLike)
     }
 
     @Test("USB output without input or terminal metadata is speaker-like")
@@ -227,8 +227,8 @@ struct AudioRouteClassifierTests {
         #expect(route == .speakerLike)
     }
 
-    @Test("Thunderbolt device without terminal metadata is headphone-like")
-    func thunderboltDeviceWithoutTerminalMetadataIsHeadphoneLike() {
+    @Test("Thunderbolt device without terminal metadata is speaker-like")
+    func thunderboltDeviceWithoutTerminalMetadataIsSpeakerLike() {
         let route = AudioRouteClassifier.outputRouteKind(
             for: AudioOutputDeviceDescription(
                 name: "Thunderbolt Audio Device",
@@ -238,7 +238,7 @@ struct AudioRouteClassifierTests {
             )
         )
 
-        #expect(route == .headphoneLike)
+        #expect(route == .speakerLike)
     }
 
     @Test("built-in output without route metadata is speaker-like")

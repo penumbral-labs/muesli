@@ -88,12 +88,12 @@ final class AudioDuckingController: AudioDuckingManaging {
     func beginDictationDucking(enabled: Bool) {
         queue.async { [self] in
             guard enabled else {
-                self.cancelPendingRestoreLocked()
+                self.cancelPendingRestoreLocked(preserveCompletions: true)
                 self.duckingEnabledForSession = false
                 self.restoreLocked(completion: nil)
                 return
             }
-            self.cancelPendingRestoreLocked()
+            self.cancelPendingRestoreLocked(preserveCompletions: false)
             self.duckingEnabledForSession = true
             guard self.shouldDuckCurrentOutput() else { return }
             self.duckCurrentDefaultDevice()
@@ -173,11 +173,13 @@ final class AudioDuckingController: AudioDuckingManaging {
         )
     }
 
-    private func cancelPendingRestoreLocked() {
+    private func cancelPendingRestoreLocked(preserveCompletions: Bool) {
         guard isRestorePending else { return }
         restoreGeneration += 1
         isRestorePending = false
-        restoreCompletions.removeAll()
+        if !preserveCompletions {
+            restoreCompletions.removeAll()
+        }
     }
 
     private func scheduleRestoreAfterCodecStabilizationLocked(generation: Int, deadline: Date) {

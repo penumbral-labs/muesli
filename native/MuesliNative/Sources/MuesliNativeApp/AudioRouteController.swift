@@ -81,10 +81,6 @@ enum AudioRouteClassifier {
             return .speakerLike
         }
 
-        if routeKinds.isEmpty, isLikelyPersonalWiredOutput(device) {
-            return .headphoneLike
-        }
-
         return .speakerLike
     }
 
@@ -101,19 +97,6 @@ enum AudioRouteClassifier {
         return device.outputTerminalTypes.union(device.outputDataSourceKinds).isEmpty
     }
 
-    private static func isLikelyPersonalWiredOutput(_ device: AudioOutputDeviceDescription) -> Bool {
-        guard let transportType = device.transportType else { return false }
-        switch transportType {
-        case kAudioDeviceTransportTypeUSB,
-             kAudioDeviceTransportTypeThunderbolt:
-            // Missing terminal metadata leaves USB/TB ambiguous. Only
-            // bidirectional devices can plausibly be headsets; pure outputs
-            // stay speaker-like so ducking remains available.
-            return device.hasInputStreams
-        default:
-            return false
-        }
-    }
 }
 
 protocol DictationAudioRouting: AnyObject {

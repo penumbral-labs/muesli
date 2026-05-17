@@ -286,8 +286,8 @@ struct AudioDuckingControllerTests {
         ])
     }
 
-    @Test("disabling ducking during pending restore cancels stale completions")
-    func disablingDuckingDuringPendingRestoreCancelsStaleCompletions() {
+    @Test("disabling ducking during pending restore preserves restore completions")
+    func disablingDuckingDuringPendingRestorePreservesRestoreCompletions() {
         let client = FakeAudioDuckingDeviceClient()
         client.activityStatus = .active
         client.defaultDeviceID = 1
@@ -313,7 +313,7 @@ struct AudioDuckingControllerTests {
         Thread.sleep(forTimeInterval: 0.07)
         controller.waitForIdle()
 
-        #expect(restoreCompletionCount == 0)
+        #expect(restoreCompletionCount == 1)
         #expect(client.muteValues[.init(1, kAudioObjectPropertyElementMain)] == false)
         #expect(client.muteSetCalls == [
             .init(deviceID: 1, element: kAudioObjectPropertyElementMain, value: true),
