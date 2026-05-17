@@ -60,6 +60,7 @@ final class StreamingDictationController {
     private var activeSessionID: UUID?
     private var streamStateTask: Task<Void, Never>?
     private let chunkSamples = 8960  // 560ms at 16kHz
+    private static let stopStreamStateTimeout: TimeInterval = 1.0
     private static let stopDrainTimeout: TimeInterval = 1.0
 
     init(
@@ -174,7 +175,11 @@ final class StreamingDictationController {
         startDrainIfNeeded(sessionID: sessionID)
         let initializationTask = streamStateTask
         Task {
-            await initializationTask?.value
+            await self.waitForStreamStateInitialization(
+                initializationTask,
+                sessionID: sessionID,
+                timeout: Self.stopStreamStateTimeout
+            )
             self.startDrainIfNeeded(sessionID: sessionID)
             await self.waitForDrain(sessionID: sessionID, timeout: Self.stopDrainTimeout)
             let transcript = self.finishStoppedSession(sessionID: sessionID)
@@ -277,6 +282,28 @@ final class StreamingDictationController {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         fputs("[streaming-dictation] stop drain timed out\n", stderr)
+    }
+
+    private func waitForStreamStateInitialization(
+        _ task: Task<Void, Never>?,
+        sessionID: UUID,
+        timeout: TimeInterval
+    ) async {
+        guard let task else { return }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                await task.value
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                task.cancel()
+            }
+            await group.next()
+            group.cancelAll()
+        }
+        if isCurrentSession(sessionID), streamState == nil {
+            fputs("[streaming-dictation] stream state init timed out during stop\n", stderr)
+        }
     }
 
     private func finishStoppedSession(sessionID: UUID) -> String {
