@@ -60,6 +60,7 @@ final class StreamingDictationController {
     private let transcriber: NemotronStreamingTranscribing
     private let recorder: StreamingDictationRecording
     private var streamState: NemotronStreamingTranscriber.StreamState?
+    private let streamLock = OSAllocatedUnfairLock()
     private var sampleBuffer: [Float] = []
     private let bufferLock = OSAllocatedUnfairLock()
     private var chunkQueue: [[Float]] = []
@@ -134,11 +135,13 @@ final class StreamingDictationController {
             return true
         }
         guard didStartSession else { return true }
-        fullTranscript = ""
+        streamLock.withLock {
+            fullTranscript = ""
+            streamState = nil
+        }
         queueLock.withLock {
             chunkQueue.removeAll()
         }
-        streamState = nil
         drainLock.withLock {
             isDraining = false
         }
@@ -163,7 +166,9 @@ final class StreamingDictationController {
             do {
                 let state = try await transcriber.makeStreamState()
                 guard let self, self.isCurrentSession(sessionID) else { return }
-                streamState = state
+                self.streamLock.withLock {
+                    self.streamState = state
+                }
                 fputs("[streaming-dictation] stream state ready, draining queued chunks\n", stderr)
                 startDrainIfNeeded(sessionID: sessionID)
             } catch {
@@ -185,7 +190,7 @@ final class StreamingDictationController {
             if let activeSessionID = sessionIDs.active {
                 if var stopState {
                     guard stopState.sessionID == activeSessionID else {
-                        return .immediate(fullTranscript)
+                        return .immediate(currentTranscript())
                     }
                     stopState.completions.append(completion)
                     self.stopState = stopState
@@ -201,13 +206,13 @@ final class StreamingDictationController {
             }
             if let stoppingSessionID = sessionIDs.stopping {
                 guard var stopState, stopState.sessionID == stoppingSessionID else {
-                    return .immediate(fullTranscript)
+                    return .immediate(currentTranscript())
                 }
                 stopState.completions.append(completion)
                 self.stopState = stopState
                 return .attached
             }
-            return .immediate(fullTranscript)
+            return .immediate(currentTranscript())
         }
 
         let sessionID: UUID
@@ -252,10 +257,10 @@ final class StreamingDictationController {
                 timeout: self.stopStreamStateTimeout
             )
             guard self.isCurrentSession(sessionID) else {
-                self.completeStop(sessionID: sessionID, with: self.fullTranscript)
+                self.completeStop(sessionID: sessionID, with: self.currentTranscript())
                 return
             }
-            guard streamStateReady || self.streamState != nil else {
+            guard streamStateReady || self.hasStreamState() else {
                 let transcript = self.finishStoppedSession(sessionID: sessionID)
                 self.completeStop(sessionID: sessionID, with: transcript)
                 return
@@ -289,7 +294,7 @@ final class StreamingDictationController {
         streamStateTask?.cancel()
         streamStateTask = nil
         if let completionSessionID {
-            completeStop(sessionID: completionSessionID, with: fullTranscript)
+            completeStop(sessionID: completionSessionID, with: currentTranscript())
         }
         if cancelRecorder {
             recorder.cancel()
@@ -300,7 +305,9 @@ final class StreamingDictationController {
         drainLock.withLock {
             isDraining = false
         }
-        streamState = nil
+        streamLock.withLock {
+            streamState = nil
+        }
     }
 
     private func completeStop(sessionID: UUID, with transcript: String) {
@@ -345,7 +352,7 @@ final class StreamingDictationController {
 
     private func startDrainIfNeeded(sessionID: UUID) {
         guard isCurrentSession(sessionID) else { return }
-        guard streamState != nil else { return }
+        guard hasStreamState() else { return }
         let shouldStart = drainLock.withLock {
             if isDraining { return false }
             isDraining = true
@@ -366,7 +373,7 @@ final class StreamingDictationController {
     }
 
     private func markDrainFinished(sessionID: UUID) {
-        let shouldContinue = streamState != nil && queueLock.withLock { !chunkQueue.isEmpty }
+        let shouldContinue = hasStreamState() && queueLock.withLock { !chunkQueue.isEmpty }
         drainLock.withLock {
             isDraining = false
         }
@@ -376,7 +383,7 @@ final class StreamingDictationController {
     }
 
     private func markDrainPausedForStreamState(sessionID: UUID) {
-        let shouldContinue = streamState != nil && queueLock.withLock { !chunkQueue.isEmpty }
+        let shouldContinue = hasStreamState() && queueLock.withLock { !chunkQueue.isEmpty }
         drainLock.withLock {
             isDraining = false
         }
@@ -412,12 +419,12 @@ final class StreamingDictationController {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             guard isCurrentSession(sessionID) else { return false }
-            if streamState != nil { return true }
+            if hasStreamState() { return true }
             if streamStateTask == nil { return true }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         task.cancel()
-        if isCurrentSession(sessionID), streamState == nil {
+        if isCurrentSession(sessionID), !hasStreamState() {
             fputs("[streaming-dictation] stream state init timed out during stop\n", stderr)
         }
         return false
@@ -435,7 +442,7 @@ final class StreamingDictationController {
             }
             return true
         }
-        guard didFinishCurrentSession else { return fullTranscript }
+        guard didFinishCurrentSession else { return currentTranscript() }
         streamStateTask = nil
         queueLock.withLock {
             chunkQueue.removeAll()
@@ -443,10 +450,20 @@ final class StreamingDictationController {
         drainLock.withLock {
             isDraining = false
         }
-        streamState = nil
-        let transcript = fullTranscript
+        let transcript = streamLock.withLock { () -> String in
+            streamState = nil
+            return fullTranscript
+        }
         fputs("[streaming-dictation] stopped, transcript (\(transcript.count) chars): \(transcript.prefix(100))...\n", stderr)
         return transcript
+    }
+
+    private func currentTranscript() -> String {
+        streamLock.withLock { fullTranscript }
+    }
+
+    private func hasStreamState() -> Bool {
+        streamLock.withLock { streamState != nil }
     }
 
     /// Process all queued chunks serially, one at a time.
@@ -458,7 +475,7 @@ final class StreamingDictationController {
             }
             guard let chunk else { return .finished }
 
-            guard var state = streamState else {
+            guard var state = streamLock.withLock({ streamState }) else {
                 guard isCurrentSession(sessionID) else { return .finished }
                 queueLock.withLock {
                     chunkQueue.insert(chunk, at: 0)
@@ -470,20 +487,29 @@ final class StreamingDictationController {
             do {
                 let newText = try await transcriber.transcribeChunk(samples: chunk, state: &state)
                 guard isCurrentSession(sessionID) else { return .finished }
-                streamState = state
                 let elapsed = CFAbsoluteTimeGetCurrent() - start
 
-                if !newText.isEmpty {
+                let updatedState = state
+                let transcript = streamLock.withLock { () -> String? in
+                    streamState = updatedState
+                    guard !newText.isEmpty else { return nil }
                     fullTranscript += newText
+                    return fullTranscript
+                }
+                if !newText.isEmpty {
                     fputs("[streaming-dictation] chunk → \"\(newText)\" (\(String(format: "%.0f", elapsed * 1000))ms)\n", stderr)
-                    onPartialText?(fullTranscript)
+                    if let transcript {
+                        onPartialText?(transcript)
+                    }
                 } else {
                     fputs("[streaming-dictation] chunk → (silence) (\(String(format: "%.0f", elapsed * 1000))ms)\n", stderr)
                 }
             } catch {
                 fputs("[streaming-dictation] chunk error: \(error)\n", stderr)
                 guard isCurrentSession(sessionID) else { return .finished }
-                streamState = nil
+                streamLock.withLock {
+                    streamState = nil
+                }
                 failActiveSession(sessionID: sessionID, error: error)
                 return .finished
             }
