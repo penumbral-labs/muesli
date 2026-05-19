@@ -258,6 +258,7 @@ final class MuesliController: NSObject {
     private var isStoppingMeetingRecording = false
     private var meetingStartTask: Task<Void, Never>?
     private var meetingStartMeetingID: Int64?
+    private var importTask: Task<Void, Never>?
     private var canceledMeetingStartIDs = Set<Int64>()
     private var hasStarted = false
 
@@ -2791,10 +2792,11 @@ final class MuesliController: NSObject {
 
         isStartingMeetingRecording = true
 
-        Task { @MainActor [weak self] in
+        importTask = Task { @MainActor [weak self] in
             guard let self else { return }
             guard let sourceURL = await AudioFileImportController.selectFile() else {
                 self.isStartingMeetingRecording = false
+                self.importTask = nil
                 return
             }
             await self.importAudioFile(from: sourceURL)
@@ -2814,7 +2816,7 @@ final class MuesliController: NSObject {
 
         isStartingMeetingRecording = true
 
-        Task { @MainActor [weak self] in
+        importTask = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.importAudioFile(from: url)
         }
@@ -2844,6 +2846,7 @@ final class MuesliController: NSObject {
             )
 
             await MainActor.run {
+                self.importTask = nil
                 self.isStartingMeetingRecording = false
                 self.updateMeetingStartStatus(nil)
                 self.endMeetingActivity()
@@ -2856,42 +2859,51 @@ final class MuesliController: NSObject {
             }
         } catch {
             await MainActor.run {
+                self.importTask = nil
                 self.isStartingMeetingRecording = false
                 self.updateMeetingStartStatus(nil)
                 self.endMeetingActivity()
                 self.statusBarController?.setStatus("Idle")
                 self.statusBarController?.refresh()
                 self.syncAppState()
-                self.presentErrorAlert(
-                    title: "Import Failed",
-                    message: error.localizedDescription
-                )
+                // Only show error if import was not cancelled by the user
+                if !Task.isCancelled {
+                    self.presentErrorAlert(
+                        title: "Import Failed",
+                        message: error.localizedDescription
+                    )
+                }
             }
         }
     }
 
     func cancelMeetingPreparation() {
-        guard isStartingMeetingRecording,
-              activeMeetingSession == nil,
-              let meetingID = meetingStartMeetingID else {
-            return
+        guard isStartingMeetingRecording, activeMeetingSession == nil else { return }
+
+        if let meetingID = meetingStartMeetingID {
+            // Live meeting start cancellation
+            canceledMeetingStartIDs.insert(meetingID)
+            meetingStartTask?.cancel()
+            resolveLiveMeetingAfterStartFailure(id: meetingID)
+            meetingMonitor.resumeAfterCooldown()
+            meetingMonitor.refreshState()
+            meetingStartTask = nil
+            meetingStartMeetingID = nil
+            syncDictationRecorderWarmup(reason: "meeting-start-cancelled")
+        } else {
+            // Audio import cancellation
+            importTask?.cancel()
+            importTask = nil
         }
-        canceledMeetingStartIDs.insert(meetingID)
-        meetingStartTask?.cancel()
-        resolveLiveMeetingAfterStartFailure(id: meetingID)
-        meetingMonitor.resumeAfterCooldown()
-        meetingMonitor.refreshState()
+
         statusBarController?.setStatus("Idle")
         statusBarController?.refresh()
         setState(.idle)
         endMeetingActivity()
-        meetingStartTask = nil
-        meetingStartMeetingID = nil
         isStartingMeetingRecording = false
         updateMeetingStartStatus(nil)
         updateMeetingNotificationVisibility()
         syncAppState()
-        syncDictationRecorderWarmup(reason: "meeting-start-cancelled")
     }
 
     private func finishMeetingStartAttempt(meetingID: Int64) {
