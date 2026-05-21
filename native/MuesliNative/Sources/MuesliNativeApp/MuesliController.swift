@@ -1916,6 +1916,14 @@ final class MuesliController: NSObject {
         openHistoryWindow(tab: .settings)
     }
 
+    @objc func focusSearchField() {
+        guard ensureBasicDictationPermissionsBeforeDashboard() else { return }
+        presentHistoryWindow()
+        DispatchQueue.main.async { [weak self] in
+            self?.appState.focusSearchField = true
+        }
+    }
+
     @objc func checkForUpdates() {
         presentStandardUpdateCheck()
     }
