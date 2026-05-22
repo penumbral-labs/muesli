@@ -1,6 +1,14 @@
 import DTLNAecCoreML
 import Foundation
 
+protocol MeetingAecProcessor: AnyObject {
+    var name: String { get }
+    var frameSize: Int { get }
+    var sampleRate: Int { get }
+    func reset()
+    func processFrame(mic: [Float], reference: [Float]) throws -> [Float]
+}
+
 enum MeetingAecModelBundle {
     static let bundleName = "DTLNAecCoreML_DTLNAec512.bundle"
 
@@ -42,12 +50,57 @@ enum MeetingAecModelBundle {
     }
 }
 
+final class DTLNMeetingAecProcessor: MeetingAecProcessor {
+    let name = "dtln"
+    let frameSize = 512
+    let sampleRate = 16_000
+    private let processor: DTLNAecEchoProcessor
+
+    private init(processor: DTLNAecEchoProcessor) {
+        self.processor = processor
+    }
+
+    static func load() async throws -> DTLNMeetingAecProcessor {
+        let proc = DTLNAecEchoProcessor(modelSize: .large)
+        try await proc.loadModelsAsync(from: MeetingAecModelBundle.resolve())
+        return DTLNMeetingAecProcessor(processor: proc)
+    }
+
+    func reset() {
+        processor.resetStates()
+    }
+
+    func processFrame(mic: [Float], reference: [Float]) throws -> [Float] {
+        processor.feedFarEnd(reference)
+        return processor.processNearEnd(mic)
+    }
+}
+
+enum MeetingAecProcessorSelection {
+    case production
+    case localVQEStrict
+    case dtlnOnly
+
+    static var environmentDefault: MeetingAecProcessorSelection {
+        switch ProcessInfo.processInfo.environment["MUESLI_AEC_PROCESSOR"]?.lowercased() {
+        case "dtln":
+            return .dtlnOnly
+        case "localvqe-strict":
+            return .localVQEStrict
+        default:
+            return .production
+        }
+    }
+}
+
 final class MeetingNeuralAec {
-    private var processor: DTLNAecEchoProcessor?
+    private var processor: MeetingAecProcessor?
     private var isLoaded = false
 
-    private let frameSize = 512
+    private var frameSize = 256
     private let sampleRate = 16_000
+    private let selection: MeetingAecProcessorSelection
+    private var lastProcessingError: String?
 
     // Accessed only from MeetingSession's chunkRotationQueue.
     //
@@ -57,6 +110,7 @@ final class MeetingNeuralAec {
     private var pendingMicSamples: [Float] = []
     private var pendingMicStartSample: Int = 0
     private var systemHistory: [Float] = []
+    private var systemTimelineStartSample: Int?
     private var systemHistoryStartSample: Int = 0
     private var micHistory: [Float] = []
     private var micHistoryStartSample: Int = 0
@@ -72,14 +126,43 @@ final class MeetingNeuralAec {
     private var recentDelayResults: [MeetingAecDelayEstimator.Result] = []
     private var delayHistory: [MeetingAecDelayObservation] = []
     private var delaySkipHistory: [MeetingAecDelaySkip] = []
+    private let maxReferenceWaitSamples = 48_000
 
-    /// Pre-load the DTLN-aec model so it's ready for processing.
+    init(selection: MeetingAecProcessorSelection = .environmentDefault) {
+        self.selection = selection
+    }
+
+    init(preloadedProcessor processor: MeetingAecProcessor) {
+        self.selection = .production
+        self.processor = processor
+        self.frameSize = processor.frameSize
+        self.isLoaded = true
+    }
+
+    /// Pre-load the meeting AEC processor so it's ready for processing.
     func preload() async {
         guard !isLoaded else { return }
-        let proc = DTLNAecEchoProcessor(modelSize: .large)
+
+        if selection != .dtlnOnly {
+            do {
+                let localVQE = try await LocalVQEAudioProcessor.load()
+                processor = localVQE
+                frameSize = localVQE.frameSize
+                isLoaded = true
+                fputs("[meeting-aec] LocalVQE preloaded (\(localVQE.libraryPath), model: \(localVQE.modelPath))\n", stderr)
+                return
+            } catch {
+                fputs("[meeting-aec] LocalVQE preload failed: \(error)\n", stderr)
+                if selection == .localVQEStrict {
+                    return
+                }
+            }
+        }
+
         do {
-            try await proc.loadModelsAsync(from: MeetingAecModelBundle.resolve())
-            processor = proc
+            let dtln = try await DTLNMeetingAecProcessor.load()
+            processor = dtln
+            frameSize = dtln.frameSize
             isLoaded = true
             fputs("[meeting-aec] DTLN-aec model preloaded\n", stderr)
         } catch {
@@ -89,10 +172,11 @@ final class MeetingNeuralAec {
 
     /// Reset processor state and streaming buffers for a new meeting.
     func resetForStreaming() {
-        processor?.resetStates()
+        processor?.reset()
         pendingMicSamples.removeAll(keepingCapacity: true)
         pendingMicStartSample = 0
         systemHistory.removeAll(keepingCapacity: true)
+        systemTimelineStartSample = nil
         systemHistoryStartSample = 0
         micHistory.removeAll(keepingCapacity: true)
         micHistoryStartSample = 0
@@ -107,17 +191,22 @@ final class MeetingNeuralAec {
         recentDelayResults.removeAll(keepingCapacity: true)
         delayHistory.removeAll(keepingCapacity: true)
         delaySkipHistory.removeAll(keepingCapacity: true)
+        lastProcessingError = nil
     }
 
     /// Buffer system audio samples indexed by absolute position.
     func feedSystemSamples(_ samples: [Float]) {
+        if systemTimelineStartSample == nil {
+            systemTimelineStartSample = 0
+            systemHistoryStartSample = 0
+        }
         systemHistory.append(contentsOf: samples)
         systemSamplesReceived += samples.count
         updateDelayEstimateIfNeeded()
         trimHistoryBuffersIfNeeded()
     }
 
-    /// Process mic samples through DTLN-aec using the currently estimated far-end delay.
+    /// Process mic samples through the loaded AEC processor using the currently estimated far-end delay.
     func processStreamingMic(_ micSamples: [Float]) -> [Float] {
         guard let processor else {
             fputs("[meeting-aec] processor not loaded, passing through raw mic audio\n", stderr)
@@ -137,18 +226,34 @@ final class MeetingNeuralAec {
         return processQueuedFrames(processor: processor, flush: true)
     }
 
-    private func processQueuedFrames(processor: DTLNAecEchoProcessor, flush: Bool) -> [Float] {
+    private func referenceDelaySamples(for processor: MeetingAecProcessor? = nil) -> Int {
+        let activeProcessor = processor ?? self.processor
+        return activeProcessor?.name == "localvqe" ? 0 : currentDelaySamples
+    }
+
+    private func processQueuedFrames(processor: MeetingAecProcessor, flush: Bool) -> [Float] {
         var cleaned: [Float] = []
         cleaned.reserveCapacity(pendingMicSamples.count)
 
         while pendingMicSamples.count >= frameSize {
+            if !flush,
+               !canProcessFrameStartingAt(pendingMicStartSample, processor: processor),
+               pendingMicSamples.count <= maxReferenceWaitSamples {
+                break
+            }
+
             let micFrame = Array(pendingMicSamples.prefix(frameSize))
             pendingMicSamples.removeFirst(frameSize)
 
-            let systemFrame = systemFrame(forMicFrameStartingAt: pendingMicStartSample, force: flush)
+            let systemFrame = systemFrame(forMicFrameStartingAt: pendingMicStartSample, processor: processor)
             autoreleasepool {
-                processor.feedFarEnd(systemFrame)
-                cleaned.append(contentsOf: processor.processNearEnd(micFrame))
+                do {
+                    cleaned.append(contentsOf: try processor.processFrame(mic: micFrame, reference: systemFrame))
+                } catch {
+                    lastProcessingError = "\(error)"
+                    fputs("[meeting-aec] \(processor.name) processing failed: \(error); passing through raw frame\n", stderr)
+                    cleaned.append(contentsOf: micFrame)
+                }
             }
 
             pendingMicStartSample += frameSize
@@ -160,11 +265,16 @@ final class MeetingNeuralAec {
             let micFrame = pendingMicSamples + [Float](repeating: 0, count: frameSize - actualCount)
             pendingMicSamples.removeAll(keepingCapacity: true)
 
-            let systemFrame = systemFrame(forMicFrameStartingAt: pendingMicStartSample, force: true)
+            let systemFrame = systemFrame(forMicFrameStartingAt: pendingMicStartSample, processor: processor)
             var cleanedFrame: [Float] = []
             autoreleasepool {
-                processor.feedFarEnd(systemFrame)
-                cleanedFrame = processor.processNearEnd(micFrame)
+                do {
+                    cleanedFrame = try processor.processFrame(mic: micFrame, reference: systemFrame)
+                } catch {
+                    lastProcessingError = "\(error)"
+                    fputs("[meeting-aec] \(processor.name) flush processing failed: \(error); passing through raw frame\n", stderr)
+                    cleanedFrame = micFrame
+                }
             }
             cleaned.append(contentsOf: cleanedFrame.prefix(actualCount))
             pendingMicStartSample += actualCount
@@ -175,11 +285,24 @@ final class MeetingNeuralAec {
         return cleaned
     }
 
-    private func systemFrame(forMicFrameStartingAt micStart: Int, force: Bool) -> [Float] {
-        let referenceStart = micStart - currentDelaySamples
-        let referenceEnd = referenceStart + frameSize
+    private func canProcessFrameStartingAt(_ micStart: Int, processor: MeetingAecProcessor) -> Bool {
+        let referenceEnd = micStart - referenceDelaySamples(for: processor) + frameSize
+        if referenceEnd <= 0 {
+            return true
+        }
+        return referenceEnd <= systemAbsoluteEndSample
+    }
 
-        if referenceStart >= systemHistoryStartSample, referenceEnd <= systemSamplesReceived {
+    private var systemAbsoluteEndSample: Int {
+        (systemTimelineStartSample ?? 0) + systemSamplesReceived
+    }
+
+    private func systemFrame(forMicFrameStartingAt micStart: Int, processor: MeetingAecProcessor) -> [Float] {
+        let referenceStart = micStart - referenceDelaySamples(for: processor)
+        let referenceEnd = referenceStart + frameSize
+        let systemEndSample = systemAbsoluteEndSample
+
+        if referenceStart >= systemHistoryStartSample, referenceEnd <= systemEndSample {
             let startIndex = referenceStart - systemHistoryStartSample
             let frame = Array(systemHistory[startIndex..<(startIndex + frameSize)])
             fullReferenceFrames += 1
@@ -187,7 +310,7 @@ final class MeetingNeuralAec {
         }
 
         let overlapStart = max(referenceStart, systemHistoryStartSample)
-        let overlapEnd = min(referenceEnd, systemSamplesReceived)
+        let overlapEnd = min(referenceEnd, systemEndSample)
         guard overlapStart < overlapEnd else {
             missingReferenceFrames += 1
             return [Float](repeating: 0, count: frameSize)
@@ -213,7 +336,7 @@ final class MeetingNeuralAec {
         guard micSamplesReceived >= nextDelayEstimateSample else { return }
 
         let maxCandidateDelaySamples = delayEstimator.maxCandidateDelaySamples
-        let latestComparableSystemSample = min(systemSamplesReceived, micSamplesReceived - maxCandidateDelaySamples)
+        let latestComparableSystemSample = min(systemAbsoluteEndSample, micSamplesReceived - maxCandidateDelaySamples)
         guard latestComparableSystemSample > 0 else {
             recordDelaySkip(
                 reason: "waitingForComparableSystemAudio",
@@ -267,7 +390,7 @@ final class MeetingNeuralAec {
     private func trimHistoryBuffersIfNeeded() {
         let maxCandidateDelaySamples = delayEstimator.maxCandidateDelaySamples
         let retentionSamples = delayEstimator.windowSamples + maxCandidateDelaySamples
-        let latestComparableSystemSample = min(systemSamplesReceived, micSamplesReceived - maxCandidateDelaySamples)
+        let latestComparableSystemSample = min(systemAbsoluteEndSample, micSamplesReceived - maxCandidateDelaySamples)
         let oldestNeededForEstimator = latestComparableSystemSample > 0
             ? max(0, latestComparableSystemSample - delayEstimator.windowSamples)
             : 0
@@ -346,7 +469,7 @@ final class MeetingNeuralAec {
     }
 
     private func trimSystemHistory(before samplePosition: Int) {
-        let cappedSamplePosition = min(samplePosition, systemSamplesReceived)
+        let cappedSamplePosition = min(samplePosition, systemAbsoluteEndSample)
         guard cappedSamplePosition > systemHistoryStartSample else { return }
         let removeCount = min(cappedSamplePosition - systemHistoryStartSample, systemHistory.count)
         guard removeCount > 0 else { return }

@@ -1,4 +1,5 @@
 import Foundation
+import LocalVQEBridge
 import Testing
 @testable import MuesliNativeApp
 
@@ -101,6 +102,82 @@ struct MeetingNeuralAecTests {
         #expect(candidates.contains(600))
     }
 
+    @Test("LocalVQE bridge rejects empty model path")
+    func localVQEBridgeRejectsEmptyModelPath() {
+        var error = [CChar](repeating: 0, count: 512)
+        let context = muesli_localvqe_create("", "", 2, &error, Int32(error.count))
+        #expect(context == nil)
+        #expect(String(cString: error).contains("model path"))
+    }
+
+    @Test("LocalVQE bridge reports missing library path")
+    func localVQEBridgeReportsMissingLibraryPath() throws {
+        let modelURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-\(UUID().uuidString).gguf")
+        try Data().write(to: modelURL)
+        var error = [CChar](repeating: 0, count: 512)
+        let context = muesli_localvqe_create(
+            modelURL.path,
+            "/tmp/muesli-missing-localvqe-\(UUID().uuidString).dylib",
+            2,
+            &error,
+            Int32(error.count)
+        )
+        #expect(context == nil)
+        #expect(String(cString: error).contains("Could not load LocalVQE library"))
+    }
+
+    @Test("streaming AEC emits original sample count after flush")
+    func streamingAecFlushPreservesSampleCount() {
+        let processor = PassthroughAecProcessor(frameSize: 256)
+        let aec = MeetingNeuralAec(preloadedProcessor: processor)
+        aec.resetForStreaming()
+        aec.feedSystemSamples([Float](repeating: 0.1, count: 900))
+
+        let input = (0..<777).map { Float($0 % 64) / 64.0 }
+        var output: [Float] = []
+        output.append(contentsOf: aec.processStreamingMic(Array(input.prefix(333))))
+        output.append(contentsOf: aec.processStreamingMic(Array(input.dropFirst(333))))
+        output.append(contentsOf: aec.flushStreamingMic())
+
+        #expect(output.count == input.count)
+        #expect(processor.processedFrameCount == 4)
+    }
+
+    @Test("streaming AEC waits for delayed system reference")
+    func streamingAecWaitsForDelayedSystemReference() {
+        let processor = PassthroughAecProcessor(frameSize: 256)
+        let aec = MeetingNeuralAec(preloadedProcessor: processor)
+        aec.resetForStreaming()
+
+        let input = [Float](repeating: 0.4, count: 640)
+        let immediate = aec.processStreamingMic(input)
+        #expect(immediate.isEmpty)
+        #expect(processor.processedFrameCount == 0)
+
+        aec.feedSystemSamples([Float](repeating: 0.2, count: 640))
+        let afterReference = aec.processStreamingMic([])
+        let flushed = aec.flushStreamingMic()
+
+        #expect(afterReference.count + flushed.count == input.count)
+        #expect(processor.nonZeroReferenceFrameCount > 0)
+        #expect(aec.diagnosticsSnapshot.fullReferenceFrames > 0)
+    }
+
+    @Test("LocalVQE uses timestamp aligned references")
+    func localVQEUsesTimestampAlignedReferences() {
+        let processor = PassthroughAecProcessor(name: "localvqe", frameSize: 256)
+        let aec = MeetingNeuralAec(preloadedProcessor: processor)
+        aec.resetForStreaming()
+        aec.feedSystemSamples([Float](repeating: 0.2, count: 512))
+
+        let input = [Float](repeating: 0.4, count: 512)
+        _ = aec.processStreamingMic(input)
+
+        #expect(processor.firstReferenceFrameFirstSample == 0.2)
+        #expect(processor.processedFrameCount == 2)
+    }
+
     @Test("delay estimator reports missing mic candidate windows")
     func delayEstimatorReportsMissingMicCandidateWindows() throws {
         let estimator = MeetingAecDelayEstimator()
@@ -180,6 +257,37 @@ struct MeetingNeuralAecTests {
                 MeetingAecDelayCandidateScore(delayMs: delayMs, score: 0.8, comparedFrames: 100)
             ]
         )
+    }
+}
+
+private final class PassthroughAecProcessor: MeetingAecProcessor {
+    let name: String
+    let frameSize: Int
+    let sampleRate = 16_000
+    private(set) var processedFrameCount = 0
+    private(set) var nonZeroReferenceFrameCount = 0
+    private(set) var firstReferenceFrameFirstSample: Float?
+
+    init(name: String = "test-passthrough", frameSize: Int) {
+        self.name = name
+        self.frameSize = frameSize
+    }
+
+    func reset() {
+        processedFrameCount = 0
+        nonZeroReferenceFrameCount = 0
+        firstReferenceFrameFirstSample = nil
+    }
+
+    func processFrame(mic: [Float], reference: [Float]) throws -> [Float] {
+        processedFrameCount += 1
+        if firstReferenceFrameFirstSample == nil {
+            firstReferenceFrameFirstSample = reference.first
+        }
+        if reference.contains(where: { abs($0) > 0.0001 }) {
+            nonZeroReferenceFrameCount += 1
+        }
+        return mic
     }
 }
 
