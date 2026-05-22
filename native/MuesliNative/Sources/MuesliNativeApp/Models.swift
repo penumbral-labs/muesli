@@ -548,6 +548,11 @@ struct HotkeyConfig: Codable, Equatable {
         combinationModifiers != nil && combinationKeyCode != nil
     }
 
+    var displayLabel: String {
+        if isCombination { return label }
+        return Self.symbolLabel(for: keyCode) ?? label
+    }
+
     static func label(for keyCode: UInt16) -> String? {
         switch keyCode {
         case 55: return "Left Cmd"
@@ -559,6 +564,21 @@ struct HotkeyConfig: Codable, Equatable {
         case 61: return "Right Option"
         case 56: return "Left Shift"
         case 60: return "Right Shift"
+        default: return nil
+        }
+    }
+
+    static func symbolLabel(for keyCode: UInt16) -> String? {
+        switch keyCode {
+        case 55: return "Left ⌘"
+        case 54: return "Right ⌘"
+        case 63: return "fn"
+        case 59: return "Left ⌃"
+        case 62: return "Right ⌃"
+        case 58: return "Left ⌥"
+        case 61: return "Right ⌥"
+        case 56: return "Left ⇧"
+        case 60: return "Right ⇧"
         default: return nil
         }
     }

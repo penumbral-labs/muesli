@@ -59,7 +59,7 @@ struct ShortcutsView: View {
                         .foregroundStyle(MuesliTheme.textSecondary)
                 }
                 Spacer()
-                hotkeyBadge(appState.config.dictationHotkey.label)
+                hotkeyBadge(appState.config.dictationHotkey)
             }
 
             Divider()
@@ -111,7 +111,7 @@ struct ShortcutsView: View {
                 .background(MuesliTheme.surfaceBorder)
 
             HStack(spacing: MuesliTheme.spacing12) {
-                hotkeyBadge(appState.config.computerUseHotkey.label)
+                hotkeyBadge(appState.config.computerUseHotkey)
                 changeButton(for: .computerUse)
                     .disabled(!appState.config.enableComputerUseHotkey)
                     .opacity(appState.config.enableComputerUseHotkey ? 1 : 0.55)
@@ -161,7 +161,7 @@ struct ShortcutsView: View {
                 .background(MuesliTheme.surfaceBorder)
 
             HStack(spacing: MuesliTheme.spacing12) {
-                hotkeyBadge(appState.config.meetingRecordingHotkey.label)
+                hotkeyBadge(appState.config.meetingRecordingHotkey)
                 changeButton(for: .meetingRecording)
                     .disabled(!appState.config.enableMeetingRecordingHotkey)
                     .opacity(appState.config.enableMeetingRecordingHotkey ? 1 : 0.55)
@@ -180,8 +180,8 @@ struct ShortcutsView: View {
         )
     }
 
-    private func hotkeyBadge(_ label: String) -> some View {
-        Text(label)
+    private func hotkeyBadge(_ hotkey: HotkeyConfig) -> some View {
+        Text(hotkey.displayLabel)
             .font(.system(size: 12, weight: .medium, design: .rounded))
             .foregroundStyle(MuesliTheme.textPrimary)
             .padding(.horizontal, MuesliTheme.spacing12)
@@ -192,6 +192,7 @@ struct ShortcutsView: View {
                 RoundedRectangle(cornerRadius: MuesliTheme.cornerSmall)
                     .strokeBorder(MuesliTheme.surfaceBorder, lineWidth: 1)
             )
+            .help(hotkey.label)
     }
 
     private func shortcutMessage(_ message: String) -> some View {

@@ -1357,6 +1357,15 @@ struct HotkeyConfigTests {
         #expect(HotkeyConfig.label(for: 60) == "Right Shift")
     }
 
+    @Test("display label uses keyboard symbols")
+    func displayLabelUsesKeyboardSymbols() {
+        #expect(HotkeyConfig.default.displayLabel == "Right ⌥")
+        #expect(HotkeyConfig.computerUseDefault.displayLabel == "Right ⌘")
+        #expect(HotkeyConfig.meetingRecordingDefault.displayLabel == "⌘⇧R")
+        #expect(HotkeyConfig(keyCode: 62, label: "Right Ctrl").displayLabel == "Right ⌃")
+        #expect(HotkeyConfig(keyCode: 63, label: "Fn").displayLabel == "fn")
+    }
+
     @Test("unknown key code returns nil")
     func unknownKeyCode() {
         #expect(HotkeyConfig.label(for: 0) == nil)
