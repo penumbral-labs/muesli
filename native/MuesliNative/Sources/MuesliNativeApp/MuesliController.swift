@@ -211,6 +211,7 @@ final class MuesliController: NSObject {
     private let googleCalAuth = GoogleCalendarAuthManager.shared
     private let googleCalClient = GoogleCalendarClient()
     private var calendarCheckTimer: Timer?
+    private var calendarMonitoringStarted = false
     private var meetingStartingNowTimers = [String: Timer]()
     private var notifiedUpcomingEventIDs = Set<String>()
     private var meetingFeatureMonitorsAllowed = false
@@ -520,6 +521,12 @@ final class MuesliController: NSObject {
             }
         }
 
+        // Calendar monitor populates the "Coming Up" section even when
+        // meeting detection is turned off for meeting use cases. Also keep it
+        // running for existing users who enabled meeting feature settings before
+        // onboarding use cases existed.
+        syncCalendarMonitor()
+
         // Defer permission-triggering monitors until after onboarding
         if canRunMainApp && shouldRunMeetingFeatureMonitors {
             startMeetingFeatureMonitors(includeMaraudersMap: true)
@@ -588,6 +595,9 @@ final class MuesliController: NSObject {
         computerUseCommandTask?.cancel()
         computerUseCommandTask = nil
         calendarMonitor.stop()
+        calendarCheckTimer?.invalidate()
+        calendarCheckTimer = nil
+        calendarMonitoringStarted = false
         meetingStartingNowTimers.values.forEach { $0.invalidate() }
         meetingStartingNowTimers.removeAll()
         meetingFeatureMonitorsAllowed = false
@@ -869,6 +879,7 @@ final class MuesliController: NSObject {
         appState.selectedMeetingSummaryBackend = selectedMeetingSummaryBackend
         appState.config = config
         appState.isChatGPTAuthenticated = chatGPTAuth.isAuthenticated
+        syncCalendarMonitor()
         syncMeetingDetectionMonitor()
         updateMeetingNotificationVisibility()
         syncDictationRecorderWarmup(reason: "config")
@@ -1272,6 +1283,8 @@ final class MuesliController: NSObject {
         calendarCheckTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
+                self.calendarMonitor.start()
+                self.refreshAvailableEventKitCalendars()
                 await self.refreshUpcomingCalendarEvents()
                 self.checkUpcomingCalendarNotifications()
                 self.meetingMonitor.refreshState(trigger: .calendarChanged)
@@ -1287,13 +1300,25 @@ final class MuesliController: NSObject {
         }
     }
 
+    private func syncCalendarMonitor() {
+        let shouldRun = meetingFeatureMonitorsAllowed && shouldRunCalendarMonitor
+        if shouldRun && !calendarMonitoringStarted {
+            calendarMonitor.start()
+            startCalendarMonitoring()
+            calendarMonitoringStarted = true
+        } else if !shouldRun && calendarMonitoringStarted {
+            calendarMonitor.stop()
+            calendarCheckTimer?.invalidate()
+            calendarCheckTimer = nil
+            calendarMonitoringStarted = false
+        }
+    }
+
     private func currentOrNearbyCachedCalendarEvent() -> CalendarEventContext? {
         selectCurrentOrNearbyCachedCalendarEvent(from: appState.upcomingCalendarEvents)
     }
 
     private func startMeetingFeatureMonitors(includeMaraudersMap: Bool) {
-        calendarMonitor.start()
-        startCalendarMonitoring()
         if includeMaraudersMap, config.maraudersMapUnlocked {
             startMaraudersMapMonitoring()
         }
@@ -1304,6 +1329,10 @@ final class MuesliController: NSObject {
         config.showMeetingDetectionNotification
             || config.showScheduledMeetingNotifications
             || config.autoRecordMeetings
+    }
+
+    private var shouldRunCalendarMonitor: Bool {
+        config.resolvedOnboardingUseCase.includesMeetings || shouldRunMeetingFeatureMonitors
     }
 
     private func syncMeetingDetectionMonitor() {
@@ -1872,6 +1901,7 @@ final class MuesliController: NSObject {
                 hotkeyMonitor.start()
                 startComputerUseHotkeyMonitorIfNeeded()
             }
+            syncCalendarMonitor()
             // Start monitors that were deferred during onboarding
             if shouldRunMeetingFeatureMonitors {
                 startMeetingFeatureMonitors(includeMaraudersMap: false)
