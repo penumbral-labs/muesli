@@ -602,7 +602,9 @@ struct SettingsView: View {
                     settingsRow("API Key", controlWidth: meetingControlWidth) {
                         PastableSecureField(
                             text: appState.config.customLLMAPIKey,
-                            placeholder: "Optional for local servers",
+                            placeholder: appState.config.customLLMFormat == CustomLLMFormat.anthropic.rawValue
+                                ? "Required for Anthropic API"
+                                : "Optional for local servers",
                             onChange: { val in controller.updateConfig { $0.customLLMAPIKey = val } }
                         )
                         .frame(height: 22)

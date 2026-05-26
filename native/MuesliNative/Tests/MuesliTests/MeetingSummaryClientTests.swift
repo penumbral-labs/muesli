@@ -414,6 +414,18 @@ struct MeetingSummaryClientTests {
                 "https://models.example.com/openai/v1/chat/completions"
         )
 
+        config.customLLMURL = "https://models.example.com/llm/v2/chat/completions"
+        #expect(
+            MeetingSummaryClient.resolveCustomLLMURL(config: config, format: .openAI)?.absoluteString ==
+                "https://models.example.com/llm/v2/chat/completions"
+        )
+
+        config.customLLMURL = "https://models.example.com/openai/deployments/my-model/chat/completions?api-version=2024-10-21"
+        #expect(
+            MeetingSummaryClient.resolveCustomLLMURL(config: config, format: .openAI)?.absoluteString ==
+                "https://models.example.com/openai/deployments/my-model/chat/completions?api-version=2024-10-21"
+        )
+
         config.customLLMURL = "https://models.example.com/v1/chat/completions/"
         #expect(
             MeetingSummaryClient.resolveCustomLLMURL(config: config, format: .openAI)?.absoluteString ==
@@ -470,6 +482,12 @@ struct MeetingSummaryClientTests {
         #expect(
             MeetingSummaryClient.resolveCustomLLMURL(config: config, format: .anthropic)?.absoluteString ==
                 "https://models.example.com/anthropic/v1/messages"
+        )
+
+        config.customLLMURL = "https://models.example.com/anthropic/v2/messages"
+        #expect(
+            MeetingSummaryClient.resolveCustomLLMURL(config: config, format: .anthropic)?.absoluteString ==
+                "https://models.example.com/anthropic/v2/messages"
         )
 
         config.customLLMURL = "https://models.example.com/v1/messages/"
@@ -603,6 +621,46 @@ struct MeetingSummaryClientTests {
         config.customLLMAPIKey = ""
 
         #expect(!MeetingSummaryClient.customLLMRequiresAPIKey(config: config))
+    }
+
+    @Test("LM Studio readiness requires model")
+    func lmStudioReadinessRequiresModel() {
+        var config = AppConfig()
+
+        config.lmStudioModel = ""
+        #expect(!MeetingSummaryClient.lmStudioHasRequiredSettings(config: config))
+
+        config.lmStudioModel = "   "
+        #expect(!MeetingSummaryClient.lmStudioHasRequiredSettings(config: config))
+
+        config.lmStudioModel = "local-model"
+        #expect(MeetingSummaryClient.lmStudioHasRequiredSettings(config: config))
+    }
+
+    @Test("Custom LLM readiness requires model and Anthropic key")
+    func customLLMReadinessRequiresModelAndAnthropicKey() {
+        var config = AppConfig()
+
+        config.customLLMFormat = "openai"
+        config.customLLMModel = ""
+        config.customLLMAPIKey = ""
+        #expect(!MeetingSummaryClient.customLLMHasRequiredSettings(config: config))
+
+        config.customLLMModel = "   "
+        #expect(!MeetingSummaryClient.customLLMHasRequiredSettings(config: config))
+
+        config.customLLMModel = "local-model"
+        #expect(MeetingSummaryClient.customLLMHasRequiredSettings(config: config))
+
+        config.customLLMFormat = "anthropic"
+        config.customLLMAPIKey = ""
+        #expect(!MeetingSummaryClient.customLLMHasRequiredSettings(config: config))
+
+        config.customLLMAPIKey = "   "
+        #expect(!MeetingSummaryClient.customLLMHasRequiredSettings(config: config))
+
+        config.customLLMAPIKey = "sk-ant-test"
+        #expect(MeetingSummaryClient.customLLMHasRequiredSettings(config: config))
     }
 
     @Test("generateTitle returns nil for LM Studio when unreachable")

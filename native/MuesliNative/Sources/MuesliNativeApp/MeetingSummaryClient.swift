@@ -615,6 +615,16 @@ enum MeetingSummaryClient {
         (CustomLLMFormat(rawValue: config.customLLMFormat) ?? .openAI) == .anthropic
     }
 
+    static func lmStudioHasRequiredSettings(config: AppConfig) -> Bool {
+        !config.lmStudioModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func customLLMHasRequiredSettings(config: AppConfig) -> Bool {
+        let model = config.customLLMModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKey = config.customLLMAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !model.isEmpty && (!customLLMRequiresAPIKey(config: config) || !apiKey.isEmpty)
+    }
+
     private static func summarizeWithChatCompletions(
         backend: String,
         requestURL: URL,
@@ -939,7 +949,9 @@ enum MeetingSummaryClient {
             pathParts = suffixParts
         } else if pathParts.last == suffixParts.first {
             pathParts = Array(pathParts.dropLast()) + suffixParts
-        } else if !pathParts.suffix(suffixParts.count).elementsEqual(suffixParts) {
+        } else if pathParts.last == suffixParts.last || pathParts.suffix(suffixParts.count).elementsEqual(suffixParts) {
+            // Already points at a completion/messages endpoint, including provider-specific paths.
+        } else {
             pathParts.append(contentsOf: suffixParts)
         }
 
