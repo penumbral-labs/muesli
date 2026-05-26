@@ -950,6 +950,12 @@ struct MeetingDetailView: View {
             return appState.isChatGPTAuthenticated
         } else if appState.selectedMeetingSummaryBackend == .openAI {
             return !config.openAIAPIKey.isEmpty || ProcessInfo.processInfo.environment["OPENAI_API_KEY"] != nil
+        } else if appState.selectedMeetingSummaryBackend == .ollama {
+            return true
+        } else if appState.selectedMeetingSummaryBackend == .lmStudio {
+            return MeetingSummaryClient.lmStudioHasRequiredSettings(config: config)
+        } else if appState.selectedMeetingSummaryBackend == .customLLM {
+            return MeetingSummaryClient.customLLMHasRequiredSettings(config: config)
         } else {
             return !config.openRouterAPIKey.isEmpty || ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"] != nil
         }

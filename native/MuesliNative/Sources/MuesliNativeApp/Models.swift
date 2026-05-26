@@ -344,13 +344,37 @@ struct MeetingSummaryBackendOption: Equatable {
         label: "Ollama"
     )
 
-    static let all: [MeetingSummaryBackendOption] = [.chatGPT, .openAI, .openRouter, .ollama]
+    static let lmStudio = MeetingSummaryBackendOption(
+        backend: "lmstudio",
+        label: "LM Studio"
+    )
+
+    static let customLLM = MeetingSummaryBackendOption(
+        backend: "custom_llm",
+        label: "Custom LLM"
+    )
+
+    static let all: [MeetingSummaryBackendOption] = [.chatGPT, .openAI, .openRouter, .ollama, .lmStudio, .customLLM]
 
     static func resolved(_ backend: String?) -> MeetingSummaryBackendOption {
         guard let backend, let option = all.first(where: { $0.backend == backend }) else {
             return .chatGPT
         }
         return option
+    }
+}
+
+enum CustomLLMFormat: String, Codable, CaseIterable {
+    case openAI = "openai"
+    case anthropic = "anthropic"
+
+    var label: String {
+        switch self {
+        case .openAI:
+            return "OpenAI-compatible"
+        case .anthropic:
+            return "Anthropic Messages"
+        }
     }
 }
 
@@ -714,6 +738,12 @@ struct AppConfig: Codable {
     var chatGPTModel: String = ""
     var ollamaURL: String = "http://localhost:11434"
     var ollamaModel: String = "qwen3.5"
+    var lmStudioURL: String = "http://localhost:1234"
+    var lmStudioModel: String = ""
+    var customLLMURL: String = ""
+    var customLLMAPIKey: String = ""
+    var customLLMModel: String = ""
+    var customLLMFormat: String = CustomLLMFormat.openAI.rawValue
     var summaryModel: String = ""
     var meetingSummaryModel: String = ""
     var hasCompletedOnboarding: Bool = false
@@ -786,6 +816,12 @@ struct AppConfig: Codable {
         case chatGPTModel = "chatgpt_model"
         case ollamaURL = "ollama_url"
         case ollamaModel = "ollama_model"
+        case lmStudioURL = "lmstudio_url"
+        case lmStudioModel = "lmstudio_model"
+        case customLLMURL = "custom_llm_url"
+        case customLLMAPIKey = "custom_llm_api_key"
+        case customLLMModel = "custom_llm_model"
+        case customLLMFormat = "custom_llm_format"
         case summaryModel = "summary_model"
         case meetingSummaryModel = "meeting_summary_model"
         case hasCompletedOnboarding = "has_completed_onboarding"
@@ -877,6 +913,13 @@ struct AppConfig: Codable {
         chatGPTModel = (try? c.decode(String.self, forKey: .chatGPTModel)) ?? defaults.chatGPTModel
         ollamaURL = (try? c.decode(String.self, forKey: .ollamaURL)) ?? defaults.ollamaURL
         ollamaModel = (try? c.decode(String.self, forKey: .ollamaModel)) ?? defaults.ollamaModel
+        lmStudioURL = (try? c.decode(String.self, forKey: .lmStudioURL)) ?? defaults.lmStudioURL
+        lmStudioModel = (try? c.decode(String.self, forKey: .lmStudioModel)) ?? defaults.lmStudioModel
+        customLLMURL = (try? c.decode(String.self, forKey: .customLLMURL)) ?? defaults.customLLMURL
+        customLLMAPIKey = (try? c.decode(String.self, forKey: .customLLMAPIKey)) ?? defaults.customLLMAPIKey
+        customLLMModel = (try? c.decode(String.self, forKey: .customLLMModel)) ?? defaults.customLLMModel
+        let decodedCustomLLMFormat = (try? c.decode(String.self, forKey: .customLLMFormat)) ?? defaults.customLLMFormat
+        customLLMFormat = CustomLLMFormat(rawValue: decodedCustomLLMFormat)?.rawValue ?? defaults.customLLMFormat
         summaryModel = (try? c.decode(String.self, forKey: .summaryModel)) ?? defaults.summaryModel
         meetingSummaryModel = (try? c.decode(String.self, forKey: .meetingSummaryModel)) ?? defaults.meetingSummaryModel
         hasCompletedOnboarding = (try? c.decode(Bool.self, forKey: .hasCompletedOnboarding)) ?? defaults.hasCompletedOnboarding

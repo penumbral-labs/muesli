@@ -561,6 +561,63 @@ struct SettingsView: View {
                             placeholder: "qwen3.5"
                         ) { val in controller.updateConfig { $0.ollamaModel = val } }
                     }
+                } else if appState.selectedMeetingSummaryBackend == .lmStudio {
+                    settingsRow("LM Studio URL", controlWidth: meetingControlWidth) {
+                        PastableTextField(
+                            text: appState.config.lmStudioURL,
+                            placeholder: "http://localhost:1234",
+                            onChange: { val in controller.updateConfig { $0.lmStudioURL = val } }
+                        )
+                        .frame(height: 22)
+                    }
+                    Divider().background(MuesliTheme.surfaceBorder)
+                    settingsRow("Model", controlWidth: meetingControlWidth) {
+                        settingsModelTextField(
+                            currentModel: appState.config.lmStudioModel,
+                            placeholder: "Select a loaded LM Studio model"
+                        ) { val in controller.updateConfig { $0.lmStudioModel = val } }
+                    }
+                } else if appState.selectedMeetingSummaryBackend == .customLLM {
+                    settingsRow("API Format", controlWidth: meetingControlWidth) {
+                        settingsMenu(
+                            selection: CustomLLMFormat(rawValue: appState.config.customLLMFormat)?.label ?? CustomLLMFormat.openAI.label,
+                            options: CustomLLMFormat.allCases.map(\.label)
+                        ) { label in
+                            guard let format = CustomLLMFormat.allCases.first(where: { $0.label == label }) else { return }
+                            controller.updateConfig { $0.customLLMFormat = format.rawValue }
+                        }
+                    }
+                    Divider().background(MuesliTheme.surfaceBorder)
+                    settingsRow("Endpoint", controlWidth: meetingControlWidth) {
+                        PastableTextField(
+                            text: appState.config.customLLMURL,
+                            placeholder: appState.config.customLLMFormat == CustomLLMFormat.anthropic.rawValue
+                                ? "https://api.anthropic.com"
+                                : "http://localhost:8080/v1",
+                            onChange: { val in controller.updateConfig { $0.customLLMURL = val } }
+                        )
+                        .frame(height: 22)
+                    }
+                    Divider().background(MuesliTheme.surfaceBorder)
+                    settingsRow("API Key", controlWidth: meetingControlWidth) {
+                        PastableSecureField(
+                            text: appState.config.customLLMAPIKey,
+                            placeholder: appState.config.customLLMFormat == CustomLLMFormat.anthropic.rawValue
+                                ? "Required for Anthropic API"
+                                : "Optional for local servers",
+                            onChange: { val in controller.updateConfig { $0.customLLMAPIKey = val } }
+                        )
+                        .frame(height: 22)
+                    }
+                    Divider().background(MuesliTheme.surfaceBorder)
+                    settingsRow("Model", controlWidth: meetingControlWidth) {
+                        settingsModelTextField(
+                            currentModel: appState.config.customLLMModel,
+                            placeholder: appState.config.customLLMFormat == CustomLLMFormat.anthropic.rawValue
+                                ? "claude-3-5-sonnet-20241022"
+                                : "custom-model-id"
+                        ) { val in controller.updateConfig { $0.customLLMModel = val } }
+                    }
                 } else {
                     settingsRow("API Key", controlWidth: meetingControlWidth) {
                         PastableSecureField(

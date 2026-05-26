@@ -368,11 +368,13 @@ struct MeetingSummaryBackendTests {
 
     @Test("all options listed")
     func allOptions() {
-        #expect(MeetingSummaryBackendOption.all.count == 4)
+        #expect(MeetingSummaryBackendOption.all.count == 6)
         #expect(MeetingSummaryBackendOption.all.contains(.openAI))
         #expect(MeetingSummaryBackendOption.all.contains(.openRouter))
         #expect(MeetingSummaryBackendOption.all.contains(.chatGPT))
         #expect(MeetingSummaryBackendOption.all.contains(.ollama))
+        #expect(MeetingSummaryBackendOption.all.contains(.lmStudio))
+        #expect(MeetingSummaryBackendOption.all.contains(.customLLM))
     }
 
     @Test("backend strings are lowercase")
@@ -380,6 +382,8 @@ struct MeetingSummaryBackendTests {
         #expect(MeetingSummaryBackendOption.openAI.backend == "openai")
         #expect(MeetingSummaryBackendOption.openRouter.backend == "openrouter")
         #expect(MeetingSummaryBackendOption.ollama.backend == "ollama")
+        #expect(MeetingSummaryBackendOption.lmStudio.backend == "lmstudio")
+        #expect(MeetingSummaryBackendOption.customLLM.backend == "custom_llm")
     }
 
     @Test("configured values resolve with ChatGPT fallback")
@@ -387,8 +391,16 @@ struct MeetingSummaryBackendTests {
         #expect(MeetingSummaryBackendOption.resolved("chatgpt") == .chatGPT)
         #expect(MeetingSummaryBackendOption.resolved("openrouter") == .openRouter)
         #expect(MeetingSummaryBackendOption.resolved("ollama") == .ollama)
+        #expect(MeetingSummaryBackendOption.resolved("lmstudio") == .lmStudio)
+        #expect(MeetingSummaryBackendOption.resolved("custom_llm") == .customLLM)
         #expect(MeetingSummaryBackendOption.resolved("unknown") == .chatGPT)
         #expect(MeetingSummaryBackendOption.resolved(nil) == .chatGPT)
+    }
+
+    @Test("Custom LLM format labels")
+    func customLLMFormatLabels() {
+        #expect(CustomLLMFormat.openAI.label == "OpenAI-compatible")
+        #expect(CustomLLMFormat.anthropic.label == "Anthropic Messages")
     }
 }
 
@@ -413,6 +425,12 @@ struct AppConfigTests {
         #expect(config.openRouterAPIKey.isEmpty)
         #expect(config.ollamaURL == "http://localhost:11434")
         #expect(config.ollamaModel == "qwen3.5")
+        #expect(config.lmStudioURL == "http://localhost:1234")
+        #expect(config.lmStudioModel.isEmpty)
+        #expect(config.customLLMURL.isEmpty)
+        #expect(config.customLLMAPIKey.isEmpty)
+        #expect(config.customLLMModel.isEmpty)
+        #expect(config.customLLMFormat == "openai")
         #expect(config.dictationHotkey == .default)
         #expect(config.computerUseHotkey == .computerUseDefault)
         #expect(config.enableComputerUseHotkey == false)
@@ -466,6 +484,12 @@ struct AppConfigTests {
         config.hotkeyTriggerThresholdMS = 125
         config.computerUseHotkeyTriggerThresholdMS = 350
         config.meetingRecordingHotkeyTriggerThresholdMS = 900
+        config.lmStudioURL = "http://localhost:1234"
+        config.lmStudioModel = "local-model"
+        config.customLLMURL = "https://example.com"
+        config.customLLMAPIKey = "custom-key"
+        config.customLLMModel = "custom-model"
+        config.customLLMFormat = "anthropic"
 
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(AppConfig.self, from: data)
@@ -496,6 +520,12 @@ struct AppConfigTests {
         #expect(decoded.hotkeyTriggerThresholdMS == 125)
         #expect(decoded.computerUseHotkeyTriggerThresholdMS == 350)
         #expect(decoded.meetingRecordingHotkeyTriggerThresholdMS == 900)
+        #expect(decoded.lmStudioURL == "http://localhost:1234")
+        #expect(decoded.lmStudioModel == "local-model")
+        #expect(decoded.customLLMURL == "https://example.com")
+        #expect(decoded.customLLMAPIKey == "custom-key")
+        #expect(decoded.customLLMModel == "custom-model")
+        #expect(decoded.customLLMFormat == "anthropic")
     }
 
     @Test("JSON coding keys use snake_case")
@@ -531,6 +561,12 @@ struct AppConfigTests {
         #expect(json["meeting_hook_enabled"] != nil)
         #expect(json["meeting_hook_path"] != nil)
         #expect(json["meeting_hook_timeout_seconds"] != nil)
+        #expect(json["lmstudio_url"] != nil)
+        #expect(json["lmstudio_model"] != nil)
+        #expect(json["custom_llm_url"] != nil)
+        #expect(json["custom_llm_api_key"] != nil)
+        #expect(json["custom_llm_model"] != nil)
+        #expect(json["custom_llm_format"] != nil)
     }
 
     @Test("decodes with missing fields using defaults")
@@ -562,6 +598,12 @@ struct AppConfigTests {
         #expect(config.meetingHookEnabled == false)
         #expect(config.meetingHookPath.isEmpty)
         #expect(config.meetingHookTimeoutSeconds == 30)
+        #expect(config.lmStudioURL == "http://localhost:1234")
+        #expect(config.lmStudioModel.isEmpty)
+        #expect(config.customLLMURL.isEmpty)
+        #expect(config.customLLMAPIKey.isEmpty)
+        #expect(config.customLLMModel.isEmpty)
+        #expect(config.customLLMFormat == "openai")
     }
 
     @Test("legacy completed onboarding enables meetings when use case is missing")
