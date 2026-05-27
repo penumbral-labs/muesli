@@ -90,9 +90,11 @@ struct MeetingNeuralAecTests {
         ]) == 6_400)
     }
 
-    @Test("micHistory stays bounded at retentionSamples when processor is absent")
-    func micHistoryBoundedWithoutProcessor() {
-        let aec = MeetingNeuralAec()
+    @Test("micHistory stays bounded at retentionSamples when system audio is absent")
+    func micHistoryBoundedWithoutSystemAudio() {
+        let processor = PassthroughAecProcessor(frameSize: 256)
+        let aec = MeetingNeuralAec(preloadedProcessor: processor)
+        aec.resetForStreaming()
         let estimator = MeetingAecDelayEstimator()
         let retentionSamples = estimator.windowSamples + estimator.maxCandidateDelaySamples
         let chunkSize = 1_600
