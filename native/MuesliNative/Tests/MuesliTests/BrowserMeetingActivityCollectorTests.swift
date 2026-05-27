@@ -93,6 +93,29 @@ struct BrowserMeetingActivityCollectorTests {
         #expect(meetings.map(\.normalizedID) == ["googleMeet:meet.google.com/pwm-txwq-txy"])
     }
 
+    @Test("refresh prefers listed meeting URL over focused non-meeting document")
+    func refreshPrefersListedMeetingURLOverFocusedNonMeetingDocument() async {
+        let collector = BrowserMeetingActivityCollector(
+            focusedDocumentURLProvider: { _ in "https://example.com" },
+            documentURLProbeProvider: { _ in
+                .meeting(
+                    MeetingURLNormalizer.normalize("https://meet.google.com/pwm-txwq-txy")!,
+                    isFocused: false
+                )
+            }
+        )
+
+        let meetings = await collector.collect(
+            runningApps: [chrome(isActive: true)],
+            refresh: true,
+            now: now,
+            shouldAttemptActiveTabFallback: { _ in false }
+        )
+
+        #expect(meetings.map(\.normalizedID) == ["googleMeet:meet.google.com/pwm-txwq-txy"])
+        #expect(meetings.first?.isFocused == false)
+    }
+
     @Test("refresh skips cached room when ordinary active-tab fallback probe is throttled")
     func refreshSkipsCachedRoomWhenOrdinaryActiveTabFallbackProbeIsThrottled() async {
         var activeTabURL: String? = "https://meet.google.com/pwm-txwq-txy"

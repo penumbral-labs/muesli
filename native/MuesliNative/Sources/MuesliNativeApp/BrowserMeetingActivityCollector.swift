@@ -173,6 +173,7 @@ final class BrowserMeetingActivityCollector {
 
     private func axDocumentURLProbe(for app: RunningAppSnapshot) -> BrowserDocumentURLProbeResult {
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var observedFocusedNonMeetingDocumentURL = false
         var observedBackgroundNonMeetingDocumentURL = false
 
         if let window = axWindowAttribute(kAXFocusedWindowAttribute, from: axApp) {
@@ -180,7 +181,7 @@ final class BrowserMeetingActivityCollector {
             case .meeting(let normalized, let isFocused):
                 return .meeting(normalized, isFocused: isFocused)
             case .nonMeetingDocument:
-                return .nonMeetingDocument(isFocused: true)
+                observedFocusedNonMeetingDocumentURL = true
             case .noDocumentURL:
                 break
             }
@@ -199,6 +200,9 @@ final class BrowserMeetingActivityCollector {
         var windowsRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
               let windows = windowsRef as? [AXUIElement] else {
+            if observedFocusedNonMeetingDocumentURL {
+                return .nonMeetingDocument(isFocused: true)
+            }
             return observedBackgroundNonMeetingDocumentURL ? .nonMeetingDocument(isFocused: false) : .noDocumentURL
         }
 
@@ -213,6 +217,9 @@ final class BrowserMeetingActivityCollector {
             }
         }
 
+        if observedFocusedNonMeetingDocumentURL {
+            return .nonMeetingDocument(isFocused: true)
+        }
         return observedBackgroundNonMeetingDocumentURL ? .nonMeetingDocument(isFocused: false) : .noDocumentURL
     }
 
