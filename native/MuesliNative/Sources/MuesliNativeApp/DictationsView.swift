@@ -457,7 +457,9 @@ struct DictationsView: View {
         }
         return appState.config.resolvedOnboardingUseCase.includesVoiceNotes
             ? "Click Record Voice Note to capture your first note"
-            : "Hold \(appState.config.dictationHotkey.label) to start dictating"
+            : appState.config.dictationHotkey.isCombination
+                ? "Press \(appState.config.dictationHotkey.label) to start dictating"
+                : "Hold \(appState.config.dictationHotkey.label) to start dictating"
     }
 
     private var emptyStateTitle: String {

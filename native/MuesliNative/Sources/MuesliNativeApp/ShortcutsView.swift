@@ -54,7 +54,9 @@ struct ShortcutsView: View {
                     Text("Push to Talk")
                         .font(MuesliTheme.headline())
                         .foregroundStyle(MuesliTheme.textPrimary)
-                    Text("Hold to record, release to transcribe")
+                    Text(appState.config.dictationHotkey.isCombination
+                        ? "Tap to start, tap again to stop"
+                        : "Hold to record, release to transcribe")
                         .font(MuesliTheme.caption())
                         .foregroundStyle(MuesliTheme.textSecondary)
                 }
@@ -305,7 +307,9 @@ struct ShortcutsView: View {
         switch target {
         case .meetingRecording:
             return "Press a key or modifier..."
-        case .dictation, .computerUse:
+        case .dictation:
+            return "Press a modifier, or a key combination..."
+        case .computerUse:
             return "Press a modifier key..."
         }
     }
@@ -380,9 +384,10 @@ struct ShortcutsView: View {
                 let mods = HotkeyConfig.supportedCombinationModifiers(from: event.modifierFlags)
                 let hasModifiers = mods.contains(.command) || mods.contains(.control)
                     || mods.contains(.option)
-                guard target == .meetingRecording,
+                let combinationAllowed = target == .meetingRecording || target == .dictation
+                guard combinationAllowed,
                       hasModifiers,
-                      HotkeyConfig.letterLabel(for: event.keyCode) != nil else {
+                      HotkeyConfig.keyLabel(for: event.keyCode) != nil else {
                     return event
                 }
                 pendingModifierKeyCode = nil

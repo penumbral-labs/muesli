@@ -67,7 +67,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
                 $0.backend == progress.selectedBackendKey && $0.model == progress.selectedModelKey
             }) ?? .parakeetMultilingual
             let cohereLanguage = CohereTranscribeLanguage.resolved(progress.selectedCohereLanguageCode)
-            let hotkey = HotkeyConfig(keyCode: progress.hotkeyKeyCode, label: progress.hotkeyLabel)
+            let hotkey = progress.hotkey
             rootView = OnboardingView(
                 controller: controller,
                 appState: controller.appState,

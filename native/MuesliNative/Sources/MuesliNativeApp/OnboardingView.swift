@@ -1099,8 +1099,7 @@ struct OnboardingView: View {
             selectedBackendKey: selectedBackend.backend,
             selectedModelKey: selectedBackend.model,
             selectedCohereLanguageCode: selectedCohereLanguage.rawValue,
-            hotkeyKeyCode: selectedHotkey.keyCode,
-            hotkeyLabel: selectedHotkey.label,
+            hotkey: selectedHotkey,
             systemAudioRequested: systemAudioGranted,
             onboardingUseCaseRawValue: selectedUseCase.rawValue,
             modelDownloadProgress: modelDownloadProgress,
@@ -1576,7 +1575,7 @@ struct OnboardingView: View {
         dictationTestError = nil
         controller.dictationTestBackend = selectedBackend
         controller.dictationTestCohereLanguage = selectedCohereLanguage
-        controller.startHotkeyMonitor(keyCode: selectedHotkey.keyCode)
+        controller.startHotkeyMonitor(hotkey: selectedHotkey)
     }
 
     private func advanceAfterSuccessfulDictationTest(text: String) {

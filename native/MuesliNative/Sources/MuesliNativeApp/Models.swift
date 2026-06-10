@@ -910,6 +910,22 @@ struct HotkeyConfig: Codable, Equatable {
         return letters[keyCode]
     }
 
+    /// Display label for any non-modifier key usable as a combination key
+    /// (letters, digits, Space, punctuation, arrows, function keys, …).
+    /// Returns nil for keys that should not anchor a shortcut (modifiers, Escape).
+    static func keyLabel(for keyCode: UInt16) -> String? {
+        if let letter = letterLabel(for: keyCode) { return letter }
+        let keys: [UInt16: String] = [
+            18: "1", 19: "2", 20: "3", 21: "4", 23: "5", 22: "6", 26: "7", 28: "8", 25: "9", 29: "0",
+            49: "Space", 36: "Return", 48: "Tab", 51: "Delete",
+            24: "=", 27: "-", 33: "[", 30: "]", 42: "\\", 41: ";", 39: "'", 43: ",", 47: ".", 44: "/", 50: "`",
+            123: "←", 124: "→", 125: "↓", 126: "↑",
+            122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6",
+            98: "F7", 100: "F8", 101: "F9", 109: "F10", 103: "F11", 111: "F12",
+        ]
+        return keys[keyCode]
+    }
+
     static func combinationLabel(modifiers: NSEvent.ModifierFlags, keyCode: UInt16) -> String {
         let modifiers = supportedCombinationModifiers(from: modifiers)
         var parts: [String] = []
@@ -917,7 +933,7 @@ struct HotkeyConfig: Codable, Equatable {
         if modifiers.contains(.control) { parts.append("⌃") }
         if modifiers.contains(.option) { parts.append("⌥") }
         if modifiers.contains(.shift) { parts.append("⇧") }
-        parts.append(letterLabel(for: keyCode) ?? "?")
+        parts.append(keyLabel(for: keyCode) ?? "?")
         return parts.joined()
     }
 

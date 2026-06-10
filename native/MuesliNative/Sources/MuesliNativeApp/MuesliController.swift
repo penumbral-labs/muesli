@@ -3395,9 +3395,9 @@ final class MuesliController: NSObject {
         setState(.idle)
     }
 
-    func startHotkeyMonitor(keyCode: UInt16? = nil) {
-        if let keyCode {
-            hotkeyMonitor.configure(keyCode: keyCode)
+    func startHotkeyMonitor(hotkey: HotkeyConfig? = nil) {
+        if let hotkey {
+            hotkeyMonitor.configure(hotkey)
         }
         hotkeyMonitor.start()
         startComputerUseHotkeyMonitorIfNeeded()
@@ -3552,7 +3552,7 @@ final class MuesliController: NSObject {
             }
         }
         selectBackend(backend)
-        hotkeyMonitor.configure(keyCode: hotkey.keyCode)
+        hotkeyMonitor.configure(hotkey)
         configureComputerUseHotkeyMonitor()
         dictationTestCallback = nil
         dictationTestFailureCallback = nil
@@ -3644,7 +3644,7 @@ final class MuesliController: NSObject {
         ) else { return }
 
         updateConfig { $0.onboardingUseCase = OnboardingUseCase.dictation.rawValue }
-        hotkeyMonitor.configure(keyCode: config.dictationHotkey.keyCode)
+        hotkeyMonitor.configure(config.dictationHotkey)
         hotkeyMonitor.start()
         startComputerUseHotkeyMonitorIfNeeded()
         syncDictationRecorderWarmup(intent: .idlePrewarm(.permissionsReady))
@@ -3675,8 +3675,7 @@ final class MuesliController: NSObject {
             selectedBackendKey: config.sttBackend,
             selectedModelKey: config.sttModel,
             selectedCohereLanguageCode: config.cohereLanguage,
-            hotkeyKeyCode: config.dictationHotkey.keyCode,
-            hotkeyLabel: config.dictationHotkey.label,
+            hotkey: config.dictationHotkey,
             systemAudioRequested: false,
             onboardingUseCaseRawValue: config.onboardingUseCase
         )

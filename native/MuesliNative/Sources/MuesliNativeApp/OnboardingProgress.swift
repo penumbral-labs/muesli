@@ -46,7 +46,7 @@ enum OnboardingPermissionGate {
 }
 
 struct OnboardingProgress: Codable {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 5
 
     var schemaVersion: Int = currentSchemaVersion
     var currentStep: Int
@@ -54,8 +54,7 @@ struct OnboardingProgress: Codable {
     var selectedBackendKey: String
     var selectedModelKey: String
     var selectedCohereLanguageCode: String
-    var hotkeyKeyCode: UInt16
-    var hotkeyLabel: String
+    var hotkey: HotkeyConfig
     var systemAudioRequested: Bool = false
     var onboardingUseCaseRawValue: String = OnboardingUseCase.dictation.rawValue
     var modelDownloadProgress: Double?
@@ -68,8 +67,7 @@ struct OnboardingProgress: Codable {
         selectedBackendKey: String,
         selectedModelKey: String,
         selectedCohereLanguageCode: String = CohereTranscribeLanguage.defaultLanguage.rawValue,
-        hotkeyKeyCode: UInt16,
-        hotkeyLabel: String,
+        hotkey: HotkeyConfig,
         systemAudioRequested: Bool = false,
         onboardingUseCaseRawValue: String = OnboardingUseCase.dictation.rawValue,
         modelDownloadProgress: Double? = nil,
@@ -81,8 +79,7 @@ struct OnboardingProgress: Codable {
         self.selectedBackendKey = selectedBackendKey
         self.selectedModelKey = selectedModelKey
         self.selectedCohereLanguageCode = CohereTranscribeLanguage.resolvedCode(selectedCohereLanguageCode)
-        self.hotkeyKeyCode = hotkeyKeyCode
-        self.hotkeyLabel = hotkeyLabel
+        self.hotkey = hotkey
         self.systemAudioRequested = systemAudioRequested
         self.onboardingUseCaseRawValue = OnboardingUseCase.resolved(onboardingUseCaseRawValue).rawValue
         self.modelDownloadProgress = modelDownloadProgress
@@ -99,8 +96,7 @@ struct OnboardingProgress: Codable {
         selectedCohereLanguageCode = CohereTranscribeLanguage.resolvedCode(
             try c.decodeIfPresent(String.self, forKey: .selectedCohereLanguageCode)
         )
-        hotkeyKeyCode = try c.decode(UInt16.self, forKey: .hotkeyKeyCode)
-        hotkeyLabel = try c.decode(String.self, forKey: .hotkeyLabel)
+        hotkey = try c.decode(HotkeyConfig.self, forKey: .hotkey)
         systemAudioRequested = try c.decodeIfPresent(Bool.self, forKey: .systemAudioRequested) ?? false
         onboardingUseCaseRawValue = OnboardingUseCase.resolved(
             try c.decodeIfPresent(String.self, forKey: .onboardingUseCaseRawValue)
