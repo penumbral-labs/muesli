@@ -254,6 +254,7 @@ final class MuesliController: NSObject {
     private var pendingDictationStopStartedAt: Date?
     private var pendingDictationStopSessionID: UUID?
     private var pendingReleaseSoundSessionID: UUID?
+    private var pendingPreparingIndicatorWorkItem: DispatchWorkItem?
     private var computerUseCommandStartedAt: Date?
     private var computerUseCommandTask: Task<Void, Never>?
     private var computerUseFloatingStatusWorkItem: DispatchWorkItem?
@@ -4216,6 +4217,8 @@ final class MuesliController: NSObject {
     }
 
     private func setState(_ state: DictationState) {
+        pendingPreparingIndicatorWorkItem?.cancel()
+        pendingPreparingIndicatorWorkItem = nil
         dictationState = state
         appState.dictationState = state
         let status: String
@@ -4227,7 +4230,16 @@ final class MuesliController: NSObject {
         }
         statusBarController?.setStatus(status)
         if !isDictationTestMode {
-            indicator.setState(state, config: config)
+            if state == .preparing {
+                let workItem = DispatchWorkItem { [weak self] in
+                    guard let self, self.dictationState == .preparing else { return }
+                    self.indicator.setPreparingWaveformWaiting(config: self.config)
+                }
+                pendingPreparingIndicatorWorkItem = workItem
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+            } else {
+                indicator.setState(state, config: config)
+            }
         }
     }
 
@@ -5133,14 +5145,11 @@ final class MuesliController: NSObject {
     }
 
     private func activateDictationPreparingIndicator() {
-        if dictationState != .preparing {
-            setState(.preparing)
-        }
+        setState(.preparing)
         if !isDictationTestMode {
             indicator.powerProvider = { [weak self] in
                 self?.dictationAudioSessionManager.currentPower() ?? -160
             }
-            indicator.setPreparingWaveformWaiting(config: config)
         }
     }
 

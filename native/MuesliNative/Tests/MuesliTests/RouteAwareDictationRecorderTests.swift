@@ -84,7 +84,25 @@ struct RouteAwareDictationRecorderTests {
         _ = try recorder.start()
         appScoped.onLatencyEvent?("app_scoped_engine_start_end", Date())
 
-        #expect(events == ["app_scoped_engine_start_end"])
+        #expect(events == [
+            "recorder_selected route=app_scoped recorder=FakeRouteAwareChildRecorder preferredInput=82",
+            "app_scoped_engine_start_end",
+        ])
+    }
+
+    @Test("recorder selection latency event describes automatic route")
+    func recorderSelectionLatencyEventDescribesAutomaticRoute() throws {
+        let system = FakeRouteAwareChildRecorder()
+        let appScoped = FakeRouteAwareChildRecorder()
+        let recorder = RouteAwareDictationRecorder(systemDefaultRecorder: system, appScopedRecorder: appScoped)
+        var events: [String] = []
+        recorder.onLatencyEvent = { event, _ in events.append(event) }
+
+        _ = try recorder.start()
+
+        #expect(events == [
+            "recorder_selected route=system_default recorder=FakeRouteAwareChildRecorder preferredInput=default",
+        ])
     }
 
     @Test("callbacks from inactive child recorder are ignored")
@@ -116,7 +134,10 @@ struct RouteAwareDictationRecorderTests {
         #expect(speechCount == 0)
         #expect(timeoutCount == 0)
         #expect(failureCount == 0)
-        #expect(latencyEvents == ["active_latency"])
+        #expect(latencyEvents == [
+            "recorder_selected route=system_default recorder=FakeRouteAwareChildRecorder preferredInput=default",
+            "active_latency",
+        ])
     }
 
     @Test("switching recorder cancels inactive warmed graph")

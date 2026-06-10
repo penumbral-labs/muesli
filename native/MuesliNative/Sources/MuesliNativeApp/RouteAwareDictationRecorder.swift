@@ -58,7 +58,7 @@ final class RouteAwareDictationRecorder: DictationAudioRecording {
     private var activeRecorderKindStorage: ActiveRecorderKind = .systemDefault
 
     init(
-        systemDefaultRecorder: DictationAudioRecording = MicrophoneRecorder(),
+        systemDefaultRecorder: DictationAudioRecording = AppScopedDictationRecorder(),
         appScopedRecorder: DictationAudioRecording = AppScopedDictationRecorder(),
         lifecycleQueue: DispatchQueue = DispatchQueue(label: "com.muesli.route-aware-dictation-recorder-lifecycle")
     ) {
@@ -193,8 +193,22 @@ final class RouteAwareDictationRecorder: DictationAudioRecording {
 
         selectedRecorder.preferredInputDeviceID = preferredInputDeviceID
         selectedRecorder.keepsAudioGraphWarm = keepsAudioGraphWarm
+        emitRecorderSelection(kind: nextKind, recorder: selectedRecorder, preferredInputDeviceID: preferredInputDeviceID)
         inactiveRecorderToCancel?.cancel()
         return selectedRecorder
+    }
+
+    private func emitRecorderSelection(
+        kind: ActiveRecorderKind,
+        recorder: DictationAudioRecording,
+        preferredInputDeviceID: AudioObjectID?
+    ) {
+        let route = kind == .systemDefault ? "system_default" : "app_scoped"
+        let preferredInput = preferredInputDeviceID.map(String.init) ?? "default"
+        onLatencyEvent?(
+            "recorder_selected route=\(route) recorder=\(String(describing: type(of: recorder))) preferredInput=\(preferredInput)",
+            Date()
+        )
     }
 
     private func activeRecorderLocked() -> DictationAudioRecording {

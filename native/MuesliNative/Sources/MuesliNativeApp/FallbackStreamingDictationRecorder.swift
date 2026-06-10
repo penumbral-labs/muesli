@@ -145,6 +145,7 @@ final class FallbackStreamingDictationRecorder: StreamingDictationRecording, Str
         primary.preferredInputDeviceID = preferredInputDeviceIDStorage
         try primary.prepare()
         activeRecorder = .primary
+        emitRecorderSelection(slot: .primary, recorder: primary)
     }
 
     private func prepareFallbackLocked() throws {
@@ -152,7 +153,16 @@ final class FallbackStreamingDictationRecorder: StreamingDictationRecording, Str
         emitLatency("streaming_recorder_fallback_prepare_begin")
         try fallback.prepare()
         activeRecorder = .fallback
+        emitRecorderSelection(slot: .fallback, recorder: fallback)
         emitLatency("streaming_recorder_fallback_prepare_end")
+    }
+
+    private func emitRecorderSelection(slot: ActiveRecorder, recorder: StreamingDictationRecording) {
+        let slotName = slot == .primary ? "primary" : "fallback"
+        let preferredInput = preferredInputDeviceIDStorage.map(String.init) ?? "default"
+        emitLatency(
+            "streaming_recorder_selected slot=\(slotName) recorder=\(String(describing: type(of: recorder))) preferredInput=\(preferredInput)"
+        )
     }
 
     private func wireCallbacks() {
