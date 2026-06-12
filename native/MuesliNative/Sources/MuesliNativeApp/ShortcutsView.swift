@@ -29,7 +29,13 @@ struct ShortcutsView: View {
 
                 meetingRecordingShortcutSection
 
-                doubleTapSection
+                // Double-tap toggle only applies to single-modifier holds. A
+                // combination dictation shortcut already toggles per press, so the
+                // card is only relevant while it still governs Computer Use.
+                if !appState.config.dictationHotkey.isCombination
+                    || appState.config.enableComputerUseHotkey {
+                    doubleTapSection
+                }
 
                 resetButton
             }
@@ -321,7 +327,9 @@ struct ShortcutsView: View {
                     Text("Hands-Free Mode")
                         .font(MuesliTheme.headline())
                         .foregroundStyle(MuesliTheme.textPrimary)
-                    Text("Double-tap dictation or CUA to start, tap again to stop")
+                    Text(appState.config.dictationHotkey.isCombination
+                        ? "Double-tap Computer Use to start, tap again to stop. Your dictation shortcut is a combination, which already toggles on each press."
+                        : "Double-tap dictation or CUA to start, tap again to stop")
                         .font(MuesliTheme.caption())
                         .foregroundStyle(MuesliTheme.textSecondary)
                 }
@@ -375,6 +383,9 @@ struct ShortcutsView: View {
         clearShortcutMessage(for: target)
         pendingModifierKeyCode = nil
         recordingTarget = target
+        // Suspend live hotkey monitors so a combination-mode monitor can't eat
+        // the modifier events the recorder needs to capture a bare modifier.
+        controller.pauseHotkeyMonitorsForShortcutRecording()
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [self] event in
             if event.type == .keyDown {
                 if event.keyCode == 53 {
@@ -451,10 +462,14 @@ struct ShortcutsView: View {
     }
 
     private func stopRecording() {
+        let wasRecording = recordingTarget != nil || eventMonitor != nil
         recordingTarget = nil
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
             eventMonitor = nil
+        }
+        if wasRecording {
+            controller.resumeHotkeyMonitorsAfterShortcutRecording()
         }
     }
 }

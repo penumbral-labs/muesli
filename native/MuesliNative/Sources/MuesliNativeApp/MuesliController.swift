@@ -3409,6 +3409,28 @@ final class MuesliController: NSObject {
         meetingRecordingHotkeyMonitor.stop()
     }
 
+    /// Suspend all global hotkey monitors while the Shortcuts UI is capturing a
+    /// new shortcut. A live combination-mode monitor otherwise competes for the
+    /// modifier (flagsChanged) events the recorder needs, which makes it
+    /// impossible to capture a bare modifier and switch a combination back to a
+    /// single-modifier hold.
+    func pauseHotkeyMonitorsForShortcutRecording() {
+        hotkeyMonitor.stop()
+        computerUseHotkeyMonitor.stop()
+        meetingRecordingHotkeyMonitor.stop()
+    }
+
+    func resumeHotkeyMonitorsAfterShortcutRecording() {
+        guard config.hasCompletedOnboarding,
+              hasRequiredStartupPermissions(for: config.resolvedOnboardingUseCase) else { return }
+        if config.resolvedOnboardingUseCase.includesPushToTalk {
+            hotkeyMonitor.configure(config.dictationHotkey)
+            hotkeyMonitor.start()
+            startComputerUseHotkeyMonitorIfNeeded()
+        }
+        startMeetingRecordingHotkeyMonitorIfNeeded()
+    }
+
     func downloadModelForOnboarding(
         _ backend: BackendOption,
         onboardingUseCase: OnboardingUseCase,
