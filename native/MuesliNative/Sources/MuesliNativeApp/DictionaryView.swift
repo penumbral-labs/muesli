@@ -21,6 +21,9 @@ struct DictionaryView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: MuesliTheme.spacing24) {
                 header
+                if !appState.config.dictionarySuggestions.isEmpty {
+                    suggestionList
+                }
                 wordList
             }
             .padding(MuesliTheme.spacing32)
@@ -36,6 +39,16 @@ struct DictionaryView: View {
                     .font(MuesliTheme.title1())
                     .foregroundStyle(MuesliTheme.textPrimary)
                 Spacer()
+                Toggle(
+                    "Dictionary suggestions",
+                    isOn: Binding(
+                        get: { appState.config.enableDictionaryCorrectionPrompts },
+                        set: { controller.setDictionaryCorrectionPromptsEnabled($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+                .font(MuesliTheme.caption())
+                .foregroundStyle(MuesliTheme.textSecondary)
                 Button {
                     isAdding = true
                     newWord = ""
@@ -64,6 +77,37 @@ struct DictionaryView: View {
                 .font(MuesliTheme.body())
                 .foregroundStyle(MuesliTheme.textSecondary)
         }
+    }
+
+    private var suggestionList: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Suggested Corrections")
+                        .font(MuesliTheme.headline())
+                        .foregroundStyle(MuesliTheme.textPrimary)
+                    Text("Corrections Muesli noticed after recent dictations.")
+                        .font(MuesliTheme.caption())
+                        .foregroundStyle(MuesliTheme.textTertiary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, MuesliTheme.spacing16)
+            .padding(.vertical, MuesliTheme.spacing12)
+
+            Divider().background(MuesliTheme.surfaceBorder)
+
+            ForEach(appState.config.dictionarySuggestions) { suggestion in
+                DictionarySuggestionRow(suggestion: suggestion, controller: controller)
+                Divider().background(MuesliTheme.surfaceBorder)
+            }
+        }
+        .background(MuesliTheme.backgroundRaised)
+        .clipShape(RoundedRectangle(cornerRadius: MuesliTheme.cornerMedium))
+        .overlay(
+            RoundedRectangle(cornerRadius: MuesliTheme.cornerMedium)
+                .strokeBorder(MuesliTheme.surfaceBorder, lineWidth: 1)
+        )
     }
 
     private var wordList: some View {
@@ -175,6 +219,60 @@ struct DictionaryView: View {
         }
         .padding(.horizontal, MuesliTheme.spacing16)
         .padding(.vertical, MuesliTheme.spacing12)
+    }
+}
+
+private struct DictionarySuggestionRow: View {
+    let suggestion: DictionarySuggestion
+    let controller: MuesliController
+
+    var body: some View {
+        HStack(spacing: MuesliTheme.spacing8) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: MuesliTheme.spacing8) {
+                    Text(suggestion.observed)
+                        .font(MuesliTheme.body())
+                        .foregroundStyle(MuesliTheme.textPrimary)
+                        .lineLimit(1)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(MuesliTheme.textTertiary)
+                    Text(suggestion.replacement)
+                        .font(MuesliTheme.body())
+                        .foregroundStyle(MuesliTheme.textPrimary)
+                        .lineLimit(1)
+                }
+                Text(detailText)
+                    .font(MuesliTheme.caption())
+                    .foregroundStyle(MuesliTheme.textTertiary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            DictionaryIconButton(
+                systemName: "checkmark",
+                label: "Add correction",
+                tint: MuesliTheme.accent
+            ) {
+                controller.acceptDictionarySuggestion(id: suggestion.id)
+            }
+            DictionaryIconButton(
+                systemName: "xmark",
+                label: "Dismiss correction",
+                tint: MuesliTheme.textTertiary
+            ) {
+                controller.dismissDictionarySuggestion(id: suggestion.id)
+            }
+        }
+        .padding(.horizontal, MuesliTheme.spacing16)
+        .padding(.vertical, MuesliTheme.spacing12)
+    }
+
+    private var detailText: String {
+        var parts = ["Seen \(suggestion.occurrenceCount)x"]
+        if !suggestion.appContext.isEmpty {
+            parts.append(suggestion.appContext)
+        }
+        return parts.joined(separator: " | ")
     }
 }
 

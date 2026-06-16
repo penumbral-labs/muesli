@@ -191,6 +191,8 @@ final class MuesliController: NSObject {
     private let meetingRecordingHotkeyMonitor = HotkeyMonitor()
     private let computerUseRecorder = MicrophoneRecorder()
     private let dictationRecorder = RouteAwareDictationRecorder()
+    private let dictationCorrectionMonitor = DictationCorrectionMonitor()
+    private let dictionarySuggestionPrompt = DictionarySuggestionPromptController()
     private let audioDuckingController: AudioDuckingManaging
     private let dictationAudioRoutingController: DictationAudioRouting
     private lazy var dictationAudioSessionManager = DictationAudioSessionManager(
@@ -269,6 +271,7 @@ final class MuesliController: NSObject {
     private var openWindowCount = 0
     private var lastExternalApp: NSRunningApplication?
     private var capturedDictationContext: DictationContext?
+    private var capturedDictationCorrectionTargetApp: DictationCorrectionTargetApp?
     private var workspaceObserver: NSObjectProtocol?
     private var dataDidChangeObserver: NSObjectProtocol?
     private var isStartingMeetingRecording = false
@@ -613,6 +616,7 @@ final class MuesliController: NSObject {
         meetingDetectionMonitorStarted = false
         dismissPresentedMeetingDetection()
         meetingNotification.close()
+        dictationCorrectionMonitor.cancel()
         activeMeetingSession?.discard()
         activeMeetingSession = nil
         if let activeMeetingID {
@@ -1529,6 +1533,92 @@ final class MuesliController: NSObject {
         updateConfig { $0.customWords.append(word) }
     }
 
+    func addDictionarySuggestion(_ suggestion: DictionarySuggestion, presentPrompt: Bool = false) {
+        guard config.enableDictionaryCorrectionPrompts else { return }
+        let trimmedObserved = suggestion.observed.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedReplacement = suggestion.replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedObserved.isEmpty, !trimmedReplacement.isEmpty else { return }
+        guard trimmedObserved != trimmedReplacement else { return }
+
+        let key = DictionarySuggestion.key(observed: trimmedObserved, replacement: trimmedReplacement)
+        guard !config.dismissedDictionarySuggestionKeys.contains(key) else { return }
+        guard !config.customWords.contains(where: {
+            DictionarySuggestion.key(observed: $0.word, replacement: $0.targetWord) == key
+        }) else { return }
+
+        var promptSuggestion = suggestion
+        updateConfig { config in
+            if let index = config.dictionarySuggestions.firstIndex(where: { $0.key == key }) {
+                var existing = config.dictionarySuggestions[index]
+                existing.occurrenceCount += 1
+                existing.lastSeenAt = ISO8601DateFormatter().string(from: Date())
+                if existing.appContext.isEmpty {
+                    existing.appContext = suggestion.appContext
+                }
+                config.dictionarySuggestions[index] = existing
+                promptSuggestion = existing
+            } else {
+                promptSuggestion = DictionarySuggestion(
+                    observed: trimmedObserved,
+                    replacement: trimmedReplacement,
+                    appContext: suggestion.appContext
+                )
+                config.dictionarySuggestions.insert(promptSuggestion, at: 0)
+            }
+        }
+
+        if presentPrompt, config.enableDictionaryCorrectionPrompts {
+            presentDictionarySuggestionPrompt(promptSuggestion)
+        }
+    }
+
+    func acceptDictionarySuggestion(id: UUID) {
+        guard let suggestion = config.dictionarySuggestions.first(where: { $0.id == id }) else { return }
+        acceptDictionarySuggestion(suggestion)
+    }
+
+    func dismissDictionarySuggestion(id: UUID) {
+        guard let suggestion = config.dictionarySuggestions.first(where: { $0.id == id }) else { return }
+        dismissDictionarySuggestion(suggestion)
+    }
+
+    private func acceptDictionarySuggestion(_ suggestion: DictionarySuggestion) {
+        let key = suggestion.key
+        updateConfig { config in
+            if !config.customWords.contains(where: {
+                DictionarySuggestion.key(observed: $0.word, replacement: $0.targetWord) == key
+            }) {
+                config.customWords.append(suggestion.customWord)
+            }
+            config.dictionarySuggestions.removeAll { $0.key == key }
+            config.dismissedDictionarySuggestionKeys.removeAll { $0 == key }
+        }
+    }
+
+    private func dismissDictionarySuggestion(_ suggestion: DictionarySuggestion) {
+        let key = suggestion.key
+        updateConfig { config in
+            config.dictionarySuggestions.removeAll { $0.key == key }
+            if !config.dismissedDictionarySuggestionKeys.contains(key) {
+                config.dismissedDictionarySuggestionKeys.append(key)
+            }
+        }
+    }
+
+    private func presentDictionarySuggestionPrompt(_ suggestion: DictionarySuggestion) {
+        dictionarySuggestionPrompt.show(
+            suggestion: suggestion,
+            anchorFrame: indicator.currentFrame,
+            onAdd: { [weak self] in
+                self?.acceptDictionarySuggestion(suggestion)
+            },
+            onLater: {},
+            onIgnore: { [weak self] in
+                self?.dismissDictionarySuggestion(suggestion)
+            }
+        )
+    }
+
     func updateCustomWord(_ word: CustomWord) {
         updateConfig { config in
             guard let index = config.customWords.firstIndex(where: { $0.id == word.id }) else { return }
@@ -1538,6 +1628,13 @@ final class MuesliController: NSObject {
 
     func removeCustomWord(id: UUID) {
         updateConfig { $0.customWords.removeAll { $0.id == id } }
+    }
+
+    func setDictionaryCorrectionPromptsEnabled(_ enabled: Bool) {
+        if !enabled {
+            dictationCorrectionMonitor.cancel()
+        }
+        updateConfig { $0.enableDictionaryCorrectionPrompts = enabled }
     }
 
     @discardableResult
@@ -5248,6 +5345,11 @@ final class MuesliController: NSObject {
         beginDictationOutput()
         dictationStartedAt = nil
         capturedDictationContext = nil
+        capturedDictationCorrectionTargetApp = DictationCorrectionTargetApp(
+            app: NSWorkspace.shared.frontmostApplication == NSRunningApplication.current
+                ? lastExternalApp
+                : NSWorkspace.shared.frontmostApplication
+        )
         setState(.preparing)
         dictationAudioSessionManager.beginRecording(
             mode: "hold-start",
@@ -5583,7 +5685,10 @@ final class MuesliController: NSObject {
         let transcriptionLanguage = isTestMode ? (dictationTestCohereLanguage ?? config.resolvedCohereLanguage) : config.resolvedCohereLanguage
         let capturedContext = capturedDictationContext
         let promptContext = capturedContext.map { DictationContextCapture.formatForPrompt($0) }
-        let storageContext = capturedContext.map { DictationContextCapture.formatForStorage($0) } ?? ""
+        let correctionTargetApp = capturedDictationCorrectionTargetApp
+        let storageContext = capturedContext.map { DictationContextCapture.formatForStorage($0) }
+            ?? correctionTargetApp?.appContext
+            ?? ""
         let task = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -5636,11 +5741,21 @@ final class MuesliController: NSObject {
                 )
                 await MainActor.run {
                     self.capturedDictationContext = nil
+                    self.capturedDictationCorrectionTargetApp = nil
                     self.statusBarController?.refresh()
                     self.historyWindowController?.reload()
                     self.syncAppState()
                     if outputMode != .voiceNote {
                         PasteController.paste(text: text)
+                        if self.config.enableDictionaryCorrectionPrompts {
+                            self.dictationCorrectionMonitor.start(
+                                originalText: text,
+                                appContext: storageContext,
+                                targetApp: correctionTargetApp
+                            ) { [weak self] suggestion in
+                                self?.addDictionarySuggestion(suggestion, presentPrompt: true)
+                            }
+                        }
                     }
                     self.resetDictationOutputMode()
                     self.setState(.idle)

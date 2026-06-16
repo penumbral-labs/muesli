@@ -532,6 +532,64 @@ struct CustomWord: Codable, Equatable, Identifiable {
     }
 }
 
+struct DictionarySuggestion: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var observed: String
+    var replacement: String
+    var appContext: String
+    var occurrenceCount: Int = 1
+    var createdAt: String = ISO8601DateFormatter().string(from: Date())
+    var lastSeenAt: String = ISO8601DateFormatter().string(from: Date())
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case observed
+        case replacement
+        case appContext = "app_context"
+        case occurrenceCount = "occurrence_count"
+        case createdAt = "created_at"
+        case lastSeenAt = "last_seen_at"
+    }
+
+    init(
+        id: UUID = UUID(),
+        observed: String,
+        replacement: String,
+        appContext: String = "",
+        occurrenceCount: Int = 1,
+        createdAt: String = ISO8601DateFormatter().string(from: Date()),
+        lastSeenAt: String = ISO8601DateFormatter().string(from: Date())
+    ) {
+        self.id = id
+        self.observed = observed
+        self.replacement = replacement
+        self.appContext = appContext
+        self.occurrenceCount = max(occurrenceCount, 1)
+        self.createdAt = createdAt
+        self.lastSeenAt = lastSeenAt
+    }
+
+    var key: String {
+        Self.key(observed: observed, replacement: replacement)
+    }
+
+    var customWord: CustomWord {
+        CustomWord(word: observed, replacement: replacement, matchingThreshold: 0.92)
+    }
+
+    static func key(observed: String, replacement: String) -> String {
+        "\(normalize(observed))->\(normalize(replacement))"
+    }
+
+    private static func normalize(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .lowercased()
+    }
+}
+
 enum IndicatorAnchor: String, Codable, CaseIterable {
     case topLeading = "top_leading"
     case topCenter = "top_center"
@@ -755,6 +813,9 @@ struct AppConfig: Codable {
     var customWords: [CustomWord] = [
         CustomWord(word: "muesli", replacement: "muesli"),
     ]
+    var dictionarySuggestions: [DictionarySuggestion] = []
+    var dismissedDictionarySuggestionKeys: [String] = []
+    var enableDictionaryCorrectionPrompts: Bool = true
     var folderOrder: [Int64] = []
     var soundEnabled: Bool = true
     var pauseMediaDuringDictation: Bool = false
@@ -833,6 +894,9 @@ struct AppConfig: Codable {
         case userName = "user_name"
         case customMeetingTemplates = "custom_meeting_templates"
         case customWords = "custom_words"
+        case dictionarySuggestions = "dictionary_suggestions"
+        case dismissedDictionarySuggestionKeys = "dismissed_dictionary_suggestion_keys"
+        case enableDictionaryCorrectionPrompts = "enable_dictionary_correction_prompts"
         case folderOrder = "folder_order"
         case soundEnabled = "sound_enabled"
         case pauseMediaDuringDictation = "pause_media_during_dictation"
@@ -943,6 +1007,9 @@ struct AppConfig: Codable {
         userName = (try? c.decode(String.self, forKey: .userName)) ?? defaults.userName
         customMeetingTemplates = (try? c.decode([CustomMeetingTemplate].self, forKey: .customMeetingTemplates)) ?? defaults.customMeetingTemplates
         customWords = (try? c.decode([CustomWord].self, forKey: .customWords)) ?? defaults.customWords
+        dictionarySuggestions = (try? c.decode([DictionarySuggestion].self, forKey: .dictionarySuggestions)) ?? defaults.dictionarySuggestions
+        dismissedDictionarySuggestionKeys = (try? c.decode([String].self, forKey: .dismissedDictionarySuggestionKeys)) ?? defaults.dismissedDictionarySuggestionKeys
+        enableDictionaryCorrectionPrompts = (try? c.decode(Bool.self, forKey: .enableDictionaryCorrectionPrompts)) ?? defaults.enableDictionaryCorrectionPrompts
         folderOrder = (try? c.decode([Int64].self, forKey: .folderOrder)) ?? defaults.folderOrder
         soundEnabled = (try? c.decode(Bool.self, forKey: .soundEnabled)) ?? defaults.soundEnabled
         pauseMediaDuringDictation = (try? c.decode(Bool.self, forKey: .pauseMediaDuringDictation)) ?? defaults.pauseMediaDuringDictation

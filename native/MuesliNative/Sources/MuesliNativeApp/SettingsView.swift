@@ -436,6 +436,15 @@ struct SettingsView: View {
                         controller.setPostProcessorEnabled(newValue)
                     }
                 }
+                Divider().background(MuesliTheme.surfaceBorder)
+                settingsRow(
+                    "Dictionary suggestions",
+                    description: "Suggest adding words when you correct dictation output."
+                ) {
+                    settingsSwitch(isOn: appState.config.enableDictionaryCorrectionPrompts) { newValue in
+                        controller.setDictionaryCorrectionPromptsEnabled(newValue)
+                    }
+                }
                 if appState.config.enablePostProcessor && !downloadedPostProcOptions.isEmpty {
                     Divider().background(MuesliTheme.surfaceBorder)
                     settingsRow("Cleanup model") {
