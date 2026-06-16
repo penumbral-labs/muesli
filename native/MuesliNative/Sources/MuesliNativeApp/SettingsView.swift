@@ -79,6 +79,7 @@ struct SettingsView: View {
     @State private var googleCalSignInError: String?
     @State private var isSigningInGoogleCal = false
     @State private var pendingDataDestruction: PendingDataDestruction?
+    @State private var isShowingDictionaryScreenContextPrompt = false
     @State private var isPreviewingClip = false
     @State private var selectedPane: SettingsPane = .general
     @State private var downloadedBackendOptions: [BackendOption] = []
@@ -221,6 +222,18 @@ struct SettingsView: View {
             }
         } message: {
             Text(pendingDataDestruction?.message ?? "")
+        }
+        .alert(
+            "Enable Screen Context?",
+            isPresented: $isShowingDictionaryScreenContextPrompt
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("Enable") {
+                controller.setDictionaryCorrectionPromptsEnabled(true)
+                handleScreenContextToggle(true)
+            }
+        } message: {
+            Text("Dictionary suggestions need Screen Context to detect text edits after dictation.")
         }
     }
 
@@ -442,10 +455,9 @@ struct SettingsView: View {
                     description: "Suggest adding words when you correct dictation output. Requires Screen Context."
                 ) {
                     settingsSwitch(isOn: appState.config.enableDictionaryCorrectionPrompts) { newValue in
-                        controller.setDictionaryCorrectionPromptsEnabled(newValue)
+                        handleDictionaryCorrectionPromptsToggle(newValue)
                     }
-                    .disabled(!appState.config.enableScreenContext)
-                    .help(appState.config.enableScreenContext ? "Suggest corrections after dictation edits." : "Enable Screen Context first.")
+                    .help("Suggest corrections after dictation edits.")
                 }
                 if appState.config.enablePostProcessor && !downloadedPostProcOptions.isEmpty {
                     Divider().background(MuesliTheme.surfaceBorder)
@@ -1368,21 +1380,31 @@ struct SettingsView: View {
         }
 
         guard CGPreflightScreenCaptureAccess() else {
-            controller.updateConfig { $0.enableScreenContext = false }
             pendingScreenContextEnable = true
             pendingScreenContextRequestedAt = Date().timeIntervalSince1970
-            let granted = CGRequestScreenCaptureAccess()
+            let granted = controller.requestScreenContextEnable()
             screenRecordingGranted = CGPreflightScreenCaptureAccess()
             if granted || screenRecordingGranted {
                 clearPendingScreenContextEnable()
-                controller.updateConfig { $0.enableScreenContext = true }
             }
             return
         }
 
         screenRecordingGranted = true
         clearPendingScreenContextEnable()
-        controller.updateConfig { $0.enableScreenContext = true }
+        controller.requestScreenContextEnable()
+    }
+
+    private func handleDictionaryCorrectionPromptsToggle(_ enabled: Bool) {
+        guard enabled else {
+            controller.setDictionaryCorrectionPromptsEnabled(false)
+            return
+        }
+        guard appState.config.enableScreenContext else {
+            isShowingDictionaryScreenContextPrompt = true
+            return
+        }
+        controller.setDictionaryCorrectionPromptsEnabled(true)
     }
 
     private func startPermissionPolling() {

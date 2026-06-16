@@ -16,6 +16,7 @@ struct DictionaryView: View {
     @State private var newWord = ""
     @State private var newReplacement = ""
     @State private var newThreshold = 0.85
+    @State private var isShowingScreenContextPrompt = false
 
     var body: some View {
         ScrollView {
@@ -30,6 +31,15 @@ struct DictionaryView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(MuesliTheme.backgroundBase)
+        .alert("Enable Screen Context?", isPresented: $isShowingScreenContextPrompt) {
+            Button("Cancel", role: .cancel) {}
+            Button("Enable") {
+                controller.setDictionaryCorrectionPromptsEnabled(true)
+                controller.requestScreenContextEnable()
+            }
+        } message: {
+            Text("Dictionary suggestions need Screen Context to detect text edits after dictation.")
+        }
     }
 
     private var header: some View {
@@ -43,14 +53,13 @@ struct DictionaryView: View {
                     "Dictionary suggestions",
                     isOn: Binding(
                         get: { appState.config.enableDictionaryCorrectionPrompts },
-                        set: { controller.setDictionaryCorrectionPromptsEnabled($0) }
+                        set: { handleDictionaryCorrectionPromptsToggle($0) }
                     )
                 )
                 .toggleStyle(.switch)
                 .font(MuesliTheme.caption())
                 .foregroundStyle(MuesliTheme.textSecondary)
-                .disabled(!appState.config.enableScreenContext)
-                .help(appState.config.enableScreenContext ? "Suggest corrections after dictation edits." : "Enable Screen Context first.")
+                .help("Suggest corrections after dictation edits.")
                 Button {
                     isAdding = true
                     newWord = ""
@@ -79,6 +88,18 @@ struct DictionaryView: View {
                 .font(MuesliTheme.body())
                 .foregroundStyle(MuesliTheme.textSecondary)
         }
+    }
+
+    private func handleDictionaryCorrectionPromptsToggle(_ enabled: Bool) {
+        guard enabled else {
+            controller.setDictionaryCorrectionPromptsEnabled(false)
+            return
+        }
+        guard appState.config.enableScreenContext else {
+            isShowingScreenContextPrompt = true
+            return
+        }
+        controller.setDictionaryCorrectionPromptsEnabled(true)
     }
 
     private var suggestionList: some View {

@@ -1647,6 +1647,22 @@ final class MuesliController: NSObject {
     }
 
     @discardableResult
+    func requestScreenContextEnable() -> Bool {
+        guard CGPreflightScreenCaptureAccess() else {
+            updateConfig { $0.enableScreenContext = false }
+            let granted = CGRequestScreenCaptureAccess()
+            let hasAccess = granted || CGPreflightScreenCaptureAccess()
+            if hasAccess {
+                updateConfig { $0.enableScreenContext = true }
+            }
+            return hasAccess
+        }
+
+        updateConfig { $0.enableScreenContext = true }
+        return true
+    }
+
+    @discardableResult
     func updateDictationHotkey(_ hotkey: HotkeyConfig) -> ShortcutHotkeyUpdateResult {
         let result = ShortcutHotkeyPolicy.validateDictationHotkey(
             hotkey,
