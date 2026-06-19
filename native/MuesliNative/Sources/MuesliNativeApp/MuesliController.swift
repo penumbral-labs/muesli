@@ -299,6 +299,7 @@ final class MuesliController: NSObject {
     private var iCloudSyncDebounceTask: Task<Void, Never>?
     private var iCloudSubscriptionTask: Task<Void, Never>?
     private var hasEnsuredICloudSubscription = false
+    private var bridgeActivationPending = false
     private var hasStarted = false
 
     init(
@@ -942,6 +943,39 @@ final class MuesliController: NSObject {
         startICloudSync(userInitiated: true)
     }
 
+    func enableIPhoneBridgeSync() {
+        if config.iCloudSyncEnabled {
+            performICloudSync()
+            return
+        }
+
+        bridgeActivationPending = true
+        appState.iCloudSyncStatus = "Checking iCloud..."
+        TelemetryDeck.signal("bridge_enable_started", parameters: ["platform": "macos"])
+
+        Task { [weak self] in
+            do {
+                try await MuesliICloudSyncEngine().ensureTextRecordSubscription()
+                await MainActor.run {
+                    guard let self else { return }
+                    self.hasEnsuredICloudSubscription = true
+                    self.appState.iCloudSyncStatus = "Setting up private iCloud sync..."
+                    self.updateConfig { $0.iCloudSyncEnabled = true }
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.bridgeActivationPending = false
+                    self.appState.iCloudSyncStatus = "Sync needs iCloud: \(error.localizedDescription)"
+                    TelemetryDeck.signal(
+                        "bridge_enable_failed",
+                        parameters: ["platform": "macos", "reason": String(describing: type(of: error))]
+                    )
+                }
+            }
+        }
+    }
+
     func handleICloudRemoteNotification(userInfo: [AnyHashable: Any]) {
         guard config.iCloudSyncEnabled,
               MuesliICloudSyncEngine.isTextRecordSubscriptionNotification(userInfo) else {
@@ -1043,7 +1077,7 @@ final class MuesliController: NSObject {
             iCloudSyncDebounceTask = nil
         }
         enableICloudPersistentSync()
-        appState.iCloudSyncStatus = "Syncing with iCloud..."
+        appState.iCloudSyncStatus = "Syncing with private iCloud..."
         let store = dictationStore
         iCloudSyncTask = Task { [weak self] in
             do {
@@ -1052,9 +1086,21 @@ final class MuesliController: NSObject {
                     guard let self else { return }
                     self.iCloudSyncTask = nil
                     let summary = self.formatICloudSyncSummary(result)
-                    self.appState.iCloudSyncStatus = "All text is up to date."
+                    self.appState.iCloudSyncStatus = result.downloaded.total > 0
+                        ? "Synced with iPhone."
+                        : "All text is up to date."
                     self.appState.iCloudLastSyncSummary = summary
                     self.appState.iCloudLastSyncedAt = result.syncedAt
+                    if result.downloaded.total > 0 {
+                        TelemetryDeck.signal(
+                            "bridge_remote_records_seen",
+                            parameters: ["platform": "macos", "count": "\(result.downloaded.total)"]
+                        )
+                    }
+                    if self.bridgeActivationPending {
+                        self.bridgeActivationPending = false
+                        TelemetryDeck.signal("bridge_enable_completed", parameters: ["platform": "macos"])
+                    }
                     self.refreshUI()
                 }
             } catch is CancellationError {
@@ -1066,6 +1112,13 @@ final class MuesliController: NSObject {
                     guard let self else { return }
                     self.iCloudSyncTask = nil
                     self.appState.iCloudSyncStatus = "Sync failed: \(error.localizedDescription)"
+                    if self.bridgeActivationPending {
+                        self.bridgeActivationPending = false
+                        TelemetryDeck.signal(
+                            "bridge_enable_failed",
+                            parameters: ["platform": "macos", "reason": String(describing: type(of: error))]
+                        )
+                    }
                 }
             }
         }

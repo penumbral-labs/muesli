@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TelemetryDeck
 import MuesliCore
 
 enum DictationFilter: Hashable {
@@ -21,6 +22,7 @@ struct DictationsView: View {
     let appState: AppState
     let controller: MuesliController
     @State private var selectedFilter: DictationFilter = .all
+    @State private var bridgePromptSeen = false
 
     private var groupedDictations: [(header: String, records: [DictationRecord])] {
         let calendar = Calendar.current
@@ -76,7 +78,7 @@ struct DictationsView: View {
             )
 
             if appState.config.showIOSCompanionPrompt {
-                iOSCompanionPrompt
+                iPhoneBridgeCard
                     .padding(.horizontal, MuesliTheme.spacing24)
                     .padding(.bottom, MuesliTheme.spacing12)
             }
@@ -178,18 +180,48 @@ struct DictationsView: View {
         }
     }
 
-    private var iOSCompanionPrompt: some View {
+    private enum BridgeState {
+        case notConfigured
+        case checkingICloud
+        case readyToEnable
+        case syncing
+        case active
+        case needsICloud
+        case error
+    }
+
+    private var bridgeState: BridgeState {
+        let status = appState.iCloudSyncStatus?.lowercased() ?? ""
+        if status.contains("checking icloud") {
+            return .checkingICloud
+        }
+        if status.contains("syncing") || status.contains("setting up") || status.contains("preparing") {
+            return .syncing
+        }
+        if status.contains("needs icloud") {
+            return .needsICloud
+        }
+        if status.contains("failed") {
+            return .error
+        }
+        if appState.config.iCloudSyncEnabled {
+            return .active
+        }
+        return .notConfigured
+    }
+
+    private var iPhoneBridgeCard: some View {
         HStack(alignment: .center, spacing: MuesliTheme.spacing12) {
-            Image(systemName: "iphone.gen3")
+            Image(systemName: bridgeIcon)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(MuesliTheme.accent)
+                .foregroundStyle(bridgeIconColor)
                 .frame(width: 28)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Muesli for iPhone")
+                Text(bridgeTitle)
                     .font(MuesliTheme.body())
                     .foregroundStyle(MuesliTheme.textPrimary)
-                Text("Capture offline meetings on iPhone and sync text privately with this Mac.")
+                Text(bridgeSubtitle)
                     .font(MuesliTheme.caption())
                     .foregroundStyle(MuesliTheme.textTertiary)
                     .lineLimit(2)
@@ -198,11 +230,11 @@ struct DictationsView: View {
             Spacer(minLength: MuesliTheme.spacing12)
 
             Button {
-                controller.performICloudSync()
+                bridgePrimaryAction()
             } label: {
                 HStack(spacing: 6) {
-                    Text("Sync now")
-                    Image(systemName: "arrow.triangle.2.circlepath")
+                    Text(bridgeButtonTitle)
+                    Image(systemName: bridgeButtonIcon)
                         .font(.system(size: 12, weight: .semibold))
                         .symbolRenderingMode(.hierarchical)
                 }
@@ -214,8 +246,8 @@ struct DictationsView: View {
                     .clipShape(RoundedRectangle(cornerRadius: MuesliTheme.cornerSmall))
             }
             .buttonStyle(.plain)
-            .disabled(!appState.config.iCloudSyncEnabled)
-            .help(appState.config.iCloudSyncEnabled ? "Sync text with iCloud" : "Turn on iCloud sync in Settings")
+            .disabled(bridgeActionDisabled)
+            .help(bridgeButtonHelp)
 
             Button {
                 controller.updateConfig { $0.showIOSCompanionPrompt = false }
@@ -237,6 +269,122 @@ struct DictationsView: View {
             RoundedRectangle(cornerRadius: MuesliTheme.cornerMedium)
                 .strokeBorder(MuesliTheme.surfaceBorder, lineWidth: 1)
         )
+        .onAppear {
+            guard !bridgePromptSeen else { return }
+            bridgePromptSeen = true
+            TelemetryDeck.signal("bridge_prompt_seen", parameters: ["platform": "macos"])
+        }
+    }
+
+    private var bridgeIcon: String {
+        switch bridgeState {
+        case .active:
+            return "checkmark.icloud"
+        case .checkingICloud, .syncing:
+            return "arrow.triangle.2.circlepath"
+        case .needsICloud, .error:
+            return "exclamationmark.icloud"
+        case .notConfigured, .readyToEnable:
+            return "iphone.gen3"
+        }
+    }
+
+    private var bridgeIconColor: Color {
+        switch bridgeState {
+        case .active:
+            return MuesliTheme.success
+        case .needsICloud, .error:
+            return MuesliTheme.transcribing
+        default:
+            return MuesliTheme.accent
+        }
+    }
+
+    private var bridgeTitle: String {
+        switch bridgeState {
+        case .active:
+            return "Synced with iPhone"
+        case .checkingICloud, .syncing:
+            return "Setting up private iCloud sync"
+        case .needsICloud:
+            return "Sign in to iCloud to sync"
+        case .error:
+            return "iPhone sync needs attention"
+        case .notConfigured, .readyToEnable:
+            return "Use Muesli on iPhone"
+        }
+    }
+
+    private var bridgeSubtitle: String {
+        switch bridgeState {
+        case .active:
+            if let lastSyncedAt = appState.iCloudLastSyncedAt {
+                return "Private text sync is on · \(relativeSyncTime(lastSyncedAt))"
+            }
+            return "Private iCloud text sync is on. Audio stays local."
+        case .checkingICloud:
+            return "Checking this Mac's iCloud account..."
+        case .syncing:
+            return "Creating the sync channel and pulling your latest text records."
+        case .needsICloud, .error:
+            return appState.iCloudSyncStatus ?? "Open iCloud settings, then try again."
+        case .notConfigured, .readyToEnable:
+            return "Your Muesli history follows you through private iCloud. Audio stays local."
+        }
+    }
+
+    private var bridgeButtonTitle: String {
+        switch bridgeState {
+        case .active:
+            return "Sync"
+        case .checkingICloud, .syncing:
+            return "Syncing"
+        case .needsICloud, .error:
+            return "Try again"
+        case .notConfigured, .readyToEnable:
+            return "Set up private iCloud sync"
+        }
+    }
+
+    private var bridgeButtonIcon: String {
+        switch bridgeState {
+        case .notConfigured, .readyToEnable:
+            return "icloud"
+        default:
+            return "arrow.triangle.2.circlepath"
+        }
+    }
+
+    private var bridgeActionDisabled: Bool {
+        bridgeState == .checkingICloud || bridgeState == .syncing
+    }
+
+    private var bridgeButtonHelp: String {
+        switch bridgeState {
+        case .active:
+            return "Sync text with iCloud"
+        case .checkingICloud, .syncing:
+            return "Sync setup is in progress"
+        default:
+            return "Set up private iCloud text sync"
+        }
+    }
+
+    private func bridgePrimaryAction() {
+        switch bridgeState {
+        case .active:
+            controller.performICloudSync()
+        case .checkingICloud, .syncing:
+            break
+        default:
+            controller.enableIPhoneBridgeSync()
+        }
+    }
+
+    private func relativeSyncTime(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private var emptyStateInstruction: String {

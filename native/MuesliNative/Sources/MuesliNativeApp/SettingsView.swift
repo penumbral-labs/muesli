@@ -401,7 +401,7 @@ struct SettingsView: View {
                         controller.updateConfig { $0.iCloudSyncEnabled = newValue }
                     }
                 }
-                settingsDescription("Sync dictation text, meeting transcripts, notes, summaries, and manual notes with the iOS companion app through your private iCloud account. Audio recordings are never synced.")
+                settingsDescription("Sync dictation text, meeting transcripts, notes, summaries, and manual notes with Muesli for iPhone through your private iCloud account. Audio recordings are never synced.")
 
                 Divider().background(MuesliTheme.surfaceBorder)
 
@@ -426,13 +426,13 @@ struct SettingsView: View {
                 }
             }
 
-            settingsSection("iOS Companion") {
+            settingsSection("iPhone Bridge") {
                 settingsRow("Show iOS companion prompt") {
                     settingsSwitch(isOn: appState.config.showIOSCompanionPrompt) { newValue in
                         controller.updateConfig { $0.showIOSCompanionPrompt = newValue }
                     }
                 }
-                settingsDescription("Keep a lightweight prompt available for users who want Muesli dictation and meeting capture on iPhone.")
+                settingsDescription("Keep the timeline bridge card available while users connect Muesli on iPhone.")
 
                 Divider().background(MuesliTheme.surfaceBorder)
 
@@ -441,7 +441,7 @@ struct SettingsView: View {
                         Text("Muesli for iPhone")
                             .font(MuesliTheme.body())
                             .foregroundStyle(MuesliTheme.textPrimary)
-                        Text("Use iPhone for offline meetings, keyboard dictation, and private text sync with this Mac.")
+                        Text("Use iPhone for offline meetings, keyboard dictation, and private iCloud text sync with this Mac.")
                             .font(MuesliTheme.caption())
                             .foregroundStyle(MuesliTheme.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -458,9 +458,9 @@ struct SettingsView: View {
 
     private var syncStatusText: String {
         if !appState.config.iCloudSyncEnabled {
-            return "iCloud text sync is off."
+            return "Sync is off. Turn it on to bridge this Mac with Muesli for iPhone."
         }
-        return appState.iCloudSyncStatus ?? "Text sync is ready."
+        return appState.iCloudSyncStatus ?? "Private iCloud text sync is ready."
     }
 
     private var syncLastSyncedText: String? {
