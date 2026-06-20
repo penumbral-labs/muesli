@@ -914,15 +914,46 @@ struct ModelsView: View {
 
         let startTime = Date()
         let task = Task {
-            await controller.transcriptionCoordinator.preload(
-                backend: option,
-                includeMeetingHelpers: controller.config.resolvedOnboardingUseCase.includesMeetings
-            ) { progress, _ in
-                DispatchQueue.main.async {
-                    downloadProgress[option.model] = max(progress, 0.05)
+            do {
+                try await controller.transcriptionCoordinator.preloadRequired(
+                    backend: option,
+                    includeMeetingHelpers: controller.config.resolvedOnboardingUseCase.includesMeetings
+                ) { progress, _ in
+                    DispatchQueue.main.async {
+                        downloadProgress[option.model] = max(progress, 0.05)
+                    }
                 }
-            }
-            guard !Task.isCancelled else {
+                guard isModelDownloaded(option, fm: FileManager.default) else {
+                    throw NSError(
+                        domain: "MuesliModelDownload",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "\(option.label) was not downloaded successfully."]
+                    )
+                }
+                guard !Task.isCancelled else {
+                    await MainActor.run {
+                        withAnimation {
+                            downloadingModels.remove(option.model)
+                            downloadProgress.removeValue(forKey: option.model)
+                            downloadTasks.removeValue(forKey: option.model)
+                        }
+                    }
+                    return
+                }
+                // Ensure the downloading state is visible for at least 1.5s
+                let elapsed = Date().timeIntervalSince(startTime)
+                if elapsed < 1.5 {
+                    try? await Task.sleep(nanoseconds: UInt64((1.5 - elapsed) * 1_000_000_000))
+                }
+                await MainActor.run {
+                    withAnimation {
+                        downloadingModels.remove(option.model)
+                        downloadedModels.insert(option.model)
+                        downloadProgress.removeValue(forKey: option.model)
+                        downloadTasks.removeValue(forKey: option.model)
+                    }
+                }
+            } catch {
                 await MainActor.run {
                     withAnimation {
                         downloadingModels.remove(option.model)
@@ -930,19 +961,8 @@ struct ModelsView: View {
                         downloadTasks.removeValue(forKey: option.model)
                     }
                 }
-                return
-            }
-            // Ensure the downloading state is visible for at least 1.5s
-            let elapsed = Date().timeIntervalSince(startTime)
-            if elapsed < 1.5 {
-                try? await Task.sleep(nanoseconds: UInt64((1.5 - elapsed) * 1_000_000_000))
-            }
-            await MainActor.run {
-                withAnimation {
-                    downloadingModels.remove(option.model)
-                    downloadedModels.insert(option.model)
-                    downloadProgress.removeValue(forKey: option.model)
-                    downloadTasks.removeValue(forKey: option.model)
+                if !(error is CancellationError) {
+                    fputs("[muesli-native] model download failed for \(option.backend)/\(option.model): \(error)\n", stderr)
                 }
             }
         }
