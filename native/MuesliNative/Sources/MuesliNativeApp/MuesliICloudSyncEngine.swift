@@ -696,29 +696,29 @@ final class MuesliICloudSyncEngine {
     }
 
     private static func isMissingLegacyDefaultZoneRecords(_ error: Error) -> Bool {
+        isCloudKitUnknownItem(error)
+    }
+
+    private static func isCloudKitUnknownItem(_ error: Error) -> Bool {
         if let ckError = error as? CKError {
             if ckError.code == .unknownItem {
                 return true
             }
             if ckError.code == .partialFailure,
-               ckError.partialErrorsByItemID?.values.contains(where: { partialError in
-                   (partialError as? CKError)?.code == .unknownItem
-               }) == true {
+               ckError.partialErrorsByItemID?.values.contains(where: isCloudKitUnknownItem) == true {
                 return true
             }
         }
 
         let nsError = error as NSError
-        let message = [
-            nsError.localizedDescription,
-            nsError.localizedFailureReason,
-            nsError.localizedRecoverySuggestion,
-            String(describing: nsError),
-        ]
-            .compactMap { $0?.lowercased() }
-            .joined(separator: " ")
-        return (message.contains("unknown item") || message.contains("not found") || message.contains("does not exist"))
-            && (message.contains(Schema.textRecordType.lowercased()) || message.contains("record type"))
+        if nsError.domain == CKError.errorDomain,
+           nsError.code == CKError.Code.unknownItem.rawValue {
+            return true
+        }
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+            return isCloudKitUnknownItem(underlyingError)
+        }
+        return false
     }
 
     private static var desiredTextRecordKeys: [CKRecord.FieldKey] {
