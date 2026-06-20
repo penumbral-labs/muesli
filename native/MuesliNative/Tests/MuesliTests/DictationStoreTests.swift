@@ -228,6 +228,63 @@ struct DictationStoreTests {
         #expect(record.source == "macos")
     }
 
+    @Test("deleted unsynced local text records are not uploaded")
+    func deletedUnsyncedLocalTextRecordsAreNotUploaded() throws {
+        let store = try makeStore()
+        let endedAt = Date(timeIntervalSince1970: 1_770_000_000)
+
+        let dictationID = try store.insertDictation(
+            text: "Delete before iCloud sees this",
+            durationSeconds: 2,
+            startedAt: endedAt.addingTimeInterval(-2),
+            endedAt: endedAt
+        )
+        try store.insertMeeting(
+            title: "Delete Meeting Before Sync",
+            calendarEventID: nil,
+            startTime: endedAt,
+            endTime: endedAt.addingTimeInterval(60),
+            rawTranscript: "Meeting content that should stay local",
+            formattedNotes: "Meeting notes",
+            micAudioPath: nil,
+            systemAudioPath: nil
+        )
+
+        let meetingID = try #require(try store.recentMeetings(limit: 1).first?.id)
+        try store.deleteDictation(id: dictationID)
+        try store.deleteMeeting(id: meetingID)
+
+        #expect(try store.textRecordsNeedingSync().isEmpty)
+        #expect(try store.textRecordsForSyncMigration(kind: .dictation).isEmpty)
+        #expect(try store.textRecordsForSyncMigration(kind: .meeting).isEmpty)
+    }
+
+    @Test("deleted synced local text records upload tombstones")
+    func deletedSyncedLocalTextRecordsUploadTombstones() throws {
+        let store = try makeStore()
+        let endedAt = Date(timeIntervalSince1970: 1_770_000_000)
+
+        let dictationID = try store.insertDictation(
+            text: "Delete after iCloud sees this",
+            durationSeconds: 2,
+            startedAt: endedAt.addingTimeInterval(-2),
+            endedAt: endedAt
+        )
+        let outbound = try #require(try store.textRecordsNeedingSync().first { $0.kind == .dictation })
+        _ = try store.markTextRecordSynced(
+            kind: .dictation,
+            recordName: outbound.id,
+            changeTag: "tag-before-delete",
+            recordUpdatedAt: outbound.updatedAt
+        )
+
+        try store.deleteDictation(id: dictationID)
+
+        let tombstone = try #require(try store.textRecordsNeedingSync().first { $0.kind == .dictation })
+        #expect(tombstone.id == outbound.id)
+        #expect(tombstone.isDeleted)
+    }
+
     @Test("synced iOS meeting preserves source and excludes audio")
     func syncedIOSMeetingPreservesSourceAndExcludesAudio() throws {
         let store = try makeStore()
@@ -853,6 +910,34 @@ struct DictationStoreTests {
         #expect(stats.totalWords == 5)
         #expect(stats.totalSessions == 2)
         #expect(stats.averageWPM > 0)
+    }
+
+    @Test("dictation streaks ignore deleted records")
+    func dictationStreaksIgnoreDeletedRecords() throws {
+        let store = try makeStore()
+
+        let calendar = Calendar.current
+        let today = Date()
+        let yesterday = try #require(calendar.date(byAdding: .day, value: -1, to: today))
+        let deletedID = try store.insertDictation(
+            text: "deleted today",
+            durationSeconds: 1,
+            startedAt: today.addingTimeInterval(-1),
+            endedAt: today
+        )
+        try store.insertDictation(
+            text: "live yesterday",
+            durationSeconds: 1,
+            startedAt: yesterday.addingTimeInterval(-1),
+            endedAt: yesterday
+        )
+
+        try store.deleteDictation(id: deletedID)
+
+        let stats = try store.dictationStats()
+        #expect(stats.totalSessions == 1)
+        #expect(stats.currentStreakDays == 1)
+        #expect(stats.longestStreakDays == 1)
     }
 
     @Test("meeting stats aggregate correctly")

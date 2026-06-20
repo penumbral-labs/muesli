@@ -1565,7 +1565,12 @@ public final class DictationStore {
     }
 
     private func ensureCloudRecordNames(table: String, prefix: String, db: OpaquePointer?) throws {
-        let sql = "SELECT id FROM \(table) WHERE cloud_record_name IS NULL OR cloud_record_name = ''"
+        let sql = """
+        SELECT id
+        FROM \(table)
+        WHERE (cloud_record_name IS NULL OR cloud_record_name = '')
+          AND deleted_at IS NULL
+        """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw lastError(db)
@@ -1942,7 +1947,12 @@ public final class DictationStore {
     }
 
     private func dictationStreaks(db: OpaquePointer?) throws -> (current: Int, longest: Int) {
-        let sql = "SELECT DISTINCT date(timestamp) AS used_day FROM dictations ORDER BY used_day ASC"
+        let sql = """
+        SELECT DISTINCT date(timestamp) AS used_day
+        FROM dictations
+        WHERE deleted_at IS NULL
+        ORDER BY used_day ASC
+        """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw lastError(db)
