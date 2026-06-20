@@ -220,6 +220,16 @@ struct DictionaryCorrectionDetectorTests {
         #expect(suggestion == nil)
     }
 
+    @Test("does not suggest same-endpoint numeric shorthand with wrong omitted count")
+    func skipsSameEndpointNumericShorthandWithWrongOmittedCount() {
+        let suggestion = DictionaryCorrectionDetector.suggestion(
+            originalText: "Please review the validation design note today",
+            editedText: "Please review the v2n design note today"
+        )
+
+        #expect(suggestion == nil)
+    }
+
     @Test("ignores edits outside the pasted dictation")
     func ignoresOutsideEdits() {
         let suggestion = DictionaryCorrectionDetector.suggestion(

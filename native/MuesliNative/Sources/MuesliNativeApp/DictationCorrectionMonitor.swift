@@ -374,13 +374,19 @@ struct DictionaryCorrectionDetector {
         let observedLetters = observed.lowercased().filter(\.isLetter)
         let replacementCharacters = Array(replacement.lowercased())
         guard observedLetters.count >= 4,
-              replacementCharacters.contains(where: \.isNumber),
+              replacementCharacters.count >= 3,
               let firstObserved = observedLetters.first,
               let lastObserved = observedLetters.last,
               replacementCharacters.first == firstObserved,
               replacementCharacters.last == lastObserved
         else { return false }
-        return true
+
+        let middleCharacters = replacementCharacters.dropFirst().dropLast()
+        guard !middleCharacters.isEmpty,
+              middleCharacters.allSatisfy(\.isNumber),
+              let omittedCount = Int(String(middleCharacters))
+        else { return false }
+        return omittedCount == observedLetters.count - 2
     }
 
     private static func isAcronymCorrection(observedTokens: [String], replacement: String) -> Bool {
