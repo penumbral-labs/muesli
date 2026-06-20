@@ -778,7 +778,9 @@ final class MuesliController: NSObject {
         for meeting in meetings {
             do {
                 let recovered = try dictationStore.recoverLiveMeetingFromTranscriptCheckpoints(id: meeting.id)
-                if !recovered {
+                if recovered {
+                    scheduleICloudSyncAfterLocalChange()
+                } else {
                     try updateMeetingStatusAndScheduleSyncThrowing(id: meeting.id, status: .failed)
                 }
                 staleLiveMeetingRecoveryFailures.remove(meeting.id)
