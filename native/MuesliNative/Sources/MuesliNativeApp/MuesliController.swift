@@ -4019,7 +4019,7 @@ final class MuesliController: NSObject {
     private func keepManualNotesAfterDiscard(id: Int64) {
         flushCachedMeetingTitle(id: id)
         flushCachedMeetingManualNotes(id: id, sync: false)
-        try? dictationStore.updateMeetingStatus(id: id, status: .noteOnly)
+        updateMeetingStatusAndScheduleSync(id: id, status: .noteOnly)
         clearCachedMeetingManualNotes(id: id)
         clearCachedMeetingTitle(id: id)
     }
@@ -4038,7 +4038,7 @@ final class MuesliController: NSObject {
         } else {
             flushCachedMeetingTitle(id: id)
             flushCachedMeetingManualNotes(id: id, sync: false)
-            try? dictationStore.updateMeetingStatus(id: id, status: .failed)
+            updateMeetingStatusAndScheduleSync(id: id, status: .failed)
             clearCachedMeetingManualNotes(id: id)
             clearCachedMeetingTitle(id: id)
         }
@@ -4065,7 +4065,7 @@ final class MuesliController: NSObject {
         } else {
             flushCachedMeetingTitle(id: id)
             flushCachedMeetingManualNotes(id: id, sync: false)
-            try? dictationStore.updateMeetingStatus(id: id, status: .failed)
+            updateMeetingStatusAndScheduleSync(id: id, status: .failed)
             clearCachedMeetingManualNotes(id: id)
             clearCachedMeetingTitle(id: id)
         }
@@ -4081,6 +4081,15 @@ final class MuesliController: NSObject {
             scheduleICloudSyncAfterLocalChange()
         } catch {
             fputs("[muesli-native] failed to delete meeting draft \(id): \(error)\n", stderr)
+        }
+    }
+
+    private func updateMeetingStatusAndScheduleSync(id: Int64, status: MeetingStatus) {
+        do {
+            try dictationStore.updateMeetingStatus(id: id, status: status)
+            scheduleICloudSyncAfterLocalChange()
+        } catch {
+            fputs("[muesli-native] failed to update meeting \(id) status to \(status.rawValue): \(error)\n", stderr)
         }
     }
 
