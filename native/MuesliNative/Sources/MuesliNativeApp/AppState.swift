@@ -106,6 +106,7 @@ final class AppState {
     var iCloudBridgeMessage: String?
     var iCloudLastSyncSummary: String?
     var iCloudLastSyncedAt: Date?
+    var contributionMilestonePrompt: ContributionMilestonePrompt?
     var modelPreparationTitle: String?
     var modelPreparationDetail: String?
     var modelPreparationProgress: Double?

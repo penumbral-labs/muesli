@@ -178,6 +178,35 @@ struct DictationsView: View {
                 }
             }
         }
+        .alert(
+            appState.contributionMilestonePrompt?.title ?? "Muesli milestone",
+            isPresented: Binding(
+                get: { appState.contributionMilestonePrompt != nil },
+                set: { if !$0 { controller.dismissContributionMilestonePrompt() } }
+            )
+        ) {
+            if appState.contributionMilestonePrompt?.showGitHubStar == true {
+                Button("Star on GitHub") {
+                    controller.openContributionMilestoneAction(.githubStar)
+                }
+            }
+            if appState.contributionMilestonePrompt?.showBuyMeCoffee == true {
+                Button("Buy Me a Coffee") {
+                    controller.openContributionMilestoneAction(.buyMeCoffee)
+                }
+            }
+            Button("Not Now", role: .cancel) {
+                controller.dismissContributionMilestonePrompt()
+            }
+        } message: {
+            Text(appState.contributionMilestonePrompt?.message ?? "")
+        }
+        .onAppear {
+            controller.recordContributionMilestonePromptSeen()
+        }
+        .onChange(of: appState.contributionMilestonePrompt?.id) { _, _ in
+            controller.recordContributionMilestonePromptSeen()
+        }
     }
 
     private var bridgeState: ICloudBridgeState {
