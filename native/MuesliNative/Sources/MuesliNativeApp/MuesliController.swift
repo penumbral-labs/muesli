@@ -84,11 +84,11 @@ enum MuesliBridgeDeviceRefreshPolicy {
         userInitiated: Bool,
         bridgeActivationPending: Bool,
         bridgeDiscoveryTriggered: Bool,
-        hasKnownRemoteDevice: Bool
+        hasKnownCompanionDevice: Bool
     ) -> Bool {
         userInitiated
             || bridgeActivationPending
-            || (bridgeDiscoveryTriggered && !hasKnownRemoteDevice)
+            || (bridgeDiscoveryTriggered && !hasKnownCompanionDevice)
     }
 }
 
@@ -1275,14 +1275,14 @@ final class MuesliController: NSObject {
         let bridgeActivationPendingAtStart = bridgeActivationPending
         let bridgeDiscoveryTriggeredAtStart = bridgeDiscoveryPending
         bridgeDiscoveryPending = false
-        let hasKnownRemoteDeviceAtStart = MuesliBridgeDeviceIdentity.hasRemoteDevice()
+        let hasKnownCompanionDeviceAtStart = MuesliBridgeDeviceIdentity.hasCompanionRemoteDevice()
         iCloudSyncTask = Task { [weak self] in
             do {
                 let forceBridgeDeviceRefresh = MuesliBridgeDeviceRefreshPolicy.shouldForceRefresh(
                     userInitiated: userInitiated,
                     bridgeActivationPending: bridgeActivationPendingAtStart,
                     bridgeDiscoveryTriggered: bridgeDiscoveryTriggeredAtStart,
-                    hasKnownRemoteDevice: hasKnownRemoteDeviceAtStart
+                    hasKnownCompanionDevice: hasKnownCompanionDeviceAtStart
                 )
                 let result = try await MuesliICloudSyncEngine().sync(
                     store: store,

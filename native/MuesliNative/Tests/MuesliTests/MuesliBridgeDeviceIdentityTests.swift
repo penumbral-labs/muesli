@@ -117,6 +117,7 @@ struct MuesliBridgeDeviceIdentityTests {
         let now = Date(timeIntervalSince1970: 1_770_000_000)
 
         defaults.set("remote-iphone", forKey: DefaultsKey.remoteDeviceID)
+        defaults.set("iOS", forKey: DefaultsKey.remoteDevicePlatform)
         MuesliBridgeDeviceIdentity.markRefreshed(defaults: defaults, at: now)
 
         #expect(!MuesliBridgeDeviceIdentity.shouldRefresh(
@@ -126,6 +127,26 @@ struct MuesliBridgeDeviceIdentityTests {
         #expect(MuesliBridgeDeviceIdentity.shouldRefresh(
             defaults: defaults,
             now: now.addingTimeInterval(60 * 60)
+        ))
+    }
+
+    @Test("shouldRefresh treats stale non-companion remote cache as unlinked")
+    func shouldRefreshTreatsStaleNonCompanionRemoteCacheAsUnlinked() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let now = Date(timeIntervalSince1970: 1_770_000_000)
+
+        defaults.set("remote-mac", forKey: DefaultsKey.remoteDeviceID)
+        defaults.set("macOS", forKey: DefaultsKey.remoteDevicePlatform)
+        MuesliBridgeDeviceIdentity.markRefreshed(defaults: defaults, at: now)
+
+        #expect(!MuesliBridgeDeviceIdentity.shouldRefresh(
+            defaults: defaults,
+            now: now.addingTimeInterval(59)
+        ))
+        #expect(MuesliBridgeDeviceIdentity.shouldRefresh(
+            defaults: defaults,
+            now: now.addingTimeInterval(60)
         ))
     }
 
@@ -275,7 +296,7 @@ struct MuesliBridgeDeviceRefreshPolicyTests {
             userInitiated: true,
             bridgeActivationPending: false,
             bridgeDiscoveryTriggered: false,
-            hasKnownRemoteDevice: true
+            hasKnownCompanionDevice: true
         ))
     }
 
@@ -285,37 +306,47 @@ struct MuesliBridgeDeviceRefreshPolicyTests {
             userInitiated: false,
             bridgeActivationPending: true,
             bridgeDiscoveryTriggered: false,
-            hasKnownRemoteDevice: true
+            hasKnownCompanionDevice: true
         ))
     }
 
-    @Test("app activation forces bridge device refresh until a remote device is known")
-    func appActivationForcesRefreshUntilRemoteDeviceIsKnown() {
+    @Test("app activation forces bridge device refresh until a companion device is known")
+    func appActivationForcesRefreshUntilCompanionDeviceIsKnown() {
         #expect(MuesliBridgeDeviceRefreshPolicy.shouldForceRefresh(
             userInitiated: false,
             bridgeActivationPending: false,
             bridgeDiscoveryTriggered: true,
-            hasKnownRemoteDevice: false
+            hasKnownCompanionDevice: false
         ))
     }
 
-    @Test("background sync uses throttle before a remote device is known")
-    func backgroundSyncUsesThrottleBeforeRemoteDeviceIsKnown() {
+    @Test("background sync uses throttle before a companion device is known")
+    func backgroundSyncUsesThrottleBeforeCompanionDeviceIsKnown() {
         #expect(!MuesliBridgeDeviceRefreshPolicy.shouldForceRefresh(
             userInitiated: false,
             bridgeActivationPending: false,
             bridgeDiscoveryTriggered: false,
-            hasKnownRemoteDevice: false
+            hasKnownCompanionDevice: false
         ))
     }
 
-    @Test("background sync uses throttle after remote device is known")
-    func backgroundSyncUsesThrottleAfterRemoteDeviceIsKnown() {
+    @Test("app activation uses throttle after companion device is known")
+    func appActivationUsesThrottleAfterCompanionDeviceIsKnown() {
         #expect(!MuesliBridgeDeviceRefreshPolicy.shouldForceRefresh(
             userInitiated: false,
             bridgeActivationPending: false,
             bridgeDiscoveryTriggered: true,
-            hasKnownRemoteDevice: true
+            hasKnownCompanionDevice: true
+        ))
+    }
+
+    @Test("app activation refreshes when cached remote is not a companion")
+    func appActivationRefreshesWhenCachedRemoteIsNotACompanion() {
+        #expect(MuesliBridgeDeviceRefreshPolicy.shouldForceRefresh(
+            userInitiated: false,
+            bridgeActivationPending: false,
+            bridgeDiscoveryTriggered: true,
+            hasKnownCompanionDevice: false
         ))
     }
 }

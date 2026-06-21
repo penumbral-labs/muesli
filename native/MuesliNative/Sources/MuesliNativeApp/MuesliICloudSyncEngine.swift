@@ -155,7 +155,7 @@ enum MuesliBridgeDeviceIdentity {
         guard let lastRefresh = defaults.object(forKey: lastRefreshKey) as? Date else {
             return true
         }
-        let interval = hasRemoteDevice(defaults: defaults) ? linkedRefreshInterval : unlinkedRefreshInterval
+        let interval = hasCompanionRemoteDevice(defaults: defaults) ? linkedRefreshInterval : unlinkedRefreshInterval
         return now.timeIntervalSince(lastRefresh) >= interval
     }
 
@@ -192,8 +192,12 @@ enum MuesliBridgeDeviceIdentity {
         defaults.set(latestRemote.lastSeenAt, forKey: remoteDeviceLastSeenAtKey)
     }
 
-    static func hasRemoteDevice(defaults: UserDefaults = .standard) -> Bool {
-        defaults.string(forKey: remoteDeviceIDKey) != nil
+    static func hasCompanionRemoteDevice(defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.string(forKey: remoteDeviceIDKey) != nil,
+              let platform = defaults.string(forKey: remoteDevicePlatformKey) else {
+            return false
+        }
+        return isCompanionPlatform(platform)
     }
 
     private static func isCompanionPlatform(_ platform: String) -> Bool {
