@@ -281,7 +281,13 @@ struct DictationsView: View {
     }
 
     private var shouldShowBridgeHandoffButton: Bool {
-        appState.config.iCloudSyncEnabled && bridgeState != .checkingICloud && bridgeState != .syncing
+        guard appState.config.iCloudSyncEnabled else { return false }
+        switch bridgeState {
+        case .notConfigured, .needsICloud, .error:
+            return true
+        case .checkingICloud, .syncing, .active:
+            return false
+        }
     }
 
     private var bridgeSyncIconIsAnimating: Bool {
