@@ -691,10 +691,11 @@ private struct IPhoneBridgeQRCodeSheet: View {
 
 private struct QRCodeImage: View {
     let payload: String
+    @State private var cachedImage: NSImage?
 
     var body: some View {
         Group {
-            if let image = makeQRCodeImage(payload: payload) {
+            if let image = cachedImage {
                 Image(nsImage: image)
                     .interpolation(.none)
                     .resizable()
@@ -706,6 +707,11 @@ private struct QRCodeImage: View {
             }
         }
         .accessibilityLabel("iPhone sync setup QR code")
+        .onAppear {
+            if cachedImage == nil {
+                cachedImage = makeQRCodeImage(payload: payload)
+            }
+        }
     }
 
     private func makeQRCodeImage(payload: String) -> NSImage? {

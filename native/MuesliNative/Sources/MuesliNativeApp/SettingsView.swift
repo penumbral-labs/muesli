@@ -478,11 +478,22 @@ struct SettingsView: View {
         guard appState.config.iCloudSyncEnabled else { return nil }
         if let remoteDeviceName = appState.iCloudBridgeRemoteDeviceName {
             if let platform = appState.iCloudBridgeRemoteDevicePlatform {
-                return "Linked \(platform) device: \(remoteDeviceName)"
+                return "Linked \(syncDeviceLabel(for: platform)): \(remoteDeviceName)"
             }
             return "Linked device: \(remoteDeviceName)"
         }
         return "No linked iPhone yet."
+    }
+
+    private func syncDeviceLabel(for platform: String) -> String {
+        switch platform.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "ios":
+            return "iPhone"
+        case "ipados":
+            return "iPad"
+        default:
+            return platform
+        }
     }
 
     private var dictationSettingsPane: some View {
