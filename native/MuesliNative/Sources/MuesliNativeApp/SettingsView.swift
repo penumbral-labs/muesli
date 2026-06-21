@@ -102,7 +102,7 @@ struct SettingsView: View {
     // Uniform width for all right-side controls
     private let controlWidth: CGFloat = 220
     private let meetingControlWidth: CGFloat = 275
-    private let iOSCompanionURL = URL(string: "https://github.com/Muesli-HQ/muesli-ios")!
+    private let iOSCompanionURL = IPhoneBridgeLinks.installURL
     private let screenContextGrantIntentTimeout: TimeInterval = 15 * 60
     private let meetingDetectionAppOptions: [MeetingDetectionAppOption] = [
         MeetingDetectionAppOption(bundleID: "com.google.Chrome", name: "Chrome", icon: "globe"),
