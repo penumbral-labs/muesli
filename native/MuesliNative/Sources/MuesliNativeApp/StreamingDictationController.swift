@@ -13,10 +13,10 @@ import os
 ///   controller.stop { finalText in /* persist final text */ }
 @available(macOS 15, *)
 protocol NemotronStreamingTranscribing: AnyObject {
-    func makeStreamState() async throws -> NemotronStreamingTranscriber.StreamState
+    func makeStreamState() async throws -> RNNTStreamState
     func transcribeChunk(
         samples: [Float],
-        state: inout NemotronStreamingTranscriber.StreamState
+        state: inout RNNTStreamState
     ) async throws -> String
 }
 
@@ -28,13 +28,13 @@ private final class NemotronStreamingTranscriberAdapter: NemotronStreamingTransc
         self.transcriber = transcriber
     }
 
-    func makeStreamState() async throws -> NemotronStreamingTranscriber.StreamState {
+    func makeStreamState() async throws -> RNNTStreamState {
         try await transcriber.makeStreamState()
     }
 
     func transcribeChunk(
         samples: [Float],
-        state: inout NemotronStreamingTranscriber.StreamState
+        state: inout RNNTStreamState
     ) async throws -> String {
         try await transcriber.transcribeChunk(samples: samples, state: &state)
     }
@@ -59,7 +59,7 @@ final class StreamingDictationController {
 
     private let transcriber: NemotronStreamingTranscribing
     private let recorder: StreamingDictationRecording
-    private var streamState: NemotronStreamingTranscriber.StreamState?
+    private var streamState: RNNTStreamState?
     private let streamLock = OSAllocatedUnfairLock()
     private var sampleBuffer: [Float] = []
     private let bufferLock = OSAllocatedUnfairLock()

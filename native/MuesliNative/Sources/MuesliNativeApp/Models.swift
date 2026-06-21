@@ -127,9 +127,11 @@ struct BackendOption: Equatable {
     /// Models available for download and use.
     static let all: [BackendOption] = parakeetFamily + whisperFamily + [.cohereTranscribe] + experimental
 
-    /// Conservative first-run choices. Experimental models stay in Models, except
-    /// Nemotron 3.5 Multilingual which is intentionally offered under "Other models"
-    /// during onboarding (it supports hold-to-talk like the conservative models).
+    /// Curated first-run choices shown in onboarding's "Other models" section.
+    /// This is a deliberate hand-picked list, not a derived rule: experimental models
+    /// are excluded by default, but Nemotron 3.5 Multilingual is included as a vetted
+    /// exception (broad language coverage incl. Hindi, hold-to-talk capable). The EN
+    /// Nemotron is intentionally omitted (English-only, narrower first-run value).
     static let onboarding: [BackendOption] = [.parakeetMultilingual, .whisperTinyEnglish, .whisperSmall, .cohereTranscribe, .nemotron35Multilingual]
 
     /// Models coming soon — shown greyed out in the Models tab.
