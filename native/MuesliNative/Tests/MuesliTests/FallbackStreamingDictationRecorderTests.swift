@@ -24,7 +24,23 @@ struct FallbackStreamingDictationRecorderTests {
         #expect(primary.preparedInputDeviceIDs == [82])
         #expect(fallback.preparedInputDeviceIDs == [82])
         #expect(latencyEvents.contains("streaming_recorder_primary_prepare_failed"))
+        #expect(latencyEvents.contains("streaming_recorder_selected slot=fallback recorder=FakeFallbackStreamingRecorder preferredInput=82"))
         #expect(latencyEvents.contains("streaming_recorder_fallback_prepare_end"))
+    }
+
+    @Test("prepare emits selected primary recorder latency event")
+    func prepareEmitsSelectedPrimaryRecorderLatencyEvent() throws {
+        let primary = FakeFallbackStreamingRecorder()
+        let fallback = FakeFallbackStreamingRecorder()
+        let recorder = FallbackStreamingDictationRecorder(primary: primary, fallback: fallback)
+        var latencyEvents: [String] = []
+        recorder.onLatencyEvent = { event, _ in latencyEvents.append(event) }
+
+        try recorder.prepare()
+
+        #expect(latencyEvents == [
+            "streaming_recorder_selected slot=primary recorder=FakeFallbackStreamingRecorder preferredInput=default",
+        ])
     }
 
     @Test("start falls back when prepared primary start fails")
