@@ -1980,7 +1980,9 @@ final class MuesliController: NSObject {
         }
 
         logDictionarySuggestion("persist action=\(persistenceAction) presentPrompt=\(presentPrompt) \(metadata)")
-        enqueueDictionarySuggestionPrompt(promptSuggestion)
+        if presentPrompt {
+            enqueueDictionarySuggestionPrompt(promptSuggestion)
+        }
     }
 
     func acceptDictionarySuggestion(id: UUID) {
