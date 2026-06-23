@@ -17,6 +17,7 @@ struct SidebarView: View {
     @State private var showDeleteConfirmation = false
     @State private var draggingFolderID: Int64?
     @State private var dragOrderedFolders: [MeetingFolder]?
+    @State private var collapsedFolderIDs: Set<Int64> = []
     @FocusState private var isSearchFieldFocused: Bool
 
     private var searchTextBinding: Binding<String> {
@@ -293,18 +294,45 @@ struct SidebarView: View {
                         controller.showMeetingsHome()
                     }
 
-                    ForEach(dragOrderedFolders ?? appState.folders) { folder in
+                    ForEach(visibleFolders) { folder in
+                        let depth = folderDepth(folder)
+                        let hasChildren = folderHasChildren(folder.id)
+                        let isCollapsed = collapsedFolderIDs.contains(folder.id)
                         if renamingFolderID == folder.id {
                             folderRenameField(folder: folder)
+                                .padding(.leading, CGFloat(depth) * 16)
                         } else {
-                            meetingFilterRow(
-                                icon: "folder",
-                                label: folder.name,
-                                count: appState.meetingCountsByFolder[folder.id] ?? 0,
-                                isSelected: appState.selectedTab == .meetings && appState.selectedFolderID == folder.id
-                            ) {
-                                controller.showMeetingsHome(folderID: folder.id)
+                            HStack(spacing: 0) {
+                                if hasChildren {
+                                    Button {
+                                        withAnimation(.easeInOut(duration: 0.15)) {
+                                            if isCollapsed {
+                                                collapsedFolderIDs.remove(folder.id)
+                                            } else {
+                                                collapsedFolderIDs.insert(folder.id)
+                                            }
+                                        }
+                                    } label: {
+                                        Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                                            .font(.system(size: 9, weight: .semibold))
+                                            .foregroundStyle(MuesliTheme.textTertiary)
+                                            .frame(width: 14, height: 14)
+                                    }
+                                    .buttonStyle(.plain)
+                                } else {
+                                    Spacer().frame(width: 14)
+                                }
+
+                                meetingFilterRow(
+                                    icon: hasChildren ? "folder.fill" : "folder",
+                                    label: folder.name,
+                                    count: appState.meetingCountsByFolder[folder.id] ?? 0,
+                                    isSelected: appState.selectedTab == .meetings && appState.selectedFolderID == folder.id
+                                ) {
+                                    controller.showMeetingsHome(folderID: folder.id)
+                                }
                             }
+                            .padding(.leading, CGFloat(depth) * 16)
                             .opacity(draggingFolderID == folder.id ? 0.1 : 1)
                             .onDrag {
                                 draggingFolderID = folder.id
@@ -318,9 +346,17 @@ struct SidebarView: View {
                                 commitOrder: { ids in controller.reorderFolders(ids: ids) }
                             ))
                             .contextMenu {
+                                Button("New Subfolder") {
+                                    createNewSubfolder(parentID: folder.id)
+                                }
                                 Button("Rename") {
                                     renamingFolderID = folder.id
                                     renamingFolderName = folder.name
+                                }
+                                if folder.parentID != nil {
+                                    Button("Move to Top Level") {
+                                        controller.moveFolder(id: folder.id, toParent: nil)
+                                    }
                                 }
                                 Divider()
                                 Button("Delete", role: .destructive) {
@@ -554,10 +590,57 @@ struct SidebarView: View {
         return "\(count / 1000)k"
     }
 
+    private var visibleFolders: [MeetingFolder] {
+        let folders = dragOrderedFolders ?? appState.folders
+        guard !collapsedFolderIDs.isEmpty else { return folders }
+        // Collect IDs of all folders that should be hidden because an ancestor is collapsed.
+        var hiddenIDs: Set<Int64> = []
+        let byID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+        for folder in folders {
+            var ancestor = folder.parentID
+            while let aid = ancestor {
+                if collapsedFolderIDs.contains(aid) {
+                    hiddenIDs.insert(folder.id)
+                    break
+                }
+                ancestor = byID[aid]?.parentID
+            }
+        }
+        return folders.filter { !hiddenIDs.contains($0.id) }
+    }
+
+    private func folderDepth(_ folder: MeetingFolder) -> Int {
+        let folders = appState.folders
+        let byID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+        var depth = 0
+        var current = folder.parentID
+        while let pid = current {
+            depth += 1
+            current = byID[pid]?.parentID
+        }
+        return depth
+    }
+
+    private func folderHasChildren(_ folderID: Int64) -> Bool {
+        appState.folders.contains { $0.parentID == folderID }
+    }
+
     private func createNewFolder() {
         if let id = controller.createFolder(name: "New Folder") {
             withAnimation(.easeInOut(duration: 0.15)) {
                 meetingsExpanded = true
+            }
+            renamingFolderID = id
+            renamingFolderName = "New Folder"
+            controller.showMeetingsHome(folderID: id)
+        }
+    }
+
+    private func createNewSubfolder(parentID: Int64) {
+        if let id = controller.createSubfolder(name: "New Folder", parentID: parentID) {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                meetingsExpanded = true
+                collapsedFolderIDs.remove(parentID)
             }
             renamingFolderID = id
             renamingFolderName = "New Folder"

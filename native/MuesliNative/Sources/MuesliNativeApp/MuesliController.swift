@@ -757,11 +757,8 @@ final class MuesliController: NSObject {
             updateConfig { $0.folderOrder = allFolders.map(\.id) }
         }
         let order = config.folderOrder
-        appState.folders = allFolders.sorted { a, b in
-            let ai = order.firstIndex(of: a.id) ?? Int.max
-            let bi = order.firstIndex(of: b.id) ?? Int.max
-            return ai < bi
-        }
+        // Sort folders into a depth-first tree order so children appear beneath parents.
+        appState.folders = Self.treeOrderedFolders(allFolders, order: order)
         appState.dictationStats = dictationStats()
         appState.meetingStats = meetingStats()
         refreshContributionMilestonePrompt(
@@ -3156,6 +3153,39 @@ final class MuesliController: NSObject {
 
     // MARK: - Folder Management
 
+    static func treeOrderedFolders(_ folders: [MeetingFolder], order: [Int64]) -> [MeetingFolder] {
+        let byID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+        var childrenMap: [Int64?: [MeetingFolder]] = [:]
+        for folder in folders {
+            childrenMap[folder.parentID, default: []].append(folder)
+        }
+        // Sort siblings by folderOrder index, then by id as fallback.
+        for key in childrenMap.keys {
+            childrenMap[key]?.sort { a, b in
+                let ai = order.firstIndex(of: a.id) ?? Int.max
+                let bi = order.firstIndex(of: b.id) ?? Int.max
+                if ai != bi { return ai < bi }
+                return a.id < b.id
+            }
+        }
+        var result: [MeetingFolder] = []
+        func visit(_ parentID: Int64?) {
+            for folder in childrenMap[parentID] ?? [] {
+                result.append(folder)
+                visit(folder.id)
+            }
+        }
+        visit(nil)
+        // Include any orphaned folders whose parent was deleted.
+        let visited = Set(result.map(\.id))
+        for folder in folders where !visited.contains(folder.id) {
+            if let pid = folder.parentID, byID[pid] == nil {
+                result.append(folder)
+            }
+        }
+        return result
+    }
+
     @discardableResult
     func createFolder(name: String) -> Int64? {
         let id = try? dictationStore.createFolder(name: name)
@@ -3170,6 +3200,18 @@ final class MuesliController: NSObject {
 
     func reorderFolders(ids: [Int64]) {
         updateConfig { $0.folderOrder = ids }
+        syncAppState()
+    }
+
+    @discardableResult
+    func createSubfolder(name: String, parentID: Int64) -> Int64? {
+        let id = try? dictationStore.createFolder(name: name, parentID: parentID)
+        syncAppState()
+        return id
+    }
+
+    func moveFolder(id: Int64, toParent newParentID: Int64?) {
+        try? dictationStore.moveFolder(id: id, toParent: newParentID)
         syncAppState()
     }
 

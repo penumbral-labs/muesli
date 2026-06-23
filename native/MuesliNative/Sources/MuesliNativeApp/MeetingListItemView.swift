@@ -17,7 +17,16 @@ struct MeetingListItemView: View {
 
     private var currentFolderName: String? {
         guard let fid = record.folderID else { return nil }
-        return folders.first(where: { $0.id == fid })?.name
+        let byID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+        guard let folder = byID[fid] else { return nil }
+        // Build breadcrumb path: "Grandparent / Parent / Folder"
+        var parts: [String] = [folder.name]
+        var current = folder.parentID
+        while let pid = current, let parent = byID[pid] {
+            parts.insert(parent.name, at: 0)
+            current = parent.parentID
+        }
+        return parts.joined(separator: " / ")
     }
 
     var body: some View {
@@ -99,6 +108,17 @@ struct MeetingListItemView: View {
 
     // MARK: - Folder menu button
 
+    private func folderDepth(_ folder: MeetingFolder) -> Int {
+        let byID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+        var depth = 0
+        var current = folder.parentID
+        while let pid = current {
+            depth += 1
+            current = byID[pid]?.parentID
+        }
+        return depth
+    }
+
     @ViewBuilder
     private var folderMenuButton: some View {
         Button {
@@ -124,10 +144,17 @@ struct MeetingListItemView: View {
                 }
                 Divider().padding(.vertical, 4)
                 ForEach(folders) { folder in
-                    folderPopoverRow(icon: "folder", label: folder.name, isActive: record.folderID == folder.id) {
+                    let depth = folderDepth(folder)
+                    let hasChildren = folders.contains { $0.parentID == folder.id }
+                    folderPopoverRow(
+                        icon: hasChildren ? "folder.fill" : "folder",
+                        label: folder.name,
+                        isActive: record.folderID == folder.id
+                    ) {
                         onMove(folder.id)
                         showFolderPopover = false
                     }
+                    .padding(.leading, CGFloat(depth) * 12)
                 }
                 if onCreateFolderAndMove != nil {
                     Divider().padding(.vertical, 4)

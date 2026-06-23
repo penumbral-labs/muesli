@@ -133,6 +133,7 @@ public final class DictationStore {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             sort_order INTEGER NOT NULL DEFAULT 0,
+            parent_id INTEGER REFERENCES meeting_folders(id),
             created_at TEXT DEFAULT (datetime('now'))
         );
         """
@@ -187,6 +188,10 @@ public final class DictationStore {
         ] {
             _ = sqlite3_exec(db, sql, nil, nil, nil)
         }
+        if sqlite3_exec(db, "ALTER TABLE meeting_folders ADD COLUMN parent_id INTEGER REFERENCES meeting_folders(id)", nil, nil, nil) != SQLITE_OK {
+            // Column may already exist.
+        }
+        let _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_meeting_folders_parent ON meeting_folders(parent_id)", nil, nil, nil)
         let _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_meetings_folder ON meetings(folder_id)", nil, nil, nil)
         let _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_dictations_cloud_record_name", nil, nil, nil)
         let _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_meetings_cloud_record_name", nil, nil, nil)
@@ -322,18 +327,65 @@ public final class DictationStore {
             fputs("[muesli-store] meetingCounts: failed to prepare total count query\n", stderr)
         }
 
-        var byFolder: [Int64: Int] = [:]
+        // Direct counts per folder.
+        var directByFolder: [Int64: Int] = [:]
         var stmt2: OpaquePointer?
         if sqlite3_prepare_v2(db, "SELECT folder_id, COUNT(*) FROM meetings WHERE folder_id IS NOT NULL AND deleted_at IS NULL GROUP BY folder_id", -1, &stmt2, nil) == SQLITE_OK {
             while sqlite3_step(stmt2) == SQLITE_ROW {
-                byFolder[sqlite3_column_int64(stmt2, 0)] = Int(sqlite3_column_int(stmt2, 1))
+                directByFolder[sqlite3_column_int64(stmt2, 0)] = Int(sqlite3_column_int(stmt2, 1))
             }
             sqlite3_finalize(stmt2)
         } else {
             fputs("[muesli-store] meetingCounts: failed to prepare folder count query\n", stderr)
         }
 
+        // Load the folder tree to compute recursive counts.
+        let allFolders = (try? listFoldersInternal(db: db)) ?? []
+        var childrenMap: [Int64: [Int64]] = [:]
+        for folder in allFolders {
+            if let pid = folder.parentID {
+                childrenMap[pid, default: []].append(folder.id)
+            }
+        }
+
+        // Compute recursive counts bottom-up via post-order traversal.
+        var byFolder: [Int64: Int] = [:]
+        func recursiveCount(for id: Int64) -> Int {
+            var count = directByFolder[id] ?? 0
+            for childID in childrenMap[id] ?? [] {
+                count += recursiveCount(for: childID)
+            }
+            byFolder[id] = count
+            return count
+        }
+        for folder in allFolders {
+            if byFolder[folder.id] == nil {
+                _ = recursiveCount(for: folder.id)
+            }
+        }
+
         return (total, byFolder)
+    }
+
+    private func listFoldersInternal(db: OpaquePointer?) throws -> [MeetingFolder] {
+        let sql = "SELECT id, name, parent_id, created_at FROM meeting_folders ORDER BY id ASC"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(statement) }
+        var rows: [MeetingFolder] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let parentID: Int64? = sqlite3_column_type(statement, 2) != SQLITE_NULL
+                ? sqlite3_column_int64(statement, 2) : nil
+            rows.append(MeetingFolder(
+                id: sqlite3_column_int64(statement, 0),
+                name: stringColumn(statement, index: 1),
+                parentID: parentID,
+                createdAt: stringColumn(statement, index: 3)
+            ))
+        }
+        return rows
     }
 
     public func recentMeetings(limit: Int? = nil, folderID: Int64? = nil) throws -> [MeetingRecord] {
@@ -341,8 +393,13 @@ public final class DictationStore {
         defer { sqlite3_close(db) }
 
         var sql: String
-        if folderID != nil {
-            sql = "SELECT \(Self.meetingColumns) FROM meetings WHERE folder_id = ? AND deleted_at IS NULL ORDER BY id DESC"
+        var folderIDs: Set<Int64> = []
+        if let folderID {
+            // Include the selected folder and all its descendants.
+            folderIDs = try descendantFolderIDs(of: folderID, db: db)
+            folderIDs.insert(folderID)
+            let placeholders = folderIDs.map { _ in "?" }.joined(separator: ",")
+            sql = "SELECT \(Self.meetingColumns) FROM meetings WHERE folder_id IN (\(placeholders)) AND deleted_at IS NULL ORDER BY id DESC"
         } else {
             sql = "SELECT \(Self.meetingColumns) FROM meetings WHERE deleted_at IS NULL ORDER BY id DESC"
         }
@@ -354,9 +411,11 @@ public final class DictationStore {
         }
         defer { sqlite3_finalize(statement) }
         var bindIndex: Int32 = 1
-        if let folderID {
-            sqlite3_bind_int64(statement, bindIndex, folderID)
-            bindIndex += 1
+        if !folderIDs.isEmpty {
+            for fid in folderIDs.sorted() {
+                sqlite3_bind_int64(statement, bindIndex, fid)
+                bindIndex += 1
+            }
         }
         if let limit {
             sqlite3_bind_int(statement, bindIndex, Int32(limit))
@@ -1342,16 +1401,21 @@ public final class DictationStore {
     }
 
     @discardableResult
-    public func createFolder(name: String) throws -> Int64 {
+    public func createFolder(name: String, parentID: Int64? = nil) throws -> Int64 {
         let db = try openDatabase()
         defer { sqlite3_close(db) }
-        let sql = "INSERT INTO meeting_folders (name) VALUES (?)"
+        let sql = "INSERT INTO meeting_folders (name, parent_id) VALUES (?, ?)"
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw lastError(db)
         }
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_text(statement, 1, (name as NSString).utf8String, -1, nil)
+        if let parentID {
+            sqlite3_bind_int64(statement, 2, parentID)
+        } else {
+            sqlite3_bind_null(statement, 2)
+        }
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw lastError(db)
         }
@@ -1382,6 +1446,35 @@ public final class DictationStore {
         }
 
         do {
+            // Look up the deleted folder's parent so children can be reparented.
+            var parentID: Int64?
+            var pStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT parent_id FROM meeting_folders WHERE id = ?", -1, &pStmt, nil) == SQLITE_OK else {
+                throw lastError(db)
+            }
+            defer { sqlite3_finalize(pStmt) }
+            sqlite3_bind_int64(pStmt, 1, id)
+            if sqlite3_step(pStmt) == SQLITE_ROW, sqlite3_column_type(pStmt, 0) != SQLITE_NULL {
+                parentID = sqlite3_column_int64(pStmt, 0)
+            }
+
+            // Reparent child folders to the deleted folder's parent (or root).
+            var sChildren: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "UPDATE meeting_folders SET parent_id = ? WHERE parent_id = ?", -1, &sChildren, nil) == SQLITE_OK else {
+                throw lastError(db)
+            }
+            defer { sqlite3_finalize(sChildren) }
+            if let parentID {
+                sqlite3_bind_int64(sChildren, 1, parentID)
+            } else {
+                sqlite3_bind_null(sChildren, 1)
+            }
+            sqlite3_bind_int64(sChildren, 2, id)
+            guard sqlite3_step(sChildren) == SQLITE_DONE else {
+                throw lastError(db)
+            }
+
+            // Move meetings in deleted folder to unfiled.
             var s1: OpaquePointer?
             guard sqlite3_prepare_v2(db, "UPDATE meetings SET folder_id = NULL WHERE folder_id = ?", -1, &s1, nil) == SQLITE_OK else {
                 throw lastError(db)
@@ -1414,7 +1507,7 @@ public final class DictationStore {
     public func listFolders() throws -> [MeetingFolder] {
         let db = try openDatabase()
         defer { sqlite3_close(db) }
-        let sql = "SELECT id, name, created_at FROM meeting_folders ORDER BY id ASC"
+        let sql = "SELECT id, name, parent_id, created_at FROM meeting_folders ORDER BY id ASC"
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw lastError(db)
@@ -1422,10 +1515,13 @@ public final class DictationStore {
         defer { sqlite3_finalize(statement) }
         var rows: [MeetingFolder] = []
         while sqlite3_step(statement) == SQLITE_ROW {
+            let parentID: Int64? = sqlite3_column_type(statement, 2) != SQLITE_NULL
+                ? sqlite3_column_int64(statement, 2) : nil
             rows.append(MeetingFolder(
                 id: sqlite3_column_int64(statement, 0),
                 name: stringColumn(statement, index: 1),
-                createdAt: stringColumn(statement, index: 2)
+                parentID: parentID,
+                createdAt: stringColumn(statement, index: 3)
             ))
         }
         return rows
@@ -1449,6 +1545,60 @@ public final class DictationStore {
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw lastError(db)
         }
+    }
+
+    public func moveFolder(id: Int64, toParent newParentID: Int64?) throws {
+        let db = try openDatabase()
+        defer { sqlite3_close(db) }
+        // Prevent moving a folder into itself or one of its own descendants.
+        if let newParentID {
+            let descendants = try descendantFolderIDs(of: id, db: db)
+            guard newParentID != id, !descendants.contains(newParentID) else { return }
+        }
+        let sql = "UPDATE meeting_folders SET parent_id = ? WHERE id = ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(statement) }
+        if let newParentID {
+            sqlite3_bind_int64(statement, 1, newParentID)
+        } else {
+            sqlite3_bind_null(statement, 1)
+        }
+        sqlite3_bind_int64(statement, 2, id)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw lastError(db)
+        }
+    }
+
+    public func descendantFolderIDs(of folderID: Int64) throws -> Set<Int64> {
+        let db = try openDatabase()
+        defer { sqlite3_close(db) }
+        return try descendantFolderIDs(of: folderID, db: db)
+    }
+
+    func descendantFolderIDs(of folderID: Int64, db: OpaquePointer?) throws -> Set<Int64> {
+        // BFS traversal to collect all descendant folder IDs.
+        var result: Set<Int64> = []
+        var queue: [Int64] = [folderID]
+        while !queue.isEmpty {
+            let current = queue.removeFirst()
+            let sql = "SELECT id FROM meeting_folders WHERE parent_id = ?"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw lastError(db)
+            }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int64(statement, 1, current)
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let childID = sqlite3_column_int64(statement, 0)
+                if result.insert(childID).inserted {
+                    queue.append(childID)
+                }
+            }
+        }
+        return result
     }
 
     public func textRecordsNeedingSync(limit: Int = 200) throws -> [SyncTextRecord] {

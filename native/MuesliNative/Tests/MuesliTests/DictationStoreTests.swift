@@ -1965,6 +1965,249 @@ struct DictationStoreTests {
         #expect(meeting.folderID == nil)
     }
 
+    // MARK: - Nested Folder Tests
+
+    @Test("create subfolder sets parent_id")
+    func createSubfolderSetsParentID() throws {
+        let store = try makeStore()
+
+        let parentID = try store.createFolder(name: "Projects")
+        let childID = try store.createFolder(name: "Sprint 1", parentID: parentID)
+
+        let folders = try store.listFolders()
+        let child = folders.first(where: { $0.id == childID })
+        #expect(child?.parentID == parentID)
+        #expect(child?.name == "Sprint 1")
+
+        let parent = folders.first(where: { $0.id == parentID })
+        #expect(parent?.parentID == nil)
+    }
+
+    @Test("deeply nested folders have correct parent chain")
+    func deeplyNestedFolders() throws {
+        let store = try makeStore()
+
+        let root = try store.createFolder(name: "Root")
+        let mid = try store.createFolder(name: "Middle", parentID: root)
+        let leaf = try store.createFolder(name: "Leaf", parentID: mid)
+
+        let folders = try store.listFolders()
+        #expect(folders.first(where: { $0.id == root })?.parentID == nil)
+        #expect(folders.first(where: { $0.id == mid })?.parentID == root)
+        #expect(folders.first(where: { $0.id == leaf })?.parentID == mid)
+    }
+
+    @Test("descendantFolderIDs returns all nested children")
+    func descendantFolderIDsReturnsAll() throws {
+        let store = try makeStore()
+
+        let root = try store.createFolder(name: "Root")
+        let child1 = try store.createFolder(name: "Child 1", parentID: root)
+        let child2 = try store.createFolder(name: "Child 2", parentID: root)
+        let grandchild = try store.createFolder(name: "Grandchild", parentID: child1)
+        _ = try store.createFolder(name: "Unrelated")
+
+        let descendants = try store.descendantFolderIDs(of: root)
+        #expect(descendants == [child1, child2, grandchild])
+    }
+
+    @Test("descendantFolderIDs of leaf folder returns empty set")
+    func descendantFolderIDsLeafIsEmpty() throws {
+        let store = try makeStore()
+
+        let root = try store.createFolder(name: "Root")
+        let leaf = try store.createFolder(name: "Leaf", parentID: root)
+
+        let descendants = try store.descendantFolderIDs(of: leaf)
+        #expect(descendants.isEmpty)
+    }
+
+    @Test("moveFolder reparents folder")
+    func moveFolderReparents() throws {
+        let store = try makeStore()
+
+        let a = try store.createFolder(name: "A")
+        let b = try store.createFolder(name: "B")
+
+        try store.moveFolder(id: b, toParent: a)
+
+        let folders = try store.listFolders()
+        #expect(folders.first(where: { $0.id == b })?.parentID == a)
+    }
+
+    @Test("moveFolder to nil makes folder top-level")
+    func moveFolderToRoot() throws {
+        let store = try makeStore()
+
+        let parent = try store.createFolder(name: "Parent")
+        let child = try store.createFolder(name: "Child", parentID: parent)
+
+        try store.moveFolder(id: child, toParent: nil)
+
+        let folders = try store.listFolders()
+        #expect(folders.first(where: { $0.id == child })?.parentID == nil)
+    }
+
+    @Test("moveFolder into own descendant is a no-op")
+    func moveFolderIntoDescendantNoOp() throws {
+        let store = try makeStore()
+
+        let parent = try store.createFolder(name: "Parent")
+        let child = try store.createFolder(name: "Child", parentID: parent)
+        let grandchild = try store.createFolder(name: "Grandchild", parentID: child)
+
+        try store.moveFolder(id: parent, toParent: grandchild)
+
+        let folders = try store.listFolders()
+        #expect(folders.first(where: { $0.id == parent })?.parentID == nil)
+    }
+
+    @Test("moveFolder into itself is a no-op")
+    func moveFolderIntoSelfNoOp() throws {
+        let store = try makeStore()
+
+        let folder = try store.createFolder(name: "Self")
+        try store.moveFolder(id: folder, toParent: folder)
+
+        let folders = try store.listFolders()
+        #expect(folders.first(where: { $0.id == folder })?.parentID == nil)
+    }
+
+    @Test("delete folder reparents children to grandparent")
+    func deleteFolderReparentsChildren() throws {
+        let store = try makeStore()
+
+        let root = try store.createFolder(name: "Root")
+        let mid = try store.createFolder(name: "Mid", parentID: root)
+        let leaf = try store.createFolder(name: "Leaf", parentID: mid)
+
+        try store.deleteFolder(id: mid)
+
+        let folders = try store.listFolders()
+        #expect(!folders.contains(where: { $0.id == mid }))
+        #expect(folders.first(where: { $0.id == leaf })?.parentID == root)
+    }
+
+    @Test("delete root folder reparents children to top level")
+    func deleteRootFolderReparentsToTopLevel() throws {
+        let store = try makeStore()
+
+        let root = try store.createFolder(name: "Root")
+        let child = try store.createFolder(name: "Child", parentID: root)
+
+        try store.deleteFolder(id: root)
+
+        let folders = try store.listFolders()
+        #expect(!folders.contains(where: { $0.id == root }))
+        #expect(folders.first(where: { $0.id == child })?.parentID == nil)
+    }
+
+    @Test("recentMeetings with folderID includes descendant folder meetings")
+    func recentMeetingsIncludesDescendants() throws {
+        let store = try makeStore()
+        let now = Date()
+
+        let parent = try store.createFolder(name: "Parent")
+        let child = try store.createFolder(name: "Child", parentID: parent)
+
+        try store.insertMeeting(
+            title: "Meeting in Parent",
+            calendarEventID: nil,
+            startTime: now,
+            endTime: now.addingTimeInterval(60),
+            rawTranscript: "parent meeting",
+            formattedNotes: "",
+            micAudioPath: nil,
+            systemAudioPath: nil
+        )
+        let parentMeeting = try store.recentMeetings(limit: 1).first!
+        try store.moveMeeting(id: parentMeeting.id, toFolder: parent)
+
+        try store.insertMeeting(
+            title: "Meeting in Child",
+            calendarEventID: nil,
+            startTime: now.addingTimeInterval(1),
+            endTime: now.addingTimeInterval(61),
+            rawTranscript: "child meeting",
+            formattedNotes: "",
+            micAudioPath: nil,
+            systemAudioPath: nil
+        )
+        let childMeeting = try store.recentMeetings(limit: 1).first!
+        try store.moveMeeting(id: childMeeting.id, toFolder: child)
+
+        // Querying the parent folder should return both meetings.
+        let parentResults = try store.recentMeetings(folderID: parent)
+        #expect(parentResults.count == 2)
+        #expect(parentResults.contains(where: { $0.title == "Meeting in Parent" }))
+        #expect(parentResults.contains(where: { $0.title == "Meeting in Child" }))
+
+        // Querying the child folder should return only the child meeting.
+        let childResults = try store.recentMeetings(folderID: child)
+        #expect(childResults.count == 1)
+        #expect(childResults.first?.title == "Meeting in Child")
+    }
+
+    @Test("meetingCounts includes recursive counts for parent folders")
+    func meetingCountsRecursive() throws {
+        let store = try makeStore()
+        let now = Date()
+
+        let parent = try store.createFolder(name: "Parent")
+        let child = try store.createFolder(name: "Child", parentID: parent)
+
+        try store.insertMeeting(
+            title: "M1", calendarEventID: nil, startTime: now,
+            endTime: now.addingTimeInterval(60), rawTranscript: "t", formattedNotes: "",
+            micAudioPath: nil, systemAudioPath: nil
+        )
+        try store.moveMeeting(id: try store.recentMeetings(limit: 1).first!.id, toFolder: parent)
+
+        try store.insertMeeting(
+            title: "M2", calendarEventID: nil, startTime: now.addingTimeInterval(1),
+            endTime: now.addingTimeInterval(61), rawTranscript: "t", formattedNotes: "",
+            micAudioPath: nil, systemAudioPath: nil
+        )
+        try store.moveMeeting(id: try store.recentMeetings(limit: 1).first!.id, toFolder: child)
+
+        try store.insertMeeting(
+            title: "M3", calendarEventID: nil, startTime: now.addingTimeInterval(2),
+            endTime: now.addingTimeInterval(62), rawTranscript: "t", formattedNotes: "",
+            micAudioPath: nil, systemAudioPath: nil
+        )
+        try store.moveMeeting(id: try store.recentMeetings(limit: 1).first!.id, toFolder: child)
+
+        let counts = try store.meetingCounts()
+        #expect(counts.total == 3)
+        #expect(counts.byFolder[child] == 2)
+        #expect(counts.byFolder[parent] == 3) // 1 direct + 2 from child
+    }
+
+    @Test("treeOrderedFolders produces depth-first order")
+    func treeOrderedFoldersProducesCorrectOrder() {
+        let folders = [
+            MeetingFolder(id: 1, name: "A", parentID: nil, createdAt: ""),
+            MeetingFolder(id: 2, name: "B", parentID: nil, createdAt: ""),
+            MeetingFolder(id: 3, name: "A1", parentID: 1, createdAt: ""),
+            MeetingFolder(id: 4, name: "A2", parentID: 1, createdAt: ""),
+            MeetingFolder(id: 5, name: "A1a", parentID: 3, createdAt: ""),
+        ]
+        let ordered = MuesliController.treeOrderedFolders(folders, order: [1, 2, 3, 4, 5])
+        let ids = ordered.map(\.id)
+        #expect(ids == [1, 3, 5, 4, 2])
+    }
+
+    @Test("treeOrderedFolders handles orphaned folders")
+    func treeOrderedFoldersHandlesOrphans() {
+        let folders = [
+            MeetingFolder(id: 1, name: "Root", parentID: nil, createdAt: ""),
+            MeetingFolder(id: 2, name: "Orphan", parentID: 999, createdAt: ""),
+        ]
+        let ordered = MuesliController.treeOrderedFolders(folders, order: [1, 2])
+        #expect(ordered.count == 2)
+        #expect(ordered.map(\.id).contains(2))
+    }
+
     // MARK: - Search Tests
 
     @Test("searchDictations returns matching records by raw_text")
