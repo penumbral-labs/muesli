@@ -199,6 +199,9 @@ final class MuesliController: NSObject {
     private let dictationRecorder = RouteAwareDictationRecorder()
     private let dictationCorrectionMonitor = DictationCorrectionMonitor()
     private let dictionarySuggestionPrompt = DictionarySuggestionPromptController()
+    private var activeDictionarySuggestionPromptKey: String?
+    private var queuedDictionarySuggestionPromptKeys: [String] = []
+    private var promptedDictionarySuggestionPromptKeys = Set<String>()
     private let audioDuckingController: AudioDuckingManaging
     private let dictationAudioRoutingController: DictationAudioRouting
     private lazy var dictationAudioSessionManager = DictationAudioSessionManager(
@@ -899,6 +902,10 @@ final class MuesliController: NSObject {
         mutate(&config)
         if previousEnableDictionaryCorrectionPrompts, !config.enableDictionaryCorrectionPrompts {
             dictationCorrectionMonitor.cancel()
+            queuedDictionarySuggestionPromptKeys.removeAll()
+            promptedDictionarySuggestionPromptKeys.removeAll()
+            activeDictionarySuggestionPromptKey = nil
+            dictionarySuggestionPrompt.dismiss()
         }
         config.hotkeyTriggerThresholdMS = HotkeyTriggerTiming.clampedMilliseconds(config.hotkeyTriggerThresholdMS)
         config.computerUseHotkeyTriggerThresholdMS = HotkeyTriggerTiming.clampedMilliseconds(config.computerUseHotkeyTriggerThresholdMS)
@@ -1970,9 +1977,7 @@ final class MuesliController: NSObject {
         }
 
         logDictionarySuggestion("persist action=\(persistenceAction) presentPrompt=\(presentPrompt) \(metadata)")
-        if presentPrompt {
-            presentDictionarySuggestionPrompt(promptSuggestion)
-        }
+        enqueueDictionarySuggestionPrompt(promptSuggestion)
     }
 
     func acceptDictionarySuggestion(id: UUID) {
@@ -2014,17 +2019,63 @@ final class MuesliController: NSObject {
     }
 
     private func presentDictionarySuggestionPrompt(_ suggestion: DictionarySuggestion) {
+        let key = suggestion.key
+        activeDictionarySuggestionPromptKey = key
+        promptedDictionarySuggestionPromptKeys.insert(key)
         logDictionarySuggestion("present \(dictionarySuggestionLogMetadata(suggestion))")
         dictionarySuggestionPrompt.show(
             suggestion: suggestion,
             anchorFrame: indicator.currentFrame,
             onAdd: { [weak self] in
-                self?.acceptDictionarySuggestion(suggestion)
+                guard let self else { return }
+                self.acceptDictionarySuggestion(suggestion)
+                self.completeDictionarySuggestionPrompt(key: key, action: "add")
             },
             onIgnore: { [weak self] in
-                self?.dismissDictionarySuggestion(suggestion)
+                guard let self else { return }
+                self.dismissDictionarySuggestion(suggestion)
+                self.completeDictionarySuggestionPrompt(key: key, action: "ignore")
+            },
+            onDismiss: { [weak self] in
+                self?.completeDictionarySuggestionPrompt(key: key, action: "dismiss")
             }
         )
+    }
+
+    private func enqueueDictionarySuggestionPrompt(_ suggestion: DictionarySuggestion) {
+        let key = suggestion.key
+        guard config.enableDictionaryCorrectionPrompts else { return }
+        guard activeDictionarySuggestionPromptKey != key else { return }
+        guard !promptedDictionarySuggestionPromptKeys.contains(key) else { return }
+        guard !queuedDictionarySuggestionPromptKeys.contains(key) else { return }
+        queuedDictionarySuggestionPromptKeys.append(key)
+        logDictionarySuggestion("queue depth=\(queuedDictionarySuggestionPromptKeys.count) \(dictionarySuggestionLogMetadata(suggestion))")
+        presentNextDictionarySuggestionPromptIfPossible()
+    }
+
+    private func completeDictionarySuggestionPrompt(key: String, action: String) {
+        guard activeDictionarySuggestionPromptKey == key else { return }
+        activeDictionarySuggestionPromptKey = nil
+        logDictionarySuggestion("complete action=\(action) queued=\(queuedDictionarySuggestionPromptKeys.count)")
+        presentNextDictionarySuggestionPromptIfPossible()
+    }
+
+    private func presentNextDictionarySuggestionPromptIfPossible() {
+        guard config.enableDictionaryCorrectionPrompts else { return }
+        guard activeDictionarySuggestionPromptKey == nil else { return }
+
+        while !queuedDictionarySuggestionPromptKeys.isEmpty {
+            let key = queuedDictionarySuggestionPromptKeys.removeFirst()
+            guard !promptedDictionarySuggestionPromptKeys.contains(key) else { continue }
+            guard !config.dismissedDictionarySuggestionKeys.contains(key) else { continue }
+            guard let suggestion = config.dictionarySuggestions.first(where: { $0.key == key }) else { continue }
+            let hasCustomWord = config.customWords.contains {
+                DictionarySuggestion.key(observed: $0.word, replacement: $0.targetWord) == key
+            }
+            guard !hasCustomWord else { continue }
+            presentDictionarySuggestionPrompt(suggestion)
+            return
+        }
     }
 
     private func dictionarySuggestionLogMetadata(_ suggestion: DictionarySuggestion) -> String {

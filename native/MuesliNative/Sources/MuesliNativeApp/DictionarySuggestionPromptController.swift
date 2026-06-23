@@ -11,6 +11,7 @@ final class DictionarySuggestionPromptController: NSObject {
     private var dismissDeadline: Date?
     private var remainingDismissDuration: TimeInterval = 0
     private var isDismissPaused = false
+    private var onDismiss: (() -> Void)?
 
     override init() {
         super.init()
@@ -20,9 +21,10 @@ final class DictionarySuggestionPromptController: NSObject {
         suggestion: DictionarySuggestion,
         anchorFrame: NSRect?,
         onAdd: @escaping () -> Void,
-        onIgnore: @escaping () -> Void
+        onIgnore: @escaping () -> Void,
+        onDismiss: @escaping () -> Void
     ) {
-        dismiss()
+        dismiss(notify: false)
 
         let cardWidth: CGFloat = 420
         let cardHeight: CGFloat = 126
@@ -55,11 +57,11 @@ final class DictionarySuggestionPromptController: NSObject {
             cardFrame: NSRect(x: cardX, y: 0, width: cardWidth, height: cardHeight),
             suggestion: suggestion,
             onAdd: { [weak self] in
-                self?.dismiss()
+                self?.dismiss(notify: false)
                 onAdd()
             },
             onIgnore: { [weak self] in
-                self?.dismiss()
+                self?.dismiss(notify: false)
                 onIgnore()
             }
         )
@@ -95,11 +97,18 @@ final class DictionarySuggestionPromptController: NSObject {
         panel.contentView = contentView
 
         self.panel = panel
+        self.onDismiss = onDismiss
         panel.orderFrontRegardless()
         startDismissCountdown(duration: Self.dismissDuration)
     }
 
     func dismiss() {
+        dismiss(notify: true)
+    }
+
+    private func dismiss(notify: Bool) {
+        let dismissHandler = onDismiss
+        onDismiss = nil
         dismissTimer?.invalidate()
         dismissTimer = nil
         dismissDeadline = nil
@@ -112,6 +121,9 @@ final class DictionarySuggestionPromptController: NSObject {
         progressLayer = nil
         panel?.orderOut(nil)
         panel = nil
+        if notify {
+            dismissHandler?()
+        }
     }
 
     private func startDismissCountdown(duration: TimeInterval) {
