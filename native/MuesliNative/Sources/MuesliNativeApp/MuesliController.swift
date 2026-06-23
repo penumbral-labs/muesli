@@ -895,16 +895,8 @@ final class MuesliController: NSObject {
         let previousHotkeyTriggerThresholdMS = config.hotkeyTriggerThresholdMS
         let previousComputerUseHotkeyTriggerThresholdMS = config.computerUseHotkeyTriggerThresholdMS
         let previousMeetingRecordingHotkeyTriggerThresholdMS = config.meetingRecordingHotkeyTriggerThresholdMS
-        let previousEnableScreenContext = config.enableScreenContext
-        let previousEnablePostProcessor = config.enablePostProcessor
         let previousEnableDictionaryCorrectionPrompts = config.enableDictionaryCorrectionPrompts
         mutate(&config)
-        if previousEnableScreenContext, !config.enableScreenContext {
-            dictationCorrectionMonitor.cancel()
-        }
-        if previousEnablePostProcessor, !config.enablePostProcessor {
-            dictationCorrectionMonitor.cancel()
-        }
         if previousEnableDictionaryCorrectionPrompts, !config.enableDictionaryCorrectionPrompts {
             dictationCorrectionMonitor.cancel()
         }
@@ -1923,7 +1915,7 @@ final class MuesliController: NSObject {
 
     func addDictionarySuggestion(_ suggestion: DictionarySuggestion, presentPrompt: Bool = false) {
         guard config.enableDictionaryCorrectionPrompts else {
-            logDictionarySuggestion("skip reason=disabled key=\(suggestion.key)")
+            logDictionarySuggestion("skip reason=disabled \(dictionarySuggestionLogMetadata(suggestion))")
             return
         }
         let trimmedObserved = suggestion.observed.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1938,14 +1930,15 @@ final class MuesliController: NSObject {
         }
 
         let key = DictionarySuggestion.key(observed: trimmedObserved, replacement: trimmedReplacement)
+        let metadata = dictionarySuggestionLogMetadata(observed: trimmedObserved, replacement: trimmedReplacement)
         guard !config.dismissedDictionarySuggestionKeys.contains(key) else {
-            logDictionarySuggestion("skip reason=dismissed key=\(key)")
+            logDictionarySuggestion("skip reason=dismissed \(metadata)")
             return
         }
         guard !config.customWords.contains(where: {
             DictionarySuggestion.key(observed: $0.word, replacement: $0.targetWord) == key
         }) else {
-            logDictionarySuggestion("skip reason=customWordExists key=\(key)")
+            logDictionarySuggestion("skip reason=customWordExists \(metadata)")
             return
         }
 
@@ -1976,7 +1969,7 @@ final class MuesliController: NSObject {
             }
         }
 
-        logDictionarySuggestion("persist action=\(persistenceAction) key=\(key) presentPrompt=\(presentPrompt)")
+        logDictionarySuggestion("persist action=\(persistenceAction) presentPrompt=\(presentPrompt) \(metadata)")
         if presentPrompt {
             presentDictionarySuggestionPrompt(promptSuggestion)
         }
@@ -2003,7 +1996,7 @@ final class MuesliController: NSObject {
             config.dictionarySuggestions.removeAll { $0.key == key }
             config.dismissedDictionarySuggestionKeys.removeAll { $0 == key }
         }
-        logDictionarySuggestion("accept key=\(key)")
+        logDictionarySuggestion("accept \(dictionarySuggestionLogMetadata(suggestion))")
     }
 
     private func dismissDictionarySuggestion(_ suggestion: DictionarySuggestion) {
@@ -2017,11 +2010,11 @@ final class MuesliController: NSObject {
                 config.dismissedDictionarySuggestionKeys = Array(config.dismissedDictionarySuggestionKeys.suffix(Self.maxDismissedDictionarySuggestionKeys))
             }
         }
-        logDictionarySuggestion("ignore key=\(key)")
+        logDictionarySuggestion("ignore \(dictionarySuggestionLogMetadata(suggestion))")
     }
 
     private func presentDictionarySuggestionPrompt(_ suggestion: DictionarySuggestion) {
-        logDictionarySuggestion("present key=\(suggestion.key)")
+        logDictionarySuggestion("present \(dictionarySuggestionLogMetadata(suggestion))")
         dictionarySuggestionPrompt.show(
             suggestion: suggestion,
             anchorFrame: indicator.currentFrame,
@@ -2032,6 +2025,14 @@ final class MuesliController: NSObject {
                 self?.dismissDictionarySuggestion(suggestion)
             }
         )
+    }
+
+    private func dictionarySuggestionLogMetadata(_ suggestion: DictionarySuggestion) -> String {
+        dictionarySuggestionLogMetadata(observed: suggestion.observed, replacement: suggestion.replacement)
+    }
+
+    private func dictionarySuggestionLogMetadata(observed: String, replacement: String) -> String {
+        "observedChars=\(observed.count) replacementChars=\(replacement.count)"
     }
 
     private func logDictionarySuggestion(_ message: String) {

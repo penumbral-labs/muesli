@@ -806,7 +806,7 @@ final class DictationCorrectionMonitor {
                         let shouldPresentPrompt = emittedSuggestionCount == 0
                         emittedSuggestionKeys.insert(suggestion.key)
                         emittedSuggestionCount += 1
-                        Self.log("emit suggestion=\(suggestion.key) presentPrompt=\(shouldPresentPrompt)")
+                        Self.log("emit presentPrompt=\(shouldPresentPrompt) \(Self.suggestionLogMetadata(suggestion))")
                         await MainActor.run {
                             onSuggestion(suggestion, shouldPresentPrompt)
                         }
@@ -849,6 +849,10 @@ final class DictationCorrectionMonitor {
     nonisolated private static func log(_ message: String) {
         logger.debug("\(message, privacy: .public)")
         fputs("[dictionary-monitor] \(message)\n", stderr)
+    }
+
+    nonisolated private static func suggestionLogMetadata(_ suggestion: DictionarySuggestion) -> String {
+        "observedChars=\(suggestion.observed.count) replacementChars=\(suggestion.replacement.count)"
     }
 
     nonisolated private static func detectEditedSnapshots(

@@ -2,7 +2,7 @@ import AppKit
 import QuartzCore
 
 @MainActor
-final class DictionarySuggestionPromptController {
+final class DictionarySuggestionPromptController: NSObject {
     private static let dismissDuration: TimeInterval = 15
 
     private var panel: NSPanel?
@@ -11,6 +11,10 @@ final class DictionarySuggestionPromptController {
     private var dismissDeadline: Date?
     private var remainingDismissDuration: TimeInterval = 0
     private var isDismissPaused = false
+
+    override init() {
+        super.init()
+    }
 
     func show(
         suggestion: DictionarySuggestion,
