@@ -6,8 +6,8 @@ struct SidebarView: View {
     private let meetingsTrailingColumnWidth: CGFloat = 24
     private let sidebarRowHorizontalPadding: CGFloat = 16
     private let sidebarRowOuterPadding: CGFloat = 8
-    private let folderDepthIndent: CGFloat = 12
-    private let folderDisclosureColumnWidth: CGFloat = 14
+    private let folderDepthIndent: CGFloat = 8
+    private let folderDisclosureColumnWidth: CGFloat = 12
 
     let appState: AppState
     let controller: MuesliController
@@ -515,7 +515,7 @@ struct SidebarView: View {
         reservesDisclosureColumn: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        HStack(spacing: reservesDisclosureColumn ? 6 : MuesliTheme.spacing8) {
+        HStack(spacing: reservesDisclosureColumn ? 5 : MuesliTheme.spacing8) {
             if reservesDisclosureColumn {
                 disclosureColumn(icon: disclosureIcon, action: disclosureAction)
             }
@@ -563,7 +563,7 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func folderRenameField(folder: MeetingFolder, reservesDisclosureColumn: Bool = false) -> some View {
-        HStack(spacing: reservesDisclosureColumn ? 6 : MuesliTheme.spacing8) {
+        HStack(spacing: reservesDisclosureColumn ? 5 : MuesliTheme.spacing8) {
             if reservesDisclosureColumn {
                 Spacer().frame(width: folderDisclosureColumnWidth)
             }
