@@ -531,6 +531,41 @@ struct DictionarySuggestionConfigTests {
         #expect(config.dismissedDictionarySuggestionKeys.isEmpty)
     }
 
+    @Test("suggestions decode despite missing or corrupt ids")
+    func suggestionDecodeToleratesBadIDs() throws {
+        let data = Data(
+            #"""
+            {
+              "dictionary_suggestions": [
+                {
+                  "id": "not-a-uuid",
+                  "observed": "museli",
+                  "replacement": "muesli",
+                  "app_context": "Codex|com.openai.codex",
+                  "occurrence_count": 0,
+                  "created_at": "2026-06-24T00:00:00Z",
+                  "last_seen_at": "2026-06-24T00:00:01Z"
+                },
+                {
+                  "observed": "mylapor",
+                  "replacement": "Mylapore"
+                }
+              ]
+            }
+            """#.utf8
+        )
+
+        let config = try JSONDecoder().decode(AppConfig.self, from: data)
+
+        #expect(config.dictionarySuggestions.count == 2)
+        #expect(config.dictionarySuggestions[0].observed == "museli")
+        #expect(config.dictionarySuggestions[0].replacement == "muesli")
+        #expect(config.dictionarySuggestions[0].occurrenceCount == 1)
+        #expect(config.dictionarySuggestions[1].observed == "mylapor")
+        #expect(config.dictionarySuggestions[1].replacement == "Mylapore")
+        #expect(config.dictionarySuggestions[1].appContext == "")
+    }
+
     @Test("suggestion key is stable across whitespace and case")
     func stableSuggestionKey() {
         #expect(

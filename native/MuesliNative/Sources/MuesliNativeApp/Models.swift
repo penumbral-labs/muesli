@@ -580,6 +580,17 @@ struct DictionarySuggestion: Codable, Equatable, Identifiable, Sendable {
         self.lastSeenAt = lastSeenAt
     }
 
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        observed = try c.decode(String.self, forKey: .observed)
+        replacement = try c.decode(String.self, forKey: .replacement)
+        appContext = (try? c.decode(String.self, forKey: .appContext)) ?? ""
+        occurrenceCount = max((try? c.decode(Int.self, forKey: .occurrenceCount)) ?? 1, 1)
+        createdAt = (try? c.decode(String.self, forKey: .createdAt)) ?? DictionarySuggestion.timestamp()
+        lastSeenAt = (try? c.decode(String.self, forKey: .lastSeenAt)) ?? DictionarySuggestion.timestamp()
+    }
+
     var key: String {
         Self.key(observed: observed, replacement: replacement)
     }
