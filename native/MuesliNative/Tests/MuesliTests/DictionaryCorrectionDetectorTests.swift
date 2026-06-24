@@ -347,6 +347,21 @@ struct DictionaryCorrectionDetectorTests {
         ))
     }
 
+    @Test("keeps changed English words in recognition candidates")
+    func keepsChangedEnglishWordsInRecognitionCandidates() {
+        let filler = (0..<180).map { "a\($0)" }.joined(separator: " ")
+        let original = "\(filler) internationalization"
+        let edited = "\(filler) international"
+
+        let candidates = DictionaryCorrectionDetector.requiredEnglishWordCandidates(
+            originalText: original,
+            editedText: edited
+        )
+
+        #expect(candidates.contains("internationalization"))
+        #expect(candidates.contains("international"))
+    }
+
     @Test("detects corrections from a final edited transcript snapshot")
     func detectsFinalEditedTranscriptSnapshot() {
         let suggestion = DictionaryCorrectionDetector.suggestion(

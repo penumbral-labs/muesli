@@ -181,7 +181,7 @@ final class DictionarySuggestionPromptController: NSObject {
         guard !isDismissPaused else { return }
         isDismissPaused = true
         if let dismissDeadline {
-            remainingDismissDuration = max(0.1, dismissDeadline.timeIntervalSinceNow)
+            remainingDismissDuration = max(2.0, dismissDeadline.timeIntervalSinceNow)
         }
         dismissTimer?.invalidate()
         dismissTimer = nil

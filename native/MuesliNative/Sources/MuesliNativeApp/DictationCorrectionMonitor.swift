@@ -803,6 +803,39 @@ struct DictionaryCorrectionDetector {
         return scalars.dropFirst().contains(where: \.isUppercase)
     }
 
+    static func requiredEnglishWordCandidates(originalText: String, editedText: String) -> Set<String> {
+        var candidates = Set<String>()
+
+        func addWords(from value: String) {
+            for token in wordTokens(in: value) where token.normalized.count >= 2 {
+                guard token.normalized.allSatisfy(\.isLetter) else { continue }
+                candidates.insert(token.normalized)
+            }
+        }
+
+        let diff = changedFragments(from: originalText, to: editedText)
+        addWords(from: diff.removed)
+        addWords(from: diff.inserted)
+
+        let originalTokens = wordTokens(in: originalText)
+        let editedTokens = wordTokens(in: editedText)
+        guard isAlignmentInputWithinBounds(
+            originalCount: originalTokens.count,
+            editedCount: editedTokens.count
+        ) else { return candidates }
+
+        let operations = alignmentOperations(from: originalTokens, to: editedTokens)
+        for run in tokenChangeRuns(in: operations) {
+            for token in run.observedTokens + run.replacementTokens {
+                guard token.normalized.count >= 2,
+                      token.normalized.allSatisfy(\.isLetter)
+                else { continue }
+                candidates.insert(token.normalized)
+            }
+        }
+        return candidates
+    }
+
     private static func isAcronymLike(_ value: String) -> Bool {
         let letters = value.filter(\.isLetter)
         guard letters.count >= 2 else { return false }
@@ -971,7 +1004,7 @@ final class DictationCorrectionMonitor {
                 }
                 for stableSnapshot in stableSnapshots {
                     let recognizedEnglishWords = Self.englishWordRecognizer.recognizedWords(
-                        from: Self.englishWordCandidates(in: [originalText, stableSnapshot])
+                        from: Self.englishWordCandidates(originalText: originalText, editedText: stableSnapshot)
                     )
                     if Task.isCancelled { return }
                     let suggestions = await Task.detached(priority: .utility) {
@@ -1033,6 +1066,20 @@ final class DictationCorrectionMonitor {
         )
     }
 
+    nonisolated private static func englishWordCandidates(originalText: String, editedText: String) -> Set<String> {
+        let requiredCandidates = DictionaryCorrectionDetector.requiredEnglishWordCandidates(
+            originalText: originalText,
+            editedText: editedText
+        )
+        let extraCandidates = englishWordCandidates(in: [originalText, editedText])
+            .subtracting(requiredCandidates)
+        let extraBudget = max(0, maxEnglishWordRecognitionCandidates - requiredCandidates.count)
+        guard extraCandidates.count > extraBudget else {
+            return requiredCandidates.union(extraCandidates)
+        }
+        return requiredCandidates.union(sortedEnglishWordCandidates(extraCandidates).prefix(extraBudget))
+    }
+
     nonisolated private static func englishWordCandidates(in texts: [String]) -> Set<String> {
         var candidates = Set<String>()
         for text in texts {
@@ -1041,15 +1088,16 @@ final class DictationCorrectionMonitor {
                 candidates.insert(String(token))
             }
         }
-        if candidates.count > maxEnglishWordRecognitionCandidates {
-            return Set(candidates.sorted {
-                if $0.count != $1.count {
-                    return $0.count < $1.count
-                }
-                return $0 < $1
-            }.prefix(maxEnglishWordRecognitionCandidates))
-        }
         return candidates
+    }
+
+    nonisolated private static func sortedEnglishWordCandidates(_ candidates: Set<String>) -> [String] {
+        candidates.sorted {
+            if $0.count != $1.count {
+                return $0.count < $1.count
+            }
+            return $0 < $1
+        }
     }
 
     nonisolated private static func log(_ message: String) {
