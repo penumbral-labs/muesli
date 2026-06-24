@@ -2056,6 +2056,8 @@ final class MuesliController: NSObject {
         guard activeDictionarySuggestionPromptKey != key else { return }
         guard !promptedDictionarySuggestionPromptKeys.contains(key) else { return }
         guard !queuedDictionarySuggestionPromptKeys.contains(key) else { return }
+        // The monitor caps each dictation edit window at a small suggestion set.
+        // Queue all of them here so add/ignore/dismiss reveals the next correction.
         queuedDictionarySuggestionPromptKeys.append(key)
         logDictionarySuggestion("queue depth=\(queuedDictionarySuggestionPromptKeys.count) \(dictionarySuggestionLogMetadata(suggestion))")
         presentNextDictionarySuggestionPromptIfPossible()
@@ -2125,6 +2127,19 @@ final class MuesliController: NSObject {
 
     func removeCustomWord(id: UUID) {
         updateConfig { $0.customWords.removeAll { $0.id == id } }
+    }
+
+    @discardableResult
+    func setDictionaryCorrectionPromptsFromToggle(_ enabled: Bool) -> Bool {
+        guard enabled else {
+            setDictionaryCorrectionPromptsEnabled(false)
+            return false
+        }
+        guard AXIsProcessTrusted() else {
+            return true
+        }
+        setDictionaryCorrectionPromptsEnabled(true)
+        return false
     }
 
     func setDictionaryCorrectionPromptsEnabled(_ enabled: Bool) {

@@ -1,4 +1,3 @@
-import ApplicationServices
 import SwiftUI
 import MuesliCore
 
@@ -98,15 +97,9 @@ struct DictionaryView: View {
     }
 
     private func handleDictionaryCorrectionPromptsToggle(_ enabled: Bool) {
-        guard enabled else {
-            controller.setDictionaryCorrectionPromptsEnabled(false)
-            return
-        }
-        guard AXIsProcessTrusted() else {
+        if controller.setDictionaryCorrectionPromptsFromToggle(enabled) {
             isShowingAccessibilityPrompt = true
-            return
         }
-        controller.setDictionaryCorrectionPromptsEnabled(true)
     }
 
     private var suggestionList: some View {

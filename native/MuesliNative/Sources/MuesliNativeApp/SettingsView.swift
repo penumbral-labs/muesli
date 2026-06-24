@@ -1478,15 +1478,9 @@ struct SettingsView: View {
     }
 
     private func handleDictionaryCorrectionPromptsToggle(_ enabled: Bool) {
-        guard enabled else {
-            controller.setDictionaryCorrectionPromptsEnabled(false)
-            return
-        }
-        guard AXIsProcessTrusted() else {
+        if controller.setDictionaryCorrectionPromptsFromToggle(enabled) {
             isShowingDictionaryAccessibilityPrompt = true
-            return
         }
-        controller.setDictionaryCorrectionPromptsEnabled(true)
     }
 
     private func startPermissionPolling() {

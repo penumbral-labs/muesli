@@ -585,7 +585,9 @@ struct DictionarySuggestion: Codable, Equatable, Identifiable, Sendable {
     }
 
     var customWord: CustomWord {
-        CustomWord(word: observed, replacement: replacement)
+        // Auto-learned corrections come from one observed edit pair, so keep
+        // them stricter than manually configured words to avoid broad rewrites.
+        CustomWord(word: observed, replacement: replacement, matchingThreshold: 0.92)
     }
 
     var appDisplayName: String {
