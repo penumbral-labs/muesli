@@ -66,12 +66,12 @@ Start a meeting recording → Muesli captures your mic (You) and system audio (O
 
 ### Download (recommended)
 
-Download the latest `.dmg` from [Releases](https://github.com/pHequals7/muesli/releases), open it, and drag Muesli to Applications — or double-click to install automatically.
+Download the latest `.dmg` from [Releases](https://github.com/Muesli-HQ/muesli/releases), open it, and drag Muesli to Applications — or double-click to install automatically.
 
 ### Homebrew
 
 ```bash
-brew tap pHequals7/muesli
+brew tap Muesli-HQ/muesli
 brew install --cask muesli
 ```
 
@@ -81,7 +81,7 @@ brew install --cask muesli
 
 ```bash
 # Clone
-git clone https://github.com/pHequals7/muesli.git
+git clone https://github.com/Muesli-HQ/muesli.git
 cd muesli
 
 # Build and install to /Applications
@@ -217,6 +217,7 @@ Important meeting fields:
 | **Parakeet v3** (recommended) | FluidAudio | CoreML / Neural Engine | ~450 MB | 25 languages | ~0.13s |
 | Parakeet v2 | FluidAudio | CoreML / Neural Engine | ~450 MB | English only | ~0.13s |
 | **Cohere Transcribe 2B** | CoreML | FP16 encoder + INT8 decoder | ~3.8 GB | English | ~1s |
+| SenseVoice Small | FluidAudio | INT8 CoreML / Neural Engine | ~240 MB | 50+ languages | ~1s |
 | Qwen3 ASR | FluidAudio | CoreML / Neural Engine | ~1.3 GB | 52 languages | ~2-3s |
 | Whisper Small | WhisperKit | CoreML / Neural Engine | ~190 MB | English only | ~1-2s |
 | Whisper Medium | WhisperKit | CoreML / Neural Engine | ~1.5 GB | English only | ~2-3s |
@@ -250,7 +251,7 @@ Muesli needs these macOS permissions (guided during onboarding):
 | Component | Technology |
 |---|---|
 | App | Swift, AppKit, SwiftUI |
-| Primary ASR | [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT + Qwen3 ASR on CoreML/ANE) |
+| Primary ASR | [FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT, SenseVoice Small, and Qwen3 ASR on CoreML/ANE) |
 | Cohere ASR | [Cohere Transcribe](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) (FP16 encoder + INT8 decoder on CoreML) |
 | Whisper ASR | [WhisperKit](https://github.com/argmaxinc/WhisperKit) (CoreML/ANE) |
 | Voice activity | Silero VAD via FluidAudio (streaming, event-driven) |
@@ -271,7 +272,7 @@ Muesli needs these macOS permissions (guided during onboarding):
 Contributions welcome! To get started:
 
 ```bash
-git clone https://github.com/pHequals7/muesli.git
+git clone https://github.com/Muesli-HQ/muesli.git
 cd muesli
 swift build --package-path native/MuesliNative -c release
 swift test --package-path native/MuesliNative
@@ -316,12 +317,24 @@ If Muesli saves you time, consider supporting development:
 
 [MIT](LICENSE) — free and open source.
 
+---
+
+## Resources
+
+- [Apple Neural Engine speech-to-text on Mac](https://muesli.works/apple-neural-engine-speech-to-text-mac) — how Muesli uses Apple Silicon, CoreML, and local ASR for fast dictation.
+- [Local speech-to-text glossary](https://muesli.works/local-speech-to-text-glossary) — ASR, VAD, diarization, acoustic echo cancellation, Parakeet, Whisper, and Qwen3 ASR.
+- [Best dictation apps for Mac](https://muesli.works/best-dictation-apps-mac) — a practical comparison of Mac dictation tools.
+- [Offline dictation for Mac](https://muesli.works/offline-dictation-mac) — why local-first voice typing matters.
+- [Local meeting transcription for Mac](https://muesli.works/local-meeting-transcription-mac) — meeting notes without adding a bot.
+
+---
+
 ## Star History
 
-<a href="https://www.star-history.com/?repos=phequals7%2Fmuesli&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=phequals7/muesli&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=phequals7/muesli&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=phequals7/muesli&type=date&legend=top-left" />
- </picture>
+<a href="https://www.star-history.com/?repos=Muesli-HQ%2Fmuesli&type=date&legend=top-left">
+   <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Muesli-HQ/muesli&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Muesli-HQ/muesli&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Muesli-HQ/muesli&type=date&legend=top-left" />
+   </picture>
 </a>

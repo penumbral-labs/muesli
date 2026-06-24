@@ -713,6 +713,32 @@ struct MeetingsNavigationTests {
         #expect(meeting.status == .failed)
     }
 
+    @Test("startup recovery uses live transcript checkpoints before failing stale meetings")
+    func startupRecoveryUsesLiveTranscriptCheckpoints() throws {
+        let store = try makeStore()
+        let id = try store.createLiveMeeting(title: "Checkpoint Draft", calendarEventID: nil, startTime: Date())
+        try store.appendLiveTranscriptCheckpoints(meetingID: id, entries: [
+            LiveTranscriptCheckpointEntry(timestampLabel: "11:45:02", speaker: "Others", startSeconds: 2, endSeconds: 3, text: "The fallback transcript survived.")
+        ])
+        let controller = MuesliController(
+            runtime: RuntimePaths(
+                repoRoot: FileManager.default.temporaryDirectory,
+                menuIcon: nil,
+                appIcon: nil,
+                bundlePath: nil
+            ),
+            dictationStore: store
+        )
+
+        controller.recoverStaleLiveMeetings()
+
+        let meeting = try #require(try store.meeting(id: id))
+        #expect(meeting.status == .completed)
+        #expect(meeting.notesState == .rawTranscriptFallback)
+        #expect(meeting.rawTranscript == "[11:45:02] Others: The fallback transcript survived.")
+        #expect(try store.liveTranscriptCheckpointText(meetingID: id) == nil)
+    }
+
     @Test("showMeetingTemplatesManager preserves current meetings context and presents manager")
     func showMeetingTemplatesManagerPresentsManager() {
         let controller = makeController()
@@ -850,6 +876,34 @@ struct MeetingBrowserLogicTests {
         )
 
         #expect(filtered.map(\.id) == [12, 11, 10])
+    }
+
+    @Test("formatStartTime converts UTC ISO timestamps to the requested timezone")
+    func formatStartTimeConvertsUTC() {
+        let timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        guard let date = MeetingBrowserLogic.parseDate("2025-06-15T19:30:45Z") else {
+            Issue.record("Expected ISO timestamp to parse")
+            return
+        }
+
+        let formatted = MeetingBrowserLogic.formatStartTime(
+            "2025-06-15T19:30:45Z",
+            locale: Locale(identifier: "en_US"),
+            timeZone: timeZone
+        )
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+
+        #expect(components.year == 2025)
+        #expect(components.month == 6)
+        #expect(components.day == 15)
+        #expect(components.hour == 12)
+        #expect(components.minute == 30)
+        #expect(formatted.contains("Jun 15, 2025"))
+        #expect(formatted.contains("12:30"))
+        #expect(formatted.localizedCaseInsensitiveContains("PM"))
     }
 
     private static func isoDate(daysAgo: Int, now: Date, calendar: Calendar) -> String {

@@ -121,6 +121,10 @@ final class FloatingIndicatorController: NSObject {
 
     var onStopToggleDictation: (() -> Void)?
 
+    var currentFrame: NSRect? {
+        panel?.frame
+    }
+
     func handleClick(atX x: CGFloat? = nil) {
         if state == .recording, let x {
             if x < 30 {
@@ -230,6 +234,17 @@ final class FloatingIndicatorController: NSObject {
         }
         if let panel {
             ensureWaveformAnimation(in: panel.frame.size, mode: .level)
+        }
+    }
+
+    func setPreparingWaveformWaiting(config: AppConfig) {
+        recordingWaveformMode = .waiting
+        guard state == .preparing else {
+            setState(.preparing, config: config)
+            return
+        }
+        if let panel {
+            ensureWaveformAnimation(in: panel.frame.size, mode: .waiting)
         }
     }
 

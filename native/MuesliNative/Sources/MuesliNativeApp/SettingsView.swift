@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import SwiftUI
 import MuesliCore
@@ -8,6 +9,13 @@ private struct MeetingDetectionAppOption: Identifiable {
     let icon: String
 
     var id: String { bundleID }
+}
+
+private struct DictationMicrophoneOption: Identifiable {
+    let uid: String?
+    let label: String
+
+    var id: String { uid ?? "__automatic__" }
 }
 
 struct SettingsView: View {
@@ -45,6 +53,7 @@ struct SettingsView: View {
 
     private enum SettingsPane: String, CaseIterable, Identifiable {
         case general
+        case sync
         case dictation
         case computerUse
         case meetings
@@ -55,6 +64,7 @@ struct SettingsView: View {
         var title: String {
             switch self {
             case .general: return "General"
+            case .sync: return "Sync"
             case .dictation: return "Dictation"
             case .computerUse: return "Computer Use"
             case .meetings: return "Meetings"
@@ -71,10 +81,12 @@ struct SettingsView: View {
     @State private var googleCalSignInError: String?
     @State private var isSigningInGoogleCal = false
     @State private var pendingDataDestruction: PendingDataDestruction?
+    @State private var isShowingDictionaryAccessibilityPrompt = false
     @State private var isPreviewingClip = false
     @State private var selectedPane: SettingsPane = .general
     @State private var downloadedBackendOptions: [BackendOption] = []
     @State private var downloadedPostProcOptions: [PostProcessorOption] = []
+    @State private var dictationInputDevices: [AudioInputDeviceInfo] = []
     @State private var permissionPollTimer: Timer?
     @State private var micGranted = false
     @State private var accessibilityGranted = false
@@ -91,6 +103,7 @@ struct SettingsView: View {
     // Uniform width for all right-side controls
     private let controlWidth: CGFloat = 220
     private let meetingControlWidth: CGFloat = 275
+    private let iOSCompanionURL = IPhoneBridgeLinks.installURL
     private let screenContextGrantIntentTimeout: TimeInterval = 15 * 60
     private let meetingDetectionAppOptions: [MeetingDetectionAppOption] = [
         MeetingDetectionAppOption(bundleID: "com.google.Chrome", name: "Chrome", icon: "globe"),
@@ -128,6 +141,23 @@ struct SettingsView: View {
         UpcomingMeetingsWindow.resolve(dayCount: appState.config.upcomingMeetingsDayCount)
     }
 
+    private var dictationMicrophoneOptions: [DictationMicrophoneOption] {
+        var options = [DictationMicrophoneOption(uid: nil, label: "Automatic")]
+        options += dictationInputDevices.map { device in
+            DictationMicrophoneOption(uid: device.uid, label: device.name)
+        }
+        if let selectedUID = appState.config.dictationInputDeviceUID,
+           !options.contains(where: { $0.uid == selectedUID }) {
+            options.append(DictationMicrophoneOption(uid: selectedUID, label: "Selected microphone unavailable"))
+        }
+        return options
+    }
+
+    private var selectedDictationMicrophoneLabel: String {
+        let selectedUID = appState.config.dictationInputDeviceUID
+        return dictationMicrophoneOptions.first(where: { $0.uid == selectedUID })?.label ?? "Automatic"
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: MuesliTheme.spacing24) {
@@ -143,6 +173,7 @@ struct SettingsView: View {
         .background(MuesliTheme.backgroundBase)
         .onAppear {
             refreshDownloadedModelOptions()
+            refreshDictationInputDevices()
             startPermissionPolling()
             if appState.selectedMeetingSummaryBackend == .openRouter {
                 loadOpenRouterFreeModelsIfNeeded()
@@ -156,8 +187,13 @@ struct SettingsView: View {
         .onChange(of: appState.selectedTab) { _, tab in
             if tab == .settings {
                 refreshDownloadedModelOptions()
-                refreshPermissionStatuses()
+                refreshDictationInputDevices()
+                refreshPermissionStatuses(refreshLaunchAtLogin: true)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            guard appState.selectedTab == .settings else { return }
+            refreshPermissionStatuses(refreshLaunchAtLogin: true)
         }
         .onChange(of: appState.selectedBackend) { _, _ in
             refreshDownloadedModelOptions()
@@ -194,12 +230,29 @@ struct SettingsView: View {
         } message: {
             Text(pendingDataDestruction?.message ?? "")
         }
+        .alert(
+            "Enable Accessibility?",
+            isPresented: $isShowingDictionaryAccessibilityPrompt
+        ) {
+            Button("Cancel", role: .cancel) {
+                controller.cancelDictionaryCorrectionAccessibilityEnableRequest()
+            }
+            Button("Enable") {
+                controller.requestDictionaryCorrectionAccessibilityEnable()
+            }
+        } message: {
+            Text("Dictionary suggestions briefly read focused app text via Accessibility after dictation. Grant access, then relaunch Muesli to turn suggestions on.")
+        }
     }
 
     private func refreshDownloadedModelOptions() {
         controller.refreshMeetingTranscriptionSelectionForAvailability()
         downloadedBackendOptions = BackendOption.downloaded
         downloadedPostProcOptions = PostProcessorOption.downloaded
+    }
+
+    private func refreshDictationInputDevices() {
+        dictationInputDevices = controller.availableDictationInputDevices()
     }
 
     private func backendOptions(including selection: BackendOption) -> [BackendOption] {
@@ -221,10 +274,13 @@ struct SettingsView: View {
     ]
 
     private var screenContextDescription: String {
-        if screenRecordingGranted {
-            return "Adds nearby app text and meeting OCR context. Processed on-device."
+        if !accessibilityGranted {
+            return "Grant Accessibility, then toggle again if needed."
         }
-        return "Requires Screen Recording. Adds nearby app text and meeting OCR context."
+        if !screenRecordingGranted {
+            return "Adds nearby app text for post-processing. Screen Recording enables OCR context."
+        }
+        return "Adds nearby app text and OCR context. Processed on-device."
     }
 
     @ViewBuilder
@@ -265,7 +321,7 @@ struct SettingsView: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 680)
+            .frame(width: 760)
             Spacer()
         }
     }
@@ -275,6 +331,8 @@ struct SettingsView: View {
         switch selectedPane {
         case .general:
             generalSettingsPane
+        case .sync:
+            syncSettingsPane
         case .dictation:
             dictationSettingsPane
         case .computerUse:
@@ -356,6 +414,109 @@ struct SettingsView: View {
         .padding(.bottom, MuesliTheme.spacing8)
     }
 
+    private var syncSettingsPane: some View {
+        VStack(alignment: .leading, spacing: MuesliTheme.spacing24) {
+            settingsSection("iCloud Text Sync") {
+                settingsRow("Private iCloud sync") {
+                    settingsSwitch(isOn: appState.config.iCloudSyncEnabled) { newValue in
+                        controller.setICloudSyncEnabledFromSettings(newValue)
+                    }
+                }
+                settingsDescription("Sync dictation text, meeting transcripts, notes, summaries, and manual notes with Muesli for iPhone through your private iCloud account. Audio recordings are never synced.")
+
+                Divider().background(MuesliTheme.surfaceBorder)
+
+                HStack(spacing: MuesliTheme.spacing12) {
+                    VStack(alignment: .leading, spacing: MuesliTheme.spacing4) {
+                        Text(syncStatusText)
+                            .font(MuesliTheme.body())
+                            .foregroundStyle(MuesliTheme.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let lastSyncedText = syncLastSyncedText {
+                            Text("Last synced: \(lastSyncedText)")
+                                .font(MuesliTheme.caption())
+                                .foregroundStyle(MuesliTheme.textTertiary)
+                        }
+                        if let linkedDeviceText = syncLinkedDeviceText {
+                            Text(linkedDeviceText)
+                                .font(MuesliTheme.caption())
+                                .foregroundStyle(MuesliTheme.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: MuesliTheme.spacing16)
+                    actionButton("Sync now", systemImage: "arrow.triangle.2.circlepath") {
+                        controller.performICloudSync()
+                    }
+                    .frame(width: controlWidth)
+                    .disabled(!appState.config.iCloudSyncEnabled)
+                }
+            }
+
+            settingsSection("iPhone Bridge") {
+                settingsRow("Show iOS companion prompt") {
+                    settingsSwitch(isOn: appState.config.showIOSCompanionPrompt) { newValue in
+                        controller.updateConfig { $0.showIOSCompanionPrompt = newValue }
+                    }
+                }
+                settingsDescription("Keep the timeline bridge card available while users connect Muesli on iPhone.")
+
+                Divider().background(MuesliTheme.surfaceBorder)
+
+                HStack(spacing: MuesliTheme.spacing12) {
+                    VStack(alignment: .leading, spacing: MuesliTheme.spacing4) {
+                        Text("Muesli for iPhone")
+                            .font(MuesliTheme.body())
+                            .foregroundStyle(MuesliTheme.textPrimary)
+                        Text("Use iPhone for offline meetings, keyboard dictation, and private iCloud text sync with this Mac.")
+                            .font(MuesliTheme.caption())
+                            .foregroundStyle(MuesliTheme.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: MuesliTheme.spacing16)
+                    actionButton("Open iOS app page") {
+                        NSWorkspace.shared.open(iOSCompanionURL)
+                    }
+                    .frame(width: controlWidth)
+                }
+            }
+        }
+    }
+
+    private var syncStatusText: String {
+        if !appState.config.iCloudSyncEnabled {
+            return "Sync is off. Turn it on to bridge this Mac with Muesli for iPhone."
+        }
+        return appState.iCloudSyncStatus ?? "Private iCloud text sync is ready."
+    }
+
+    private var syncLastSyncedText: String? {
+        guard let date = appState.iCloudLastSyncedAt else { return nil }
+        return DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .short)
+    }
+
+    private var syncLinkedDeviceText: String? {
+        guard appState.config.iCloudSyncEnabled else { return nil }
+        if let remoteDeviceName = appState.iCloudBridgeCompanionDeviceName {
+            if let platform = appState.iCloudBridgeRemoteDevicePlatform {
+                return "Linked \(syncDeviceLabel(for: platform)): \(remoteDeviceName)"
+            }
+            return "Linked device: \(remoteDeviceName)"
+        }
+        return "No linked iPhone yet."
+    }
+
+    private func syncDeviceLabel(for platform: String) -> String {
+        switch platform.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "ios":
+            return "iPhone"
+        case "ipados":
+            return "iPad"
+        default:
+            return platform
+        }
+    }
+
     private var dictationSettingsPane: some View {
         VStack(alignment: .leading, spacing: MuesliTheme.spacing24) {
             settingsSection("Transcription") {
@@ -382,10 +543,37 @@ struct SettingsView: View {
                     }
                 }
                 Divider().background(MuesliTheme.surfaceBorder)
+                settingsRow(
+                    "Microphone",
+                    description: "Automatic uses system input, or Mac mic with AirPods."
+                ) {
+                    let options = dictationMicrophoneOptions
+                    FixedWidthPopUp(
+                        selection: selectedDictationMicrophoneLabel,
+                        options: options.map(\.label),
+                        onSelectIndex: { index in
+                            guard index >= 0, index < options.count else { return }
+                            controller.selectDictationInputDeviceUID(options[index].uid)
+                            refreshDictationInputDevices()
+                        }
+                    )
+                    .frame(height: 24)
+                }
+                Divider().background(MuesliTheme.surfaceBorder)
                 settingsRow("AI transcript cleanup") {
                     settingsSwitch(isOn: appState.config.enablePostProcessor) { newValue in
                         controller.setPostProcessorEnabled(newValue)
                     }
+                }
+                Divider().background(MuesliTheme.surfaceBorder)
+                settingsRow(
+                    "Dictionary suggestions",
+                    description: "Suggest words after corrections by briefly reading focused app text via Accessibility."
+                ) {
+                    settingsSwitch(isOn: appState.config.enableDictionaryCorrectionPrompts) { newValue in
+                        handleDictionaryCorrectionPromptsToggle(newValue)
+                    }
+                    .help("Briefly reads focused app text after dictation to detect corrections.")
                 }
                 if appState.config.enablePostProcessor && !downloadedPostProcOptions.isEmpty {
                     Divider().background(MuesliTheme.surfaceBorder)
@@ -682,7 +870,22 @@ struct SettingsView: View {
                         controller.updateConfig { $0.showScheduledMeetingNotifications = newValue }
                     }
                 }
-                settingsDescription("Show notifications before meetings start based on your calendar.")
+                settingsDescription("Show notifications for calendar meetings with a join link.")
+
+                if appState.config.showScheduledMeetingNotifications {
+                    Divider().background(MuesliTheme.surfaceBorder)
+
+                    settingsRow("Reminder timing") {
+                        settingsMenu(
+                            selection: scheduledMeetingLeadTimeLabel(for: appState.config.scheduledMeetingNotificationLeadTime),
+                            options: ScheduledMeetingNotificationLeadTime.allCases.map(scheduledMeetingLeadTimeLabel(for:))
+                        ) { label in
+                            guard let leadTime = scheduledMeetingLeadTime(for: label) else { return }
+                            controller.updateConfig { $0.scheduledMeetingNotificationLeadTime = leadTime }
+                        }
+                    }
+                    settingsDescription("At start time avoids early calendar-only prompts before you join.")
+                }
 
                 Divider().background(MuesliTheme.surfaceBorder)
 
@@ -1261,7 +1464,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private func screenContextControl(width: CGFloat? = nil) -> some View {
-        if screenRecordingGranted {
+        if accessibilityGranted {
             settingsSwitch(isOn: appState.config.enableScreenContext) { newValue in
                 handleScreenContextToggle(newValue)
             }
@@ -1282,33 +1485,37 @@ struct SettingsView: View {
         }
     }
 
-    private func handleScreenContextToggle(_ enabled: Bool) {
+    @discardableResult
+    private func handleScreenContextToggle(_ enabled: Bool) -> Bool {
         guard enabled else {
             clearPendingScreenContextEnable()
             controller.updateConfig { $0.enableScreenContext = false }
-            return
+            return false
         }
 
-        guard CGPreflightScreenCaptureAccess() else {
-            controller.updateConfig { $0.enableScreenContext = false }
+        guard accessibilityGranted else {
             pendingScreenContextEnable = true
             pendingScreenContextRequestedAt = Date().timeIntervalSince1970
-            let granted = CGRequestScreenCaptureAccess()
-            screenRecordingGranted = CGPreflightScreenCaptureAccess()
-            if granted || screenRecordingGranted {
+            let granted = controller.requestScreenContextEnable()
+            accessibilityGranted = AXIsProcessTrusted()
+            if granted || accessibilityGranted {
                 clearPendingScreenContextEnable()
-                controller.updateConfig { $0.enableScreenContext = true }
             }
-            return
+            return granted || accessibilityGranted
         }
 
-        screenRecordingGranted = true
         clearPendingScreenContextEnable()
-        controller.updateConfig { $0.enableScreenContext = true }
+        return controller.requestScreenContextEnable()
+    }
+
+    private func handleDictionaryCorrectionPromptsToggle(_ enabled: Bool) {
+        if controller.setDictionaryCorrectionPromptsFromToggle(enabled) == .needsAccessibilityPermission {
+            isShowingDictionaryAccessibilityPrompt = true
+        }
     }
 
     private func startPermissionPolling() {
-        refreshPermissionStatuses()
+        refreshPermissionStatuses(refreshLaunchAtLogin: true)
         permissionPollTimer?.invalidate()
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             refreshPermissionStatuses()
@@ -1322,20 +1529,24 @@ struct SettingsView: View {
         permissionPollTimer = nil
     }
 
-    private func refreshPermissionStatuses() {
+    private func refreshPermissionStatuses(refreshLaunchAtLogin: Bool = false) {
         micGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         accessibilityGranted = AXIsProcessTrusted()
+        controller.reconcilePendingDictionaryCorrectionAccessibilityEnable()
         inputMonitoringGranted = CGPreflightListenEventAccess()
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
-        controller.refreshLaunchAtLoginState()
-        if screenRecordingGranted && pendingScreenContextEnable {
-            clearPendingScreenContextEnable()
-            controller.updateConfig { $0.enableScreenContext = true }
+        if refreshLaunchAtLogin {
+            controller.refreshLaunchAtLoginState()
         }
-        if !screenRecordingGranted && isPendingScreenContextGrantExpired {
+        if accessibilityGranted && pendingScreenContextEnable {
+            if controller.requestScreenContextEnable() {
+                clearPendingScreenContextEnable()
+            }
+        }
+        if !accessibilityGranted && isPendingScreenContextGrantExpired {
             clearPendingScreenContextEnable()
         }
-        if !screenRecordingGranted && appState.config.enableScreenContext {
+        if !accessibilityGranted && appState.config.enableScreenContext {
             clearPendingScreenContextEnable()
             controller.updateConfig { $0.enableScreenContext = false }
         }
@@ -1991,10 +2202,22 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func actionButton(_ title: String, role: ButtonRole? = nil, action: @escaping () -> Void) -> some View {
+    private func actionButton(
+        _ title: String,
+        systemImage: String? = nil,
+        role: ButtonRole? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
         let isDestructive = role == .destructive
         Button(action: action) {
-            Text(title)
+            HStack(spacing: MuesliTheme.spacing8) {
+                Text(title)
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 13, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                }
+            }
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(isDestructive ? MuesliTheme.recording : MuesliTheme.textPrimary)
                 .frame(maxWidth: .infinity)
@@ -2030,6 +2253,29 @@ struct SettingsView: View {
             assertionFailure("Unexpected recording save label: \(label)")
         }
         return policy
+    }
+
+    private func scheduledMeetingLeadTimeLabel(for leadTime: ScheduledMeetingNotificationLeadTime) -> String {
+        switch leadTime {
+        case .atStart:
+            return "At start time"
+        case .oneMinute:
+            return "1 min before"
+        case .threeMinutes:
+            return "3 min before"
+        case .fiveMinutes:
+            return "5 min before"
+        }
+    }
+
+    private func scheduledMeetingLeadTime(for label: String) -> ScheduledMeetingNotificationLeadTime? {
+        let leadTime = ScheduledMeetingNotificationLeadTime.allCases.first {
+            scheduledMeetingLeadTimeLabel(for: $0) == label
+        }
+        if leadTime == nil {
+            assertionFailure("Unexpected scheduled meeting notification lead time label: \(label)")
+        }
+        return leadTime
     }
 }
 
