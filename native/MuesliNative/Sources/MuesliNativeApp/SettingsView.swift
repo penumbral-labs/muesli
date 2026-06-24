@@ -271,7 +271,7 @@ struct SettingsView: View {
 
     private var screenContextDescription: String {
         if !accessibilityGranted {
-            return "Requires Accessibility. Adds nearby app text for post-processing."
+            return "Grant Accessibility, then toggle again if needed."
         }
         if !screenRecordingGranted {
             return "Adds nearby app text for post-processing. Screen Recording enables OCR context."
@@ -1511,7 +1511,6 @@ struct SettingsView: View {
         }
         if accessibilityGranted && pendingScreenContextEnable {
             clearPendingScreenContextEnable()
-            controller.updateConfig { $0.enableScreenContext = true }
         }
         if !accessibilityGranted && isPendingScreenContextGrantExpired {
             clearPendingScreenContextEnable()
