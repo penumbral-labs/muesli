@@ -848,7 +848,8 @@ struct DictationCorrectionSnapshotStabilizer {
     }
 }
 
-private actor EnglishWordRecognizer {
+@MainActor
+private final class EnglishWordRecognizer {
     private let maxEntries: Int
     private let spellChecker = NSSpellChecker()
     private var cache: [String: Bool] = [:]
@@ -911,6 +912,7 @@ final class DictationCorrectionMonitor {
     nonisolated private static let maxSuggestionsPerSession = 3
     nonisolated private static let maxAccessibilityNodes = 140
     nonisolated private static let maxCandidateCharacters = 2_000
+    nonisolated private static let maxEnglishWordRecognitionCandidates = 128
     nonisolated private static let maxEnglishWordRecognitionCacheEntries = 5_000
     private static let englishWordRecognizer = EnglishWordRecognizer(maxEntries: maxEnglishWordRecognitionCacheEntries)
 
@@ -968,7 +970,7 @@ final class DictationCorrectionMonitor {
                     Self.log("poll=\(pollCount) stableSnapshots=\(stableSnapshots.count)")
                 }
                 for stableSnapshot in stableSnapshots {
-                    let recognizedEnglishWords = await Self.englishWordRecognizer.recognizedWords(
+                    let recognizedEnglishWords = Self.englishWordRecognizer.recognizedWords(
                         from: Self.englishWordCandidates(in: [originalText, stableSnapshot])
                     )
                     if Task.isCancelled { return }
@@ -1038,6 +1040,14 @@ final class DictationCorrectionMonitor {
                 guard token.count >= 2 else { continue }
                 candidates.insert(String(token))
             }
+        }
+        if candidates.count > maxEnglishWordRecognitionCandidates {
+            return Set(candidates.sorted {
+                if $0.count != $1.count {
+                    return $0.count < $1.count
+                }
+                return $0 < $1
+            }.prefix(maxEnglishWordRecognitionCandidates))
         }
         return candidates
     }
@@ -1149,16 +1159,15 @@ final class DictationCorrectionMonitor {
             add(valueRef as? String)
         }
 
-        let visibleChildren = axElementArrayAttribute(kAXVisibleChildrenAttribute, from: element)
-        let fallbackAttributes = visibleChildren.isEmpty
-            ? [kAXChildrenAttribute, kAXContentsAttribute]
-            : []
-        let childGroups = [visibleChildren] + fallbackAttributes.map {
-            axElementArrayAttribute($0, from: element)
-        }
-
-        for childGroup in childGroups {
-            for child in childGroup {
+        // AX trees are not guaranteed to put editable text under visible
+        // children. Walk all known child containers; visited + node budget
+        // handle duplicate chrome/text nodes without skipping AXContents.
+        for childAttribute in [
+            kAXVisibleChildrenAttribute,
+            kAXChildrenAttribute,
+            kAXContentsAttribute,
+        ] {
+            for child in axElementArrayAttribute(childAttribute, from: element) {
                 collectTextSnapshots(
                     from: child,
                     depth: depth + 1,
