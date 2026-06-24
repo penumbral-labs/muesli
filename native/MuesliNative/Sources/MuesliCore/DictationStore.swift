@@ -191,7 +191,7 @@ public final class DictationStore {
         if sqlite3_exec(db, "ALTER TABLE meeting_folders ADD COLUMN parent_id INTEGER REFERENCES meeting_folders(id)", nil, nil, nil) != SQLITE_OK {
             let msg = String(cString: sqlite3_errmsg(db))
             if !msg.localizedCaseInsensitiveContains("duplicate column") {
-                fputs("[muesli-store] migration warning: ALTER TABLE meeting_folders ADD parent_id failed: \(msg)\n", stderr)
+                throw lastError(db)
             }
         }
         let _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_meeting_folders_parent ON meeting_folders(parent_id)", nil, nil, nil)
@@ -407,7 +407,7 @@ public final class DictationStore {
             sql = """
                 WITH RECURSIVE folder_tree(id) AS (
                     SELECT id FROM meeting_folders WHERE id = ?
-                    UNION ALL
+                    UNION
                     SELECT mf.id FROM meeting_folders mf
                     JOIN folder_tree ft ON mf.parent_id = ft.id
                 )

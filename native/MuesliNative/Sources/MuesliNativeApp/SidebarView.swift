@@ -284,6 +284,7 @@ struct SidebarView: View {
             .padding(.horizontal, sidebarRowOuterPadding)
 
             if meetingsExpanded {
+                let folderTree = folderTreePresentation
                 VStack(alignment: .leading, spacing: 2) {
                     meetingFilterRow(
                         icon: "tray.2",
@@ -294,9 +295,9 @@ struct SidebarView: View {
                         controller.showMeetingsHome()
                     }
 
-                    ForEach(visibleFolders) { folder in
-                        let depth = folderDepth(folder)
-                        let hasChildren = folderHasChildren(folder.id)
+                    ForEach(folderTree.visibleFolders) { folder in
+                        let depth = folderTree.depth(of: folder)
+                        let hasChildren = folderTree.hasChildren(folder.id)
                         let isCollapsed = collapsedFolderIDs.contains(folder.id)
                         if renamingFolderID == folder.id {
                             folderRenameField(folder: folder)
@@ -305,22 +306,17 @@ struct SidebarView: View {
                             HStack(spacing: 0) {
                                 if hasChildren {
                                     Button {
-                                        withAnimation(.easeInOut(duration: 0.15)) {
-                                            if isCollapsed {
-                                                collapsedFolderIDs.remove(folder.id)
-                                            } else {
-                                                collapsedFolderIDs.insert(folder.id)
-                                            }
-                                        }
+                                        toggleFolderCollapse(folder.id)
                                     } label: {
                                         Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                                             .font(.system(size: 9, weight: .semibold))
                                             .foregroundStyle(MuesliTheme.textTertiary)
-                                            .frame(width: 14, height: 14)
+                                            .frame(width: sidebarIconColumnWidth, height: 22)
+                                            .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.plain)
                                 } else {
-                                    Spacer().frame(width: 14)
+                                    Spacer().frame(width: sidebarIconColumnWidth)
                                 }
 
                                 meetingFilterRow(
@@ -590,39 +586,21 @@ struct SidebarView: View {
         return "\(count / 1000)k"
     }
 
-    private var visibleFolders: [MeetingFolder] {
-        let folders = dragOrderedFolders ?? appState.folders
-        guard !collapsedFolderIDs.isEmpty else { return folders }
-        // Collect IDs of all folders that should be hidden because an ancestor is collapsed.
-        var hiddenIDs: Set<Int64> = []
-        let byID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
-        for folder in folders {
-            var ancestor = folder.parentID
-            while let aid = ancestor {
-                if collapsedFolderIDs.contains(aid) {
-                    hiddenIDs.insert(folder.id)
-                    break
-                }
-                ancestor = byID[aid]?.parentID
+    private var folderTreePresentation: FolderTreePresentation {
+        FolderTreePresentation(
+            folders: dragOrderedFolders ?? appState.folders,
+            collapsedFolderIDs: collapsedFolderIDs
+        )
+    }
+
+    private func toggleFolderCollapse(_ folderID: Int64) {
+        withAnimation(.easeInOut(duration: 0.12)) {
+            if collapsedFolderIDs.contains(folderID) {
+                collapsedFolderIDs.remove(folderID)
+            } else {
+                collapsedFolderIDs.insert(folderID)
             }
         }
-        return folders.filter { !hiddenIDs.contains($0.id) }
-    }
-
-    private func folderDepth(_ folder: MeetingFolder) -> Int {
-        let folders = appState.folders
-        let byID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
-        var depth = 0
-        var current = folder.parentID
-        while let pid = current {
-            depth += 1
-            current = byID[pid]?.parentID
-        }
-        return depth
-    }
-
-    private func folderHasChildren(_ folderID: Int64) -> Bool {
-        appState.folders.contains { $0.parentID == folderID }
     }
 
     private func createNewFolder() {
@@ -649,6 +627,75 @@ struct SidebarView: View {
     }
 }
 
+private struct FolderTreePresentation {
+    let visibleFolders: [MeetingFolder]
+    let depthByID: [Int64: Int]
+    let childrenByParent: [Int64: [Int64]]
+
+    init(folders: [MeetingFolder], collapsedFolderIDs: Set<Int64>) {
+        let byID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+        var childrenByParent: [Int64: [Int64]] = [:]
+        for folder in folders {
+            if let parentID = folder.parentID {
+                childrenByParent[parentID, default: []].append(folder.id)
+            }
+        }
+
+        var depthCache: [Int64: Int] = [:]
+        func depth(for folder: MeetingFolder, visited: Set<Int64> = []) -> Int {
+            if let cached = depthCache[folder.id] { return cached }
+            guard let parentID = folder.parentID,
+                  let parent = byID[parentID],
+                  !visited.contains(folder.id) else {
+                depthCache[folder.id] = 0
+                return 0
+            }
+            var nextVisited = visited
+            nextVisited.insert(folder.id)
+            let value = 1 + depth(for: parent, visited: nextVisited)
+            depthCache[folder.id] = value
+            return value
+        }
+
+        var hiddenCache: [Int64: Bool] = [:]
+        func isHidden(_ folder: MeetingFolder, visited: Set<Int64> = []) -> Bool {
+            if let cached = hiddenCache[folder.id] { return cached }
+            guard let parentID = folder.parentID,
+                  let parent = byID[parentID],
+                  !visited.contains(folder.id) else {
+                hiddenCache[folder.id] = false
+                return false
+            }
+            if collapsedFolderIDs.contains(parentID) {
+                hiddenCache[folder.id] = true
+                return true
+            }
+            var nextVisited = visited
+            nextVisited.insert(folder.id)
+            let hidden = isHidden(parent, visited: nextVisited)
+            hiddenCache[folder.id] = hidden
+            return hidden
+        }
+
+        var computedDepths: [Int64: Int] = [:]
+        for folder in folders {
+            computedDepths[folder.id] = depth(for: folder)
+        }
+
+        self.visibleFolders = folders.filter { !isHidden($0) }
+        self.depthByID = computedDepths
+        self.childrenByParent = childrenByParent
+    }
+
+    func depth(of folder: MeetingFolder) -> Int {
+        depthByID[folder.id] ?? 0
+    }
+
+    func hasChildren(_ folderID: Int64) -> Bool {
+        !(childrenByParent[folderID] ?? []).isEmpty
+    }
+}
+
 private struct FolderDropDelegate: DropDelegate {
     let folderID: Int64
     @Binding var dragOrderedFolders: [MeetingFolder]?
@@ -658,10 +705,18 @@ private struct FolderDropDelegate: DropDelegate {
     func dropEntered(info: DropInfo) {
         guard let dragID = draggingFolderID, dragID != folderID,
               var folders = dragOrderedFolders else { return }
-        guard let fromIndex = folders.firstIndex(where: { $0.id == dragID }),
+        guard canReorder(dragID: dragID, targetID: folderID, folders: folders),
+              let fromIndex = folders.firstIndex(where: { $0.id == dragID }),
               let toIndex = folders.firstIndex(where: { $0.id == folderID }) else { return }
+
+        let draggedSubtree = subtreeIDs(rootedAt: dragID, folders: folders)
+        let movedFolders = folders.filter { draggedSubtree.contains($0.id) }
+        folders.removeAll { draggedSubtree.contains($0.id) }
+        guard let adjustedTargetIndex = folders.firstIndex(where: { $0.id == folderID }) else { return }
+        let insertionIndex = toIndex > fromIndex ? adjustedTargetIndex + 1 : adjustedTargetIndex
+
         withAnimation(.easeInOut(duration: 0.15)) {
-            folders.move(fromOffsets: IndexSet(integer: fromIndex), toOffset: toIndex > fromIndex ? toIndex + 1 : toIndex)
+            folders.insert(contentsOf: movedFolders, at: insertionIndex)
             dragOrderedFolders = folders
         }
     }
@@ -676,6 +731,39 @@ private struct FolderDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
+        guard let dragID = draggingFolderID,
+              let folders = dragOrderedFolders,
+              canReorder(dragID: dragID, targetID: folderID, folders: folders) else {
+            return nil
+        }
+        return DropProposal(operation: .move)
+    }
+
+    private func canReorder(dragID: Int64, targetID: Int64, folders: [MeetingFolder]) -> Bool {
+        guard dragID != targetID,
+              let dragged = folders.first(where: { $0.id == dragID }),
+              let target = folders.first(where: { $0.id == targetID }) else {
+            return false
+        }
+        return dragged.parentID == target.parentID
+    }
+
+    private func subtreeIDs(rootedAt rootID: Int64, folders: [MeetingFolder]) -> Set<Int64> {
+        var childrenByParent: [Int64: [Int64]] = [:]
+        for folder in folders {
+            if let parentID = folder.parentID {
+                childrenByParent[parentID, default: []].append(folder.id)
+            }
+        }
+
+        var result: Set<Int64> = []
+        func visit(_ id: Int64) {
+            guard result.insert(id).inserted else { return }
+            for childID in childrenByParent[id] ?? [] {
+                visit(childID)
+            }
+        }
+        visit(rootID)
+        return result
     }
 }

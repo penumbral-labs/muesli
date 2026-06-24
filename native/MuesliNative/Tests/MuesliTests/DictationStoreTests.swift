@@ -49,6 +49,26 @@ struct DictationStoreTests {
         NSError(domain: "DictationStoreTests", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
+    private func setFolderParentRaw(folderID: Int64, parentID: Int64, store: DictationStore) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(store.databasePath().path, &db) == SQLITE_OK else {
+            throw sqliteTestError("failed to open test database")
+        }
+        defer { sqlite3_close(db) }
+
+        let sql = "UPDATE meeting_folders SET parent_id = ? WHERE id = ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw sqliteTestError("failed to prepare folder parent update")
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, parentID)
+        sqlite3_bind_int64(statement, 2, folderID)
+        guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(db) == 1 else {
+            throw sqliteTestError("failed to update folder parent")
+        }
+    }
+
     private func setDictationDirtyText(
         recordName: String,
         text: String,
@@ -2146,6 +2166,44 @@ struct DictationStoreTests {
         let childResults = try store.recentMeetings(folderID: child)
         #expect(childResults.count == 1)
         #expect(childResults.first?.title == "Meeting in Child")
+    }
+
+    @Test("recentMeetings with cyclic folder ancestry returns each matching meeting once")
+    func recentMeetingsDeduplicatesCyclicFolderTree() throws {
+        let store = try makeStore()
+        let now = Date()
+
+        let folderA = try store.createFolder(name: "A")
+        let folderB = try store.createFolder(name: "B", parentID: folderA)
+        try setFolderParentRaw(folderID: folderA, parentID: folderB, store: store)
+
+        try store.insertMeeting(
+            title: "Meeting A",
+            calendarEventID: nil,
+            startTime: now,
+            endTime: now.addingTimeInterval(60),
+            rawTranscript: "a",
+            formattedNotes: "",
+            micAudioPath: nil,
+            systemAudioPath: nil
+        )
+        try store.moveMeeting(id: try store.recentMeetings(limit: 1).first!.id, toFolder: folderA)
+
+        try store.insertMeeting(
+            title: "Meeting B",
+            calendarEventID: nil,
+            startTime: now.addingTimeInterval(1),
+            endTime: now.addingTimeInterval(61),
+            rawTranscript: "b",
+            formattedNotes: "",
+            micAudioPath: nil,
+            systemAudioPath: nil
+        )
+        try store.moveMeeting(id: try store.recentMeetings(limit: 1).first!.id, toFolder: folderB)
+
+        let results = try store.recentMeetings(folderID: folderA)
+        #expect(results.count == 2)
+        #expect(Set(results.map(\.title)) == ["Meeting A", "Meeting B"])
     }
 
     @Test("meetingCounts includes recursive counts for parent folders")
