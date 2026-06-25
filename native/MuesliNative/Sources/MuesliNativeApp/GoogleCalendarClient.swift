@@ -79,6 +79,16 @@ final class GoogleCalendarClient {
             }
             return startOfDay <= scope.startOfDay && end >= scopeEnd
         }
+
+        func overlaps(_ scope: EventWindowScope, calendar: Calendar = .current) -> Bool {
+            guard
+                let end = calendar.date(byAdding: .day, value: dayCount, to: startOfDay),
+                let scopeEnd = calendar.date(byAdding: .day, value: scope.dayCount, to: scope.startOfDay)
+            else {
+                return false
+            }
+            return startOfDay < scopeEnd && scope.startOfDay < end
+        }
     }
 
     /// Stored sync token per calendar from last full fetch — subsequent requests
@@ -193,8 +203,14 @@ final class GoogleCalendarClient {
                 guard let cachedScope = cachedEventScopesByCalendar[calendarID] else {
                     return false
                 }
-                return cachedScope == windowScope ||
-                    (failedCalendarIDs.contains(calendarID) && cachedScope.covers(windowScope))
+                if cachedScope == windowScope {
+                    return true
+                }
+                guard failedCalendarIDs.contains(calendarID) else {
+                    return false
+                }
+                return cachedScope.covers(windowScope) ||
+                    (cachedScope.dayCount == windowScope.dayCount && cachedScope.overlaps(windowScope))
             }
             .values
             .flatMap { $0.values }
