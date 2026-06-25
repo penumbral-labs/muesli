@@ -351,25 +351,25 @@ public final class DictationStore {
             }
         }
 
-        // Compute recursive counts bottom-up via post-order traversal.
+        // Count each folder plus every reachable descendant exactly once.
         var byFolder: [Int64: Int] = [:]
-        var visiting: Set<Int64> = []
         func recursiveCount(for id: Int64) -> Int {
-            if let cached = byFolder[id] { return cached }
-            guard visiting.insert(id).inserted else { return 0 }
-            defer { visiting.remove(id) }
-
-            var count = directByFolder[id] ?? 0
-            for childID in childrenMap[id] ?? [] {
-                count += recursiveCount(for: childID)
+            var reachable: Set<Int64> = [id]
+            var queue: [Int64] = [id]
+            while !queue.isEmpty {
+                let current = queue.removeFirst()
+                for childID in childrenMap[current] ?? [] {
+                    if reachable.insert(childID).inserted {
+                        queue.append(childID)
+                    }
+                }
             }
+            let count = reachable.reduce(0) { $0 + (directByFolder[$1] ?? 0) }
             byFolder[id] = count
             return count
         }
         for folder in allFolders {
-            if byFolder[folder.id] == nil {
-                _ = recursiveCount(for: folder.id)
-            }
+            _ = recursiveCount(for: folder.id)
         }
 
         return (total, byFolder, directByFolder)
@@ -1608,7 +1608,7 @@ public final class DictationStore {
             sqlite3_bind_int64(statement, 1, current)
             while sqlite3_step(statement) == SQLITE_ROW {
                 let childID = sqlite3_column_int64(statement, 0)
-                if result.insert(childID).inserted {
+                if childID != folderID, result.insert(childID).inserted {
                     queue.append(childID)
                 }
             }

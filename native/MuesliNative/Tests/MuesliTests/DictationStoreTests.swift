@@ -2031,6 +2031,18 @@ struct DictationStoreTests {
         #expect(descendants == [child1, child2, grandchild])
     }
 
+    @Test("descendantFolderIDs excludes root folder in cyclic data")
+    func descendantFolderIDsExcludesRootInCycle() throws {
+        let store = try makeStore()
+
+        let folderA = try store.createFolder(name: "A")
+        let folderB = try store.createFolder(name: "B", parentID: folderA)
+        try setFolderParentRaw(folderID: folderA, parentID: folderB, store: store)
+
+        let descendants = try store.descendantFolderIDs(of: folderA)
+        #expect(descendants == [folderB])
+    }
+
     @Test("descendantFolderIDs of leaf folder returns empty set")
     func descendantFolderIDsLeafIsEmpty() throws {
         let store = try makeStore()
@@ -2241,6 +2253,37 @@ struct DictationStoreTests {
         #expect(counts.byFolder[parent] == 3) // 1 direct + 2 from child
         #expect(counts.directByFolder[parent] == 1)
         #expect(counts.directByFolder[child] == 2)
+    }
+
+    @Test("meetingCounts gives stable totals for cyclic folder data")
+    func meetingCountsCyclicFoldersAreStable() throws {
+        let store = try makeStore()
+        let now = Date()
+
+        let folderA = try store.createFolder(name: "A")
+        let folderB = try store.createFolder(name: "B", parentID: folderA)
+        try setFolderParentRaw(folderID: folderA, parentID: folderB, store: store)
+
+        try store.insertMeeting(
+            title: "A1", calendarEventID: nil, startTime: now,
+            endTime: now.addingTimeInterval(60), rawTranscript: "t", formattedNotes: "",
+            micAudioPath: nil, systemAudioPath: nil
+        )
+        try store.moveMeeting(id: try store.recentMeetings(limit: 1).first!.id, toFolder: folderA)
+
+        try store.insertMeeting(
+            title: "B1", calendarEventID: nil, startTime: now.addingTimeInterval(1),
+            endTime: now.addingTimeInterval(61), rawTranscript: "t", formattedNotes: "",
+            micAudioPath: nil, systemAudioPath: nil
+        )
+        try store.moveMeeting(id: try store.recentMeetings(limit: 1).first!.id, toFolder: folderB)
+
+        let counts = try store.meetingCounts()
+        #expect(counts.total == 2)
+        #expect(counts.byFolder[folderA] == 2)
+        #expect(counts.byFolder[folderB] == 2)
+        #expect(counts.directByFolder[folderA] == 1)
+        #expect(counts.directByFolder[folderB] == 1)
     }
 
     @Test("treeOrderedFolders produces depth-first order")
