@@ -250,6 +250,15 @@ final class MeetingCandidateResolver {
         "net.whatsapp.WhatsApp": ("WhatsApp", .whatsApp),
     ]
 
+    static let weakDedicatedAppBundleIDs: Set<String> = [
+        "com.tinyspeck.slackmacgap",
+        "net.whatsapp.WhatsApp",
+    ]
+
+    private static let calendarFullDuplexAudioRequiredBundleIDs: Set<String> = [
+        "com.tinyspeck.slackmacgap",
+    ]
+
     static let browserApps: [String: String] = [
         "com.google.Chrome": "Chrome",
         "com.brave.Browser": "Brave",
@@ -333,7 +342,7 @@ final class MeetingCandidateResolver {
                 )
             }
 
-            if let audioApp = bestMeetingAudioProcess(from: snapshot.audioInputProcesses) {
+            if let audioApp = bestCalendarMeetingAudioProcess(from: snapshot.audioInputProcesses) {
                 let appSessionID = appAudioSessionID(for: audioApp, now: snapshot.now)
                 return candidate(
                     id: "cal:\(calendarEvent.id)",
@@ -369,14 +378,15 @@ final class MeetingCandidateResolver {
                 )
             }
 
+            let app = bestCalendarApp(from: snapshot.runningApps)
             return candidate(
                 id: "cal:\(calendarEvent.id)",
-                platform: .unknown,
-                appName: "Meeting",
+                platform: app?.platform ?? .unknown,
+                appName: app?.name ?? "Meeting",
                 url: nil,
                 title: calendarEvent.title,
                 evidence: mediaEvidence(from: snapshot).union([.calendarEvent]),
-                sourceBundleID: nil,
+                sourceBundleID: app?.bundleID,
                 sourcePID: nil,
                 now: snapshot.now
             )
@@ -459,6 +469,41 @@ final class MeetingCandidateResolver {
         }.first
     }
 
+    private func bestCalendarApp(
+        from apps: [RunningAppInfo]
+    ) -> (bundleID: String, name: String, platform: MeetingCandidate.Platform)? {
+        // Calendar-backed prompts keep legacy app attribution; the stricter
+        // full-duplex gate is only for opportunistic no-calendar detection.
+        for app in apps.sorted(by: { $0.isActive && !$1.isActive }) where app.bundleID != selfBundleID {
+            guard let match = Self.dedicatedApps[app.bundleID] else { continue }
+            if Self.calendarFullDuplexAudioRequiredBundleIDs.contains(app.bundleID) { continue }
+            return (app.bundleID, match.name, match.platform)
+        }
+        return nil
+    }
+
+    private func bestCalendarMeetingAudioProcess(from processes: [AudioProcessActivity]) -> AudioProcessActivity? {
+        let candidates = processes.filter { process in
+            guard process.bundleID != selfBundleID else { return false }
+            guard process.isRunningInput else { return false }
+            guard Self.dedicatedApps[process.bundleID] != nil else { return false }
+            if !Self.weakDedicatedAppBundleIDs.contains(process.bundleID) {
+                return true
+            }
+            guard Self.calendarFullDuplexAudioRequiredBundleIDs.contains(process.bundleID) else {
+                return true
+            }
+            return process.isRunningOutput
+        }
+
+        return candidates.sorted { lhs, rhs in
+            let lhsWeak = Self.weakDedicatedAppBundleIDs.contains(lhs.bundleID)
+            let rhsWeak = Self.weakDedicatedAppBundleIDs.contains(rhs.bundleID)
+            if lhsWeak != rhsWeak { return !lhsWeak && rhsWeak }
+            return lhs.appName < rhs.appName
+        }.first
+    }
+
     private func bestMeetingAudioProcess(from processes: [AudioProcessActivity]) -> AudioProcessActivity? {
         let candidates = processes.filter { process in
             guard process.bundleID != selfBundleID else { return false }
@@ -468,6 +513,9 @@ final class MeetingCandidateResolver {
         }
 
         return candidates.sorted { lhs, rhs in
+            let lhsWeak = Self.weakDedicatedAppBundleIDs.contains(lhs.bundleID)
+            let rhsWeak = Self.weakDedicatedAppBundleIDs.contains(rhs.bundleID)
+            if lhsWeak != rhsWeak { return !lhsWeak && rhsWeak }
             return lhs.appName < rhs.appName
         }.first
     }

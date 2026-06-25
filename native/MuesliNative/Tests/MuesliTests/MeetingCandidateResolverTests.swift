@@ -552,6 +552,36 @@ struct MeetingCandidateResolverTests {
         }
     }
 
+    @Test("full-duplex audio prefers strong meeting app over chat app")
+    func fullDuplexAudioPrefersStrongMeetingAppOverChatApp() {
+        let candidate = resolver().resolve(snapshot(
+            micActive: false,
+            cameraActive: false,
+            audioInputProcesses: [
+                AudioProcessActivity(
+                    pid: 6789,
+                    bundleID: "com.tinyspeck.slackmacgap",
+                    appName: "Slack",
+                    isRunningInput: true,
+                    isRunningOutput: true
+                ),
+                AudioProcessActivity(
+                    pid: 4321,
+                    bundleID: "us.zoom.xos",
+                    appName: "Zoom",
+                    isRunningInput: true,
+                    isRunningOutput: true
+                ),
+            ],
+            foregroundBundleID: "com.apple.finder"
+        ))
+
+        #expect(candidate?.id == "app:us.zoom.xos:session:1800000000")
+        #expect(candidate?.platform == .zoom)
+        #expect(candidate?.appName == "Zoom")
+        #expect(candidate?.sourcePID == 4321)
+    }
+
     @Test("focused Meet URL is eligible before mic flips")
     func focusedMeetURLIsEligibleBeforeMicFlips() {
         let candidate = resolver().resolve(snapshot(
@@ -818,8 +848,8 @@ struct MeetingCandidateResolverTests {
         #expect(candidate?.sourceBundleID == nil)
     }
 
-    @Test("calendar fallback does not label Zoom without attributed full-duplex audio")
-    func calendarFallbackDoesNotLabelZoomWithoutFullDuplexAudio() {
+    @Test("calendar fallback preserves Zoom app attribution without full-duplex audio")
+    func calendarFallbackPreservesZoomAppAttributionWithoutFullDuplexAudio() {
         let candidate = resolver().resolve(snapshot(
             micActive: true,
             cameraActive: false,
@@ -831,10 +861,56 @@ struct MeetingCandidateResolverTests {
         ))
 
         #expect(candidate?.id == "cal:evt-zoom")
-        #expect(candidate?.platform == .unknown)
-        #expect(candidate?.appName == "Meeting")
+        #expect(candidate?.platform == .zoom)
+        #expect(candidate?.appName == "Zoom")
         #expect(candidate?.meetingTitle == "Team sync")
-        #expect(candidate?.sourceBundleID == nil)
+        #expect(candidate?.sourceBundleID == "us.zoom.xos")
+    }
+
+    @Test("calendar fallback preserves Zoom app attribution when camera is active")
+    func calendarFallbackPreservesZoomAppAttributionWhenCameraIsActive() {
+        let candidate = resolver().resolve(snapshot(
+            micActive: true,
+            cameraActive: true,
+            calendarEvent: CalendarEventContext(id: "evt-zoom", title: "Team sync"),
+            runningApps: [
+                RunningAppInfo(bundleID: "us.zoom.xos", isActive: true),
+            ],
+            foregroundBundleID: "us.zoom.xos"
+        ))
+
+        #expect(candidate?.id == "cal:evt-zoom")
+        #expect(candidate?.platform == .zoom)
+        #expect(candidate?.appName == "Zoom")
+        #expect(candidate?.meetingTitle == "Team sync")
+        #expect(candidate?.sourceBundleID == "us.zoom.xos")
+        #expect(candidate?.evidence.contains(.calendarEvent) == true)
+    }
+
+    @Test("calendar audio accepts Zoom input-only attribution")
+    func calendarAudioAcceptsZoomInputOnlyAttribution() {
+        let candidate = resolver().resolve(snapshot(
+            micActive: false,
+            cameraActive: false,
+            calendarEvent: CalendarEventContext(id: "evt-zoom", title: "Team sync"),
+            audioInputProcesses: [
+                AudioProcessActivity(
+                    pid: 4321,
+                    bundleID: "us.zoom.xos",
+                    appName: "Zoom",
+                    isRunningInput: true,
+                    isRunningOutput: false
+                ),
+            ],
+            foregroundBundleID: "us.zoom.xos"
+        ))
+
+        #expect(candidate?.id == "cal:evt-zoom")
+        #expect(candidate?.platform == .zoom)
+        #expect(candidate?.appName == "Zoom")
+        #expect(candidate?.meetingTitle == "Team sync")
+        #expect(candidate?.sourceBundleID == "us.zoom.xos")
+        #expect(candidate?.sourcePID == 4321)
     }
 
     @Test("calendar audio candidate suppresses by app audio session")
