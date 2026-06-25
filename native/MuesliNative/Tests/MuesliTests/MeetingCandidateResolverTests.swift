@@ -818,6 +818,25 @@ struct MeetingCandidateResolverTests {
         #expect(candidate?.sourceBundleID == nil)
     }
 
+    @Test("calendar fallback does not label Zoom without attributed full-duplex audio")
+    func calendarFallbackDoesNotLabelZoomWithoutFullDuplexAudio() {
+        let candidate = resolver().resolve(snapshot(
+            micActive: true,
+            cameraActive: false,
+            calendarEvent: CalendarEventContext(id: "evt-zoom", title: "Team sync"),
+            runningApps: [
+                RunningAppInfo(bundleID: "us.zoom.xos", isActive: true),
+            ],
+            foregroundBundleID: "us.zoom.xos"
+        ))
+
+        #expect(candidate?.id == "cal:evt-zoom")
+        #expect(candidate?.platform == .unknown)
+        #expect(candidate?.appName == "Meeting")
+        #expect(candidate?.meetingTitle == "Team sync")
+        #expect(candidate?.sourceBundleID == nil)
+    }
+
     @Test("calendar audio candidate suppresses by app audio session")
     func calendarAudioCandidateSuppressesByAppAudioSession() {
         let candidate = resolver().resolve(snapshot(
