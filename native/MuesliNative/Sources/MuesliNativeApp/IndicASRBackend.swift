@@ -1,0 +1,876 @@
+import Accelerate
+import CoreML
+import FluidAudio
+import Foundation
+
+enum IndicASRLanguage: String, CaseIterable, Codable, Sendable {
+    case hindi = "hi"
+    case bengali = "bn"
+    case marathi = "mr"
+    case telugu = "te"
+    case tamil = "ta"
+    case malayalam = "ml"
+    case kannada = "kn"
+
+    static let defaultLanguage: Self = .hindi
+
+    var label: String {
+        switch self {
+        case .hindi: return "Hindi"
+        case .bengali: return "Bengali"
+        case .marathi: return "Marathi"
+        case .telugu: return "Telugu"
+        case .tamil: return "Tamil"
+        case .malayalam: return "Malayalam"
+        case .kannada: return "Kannada"
+        }
+    }
+
+    var jointPostNetPackage: String {
+        "indic_conformer_joint_post_net_\(rawValue).mlpackage"
+    }
+
+    static func resolved(_ rawValue: String?) -> Self {
+        let normalized = rawValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard let normalized, let language = Self(rawValue: normalized) else {
+            return defaultLanguage
+        }
+        return language
+    }
+
+    static func resolvedCode(_ rawValue: String?) -> String {
+        resolved(rawValue).rawValue
+    }
+}
+
+private enum IndicASRConfig {
+    static let repoId = "phequals/indic-conformer-600m-multilingual-coreml-rnnt"
+    static let envOverride = "MUESLI_INDIC_ASR_MODEL_DIR"
+
+    static let encoderPackage = "indic_conformer_encoder_int8.mlpackage"
+    static let rnntDecoderPackage = "indic_conformer_rnnt_decoder_reconstructed.mlpackage"
+    static let jointEncPackage = "indic_conformer_joint_enc.mlpackage"
+    static let jointPredPackage = "indic_conformer_joint_pred.mlpackage"
+    static let jointPreNetPackage = "indic_conformer_joint_pre_net.mlpackage"
+    static let vocabFile = "vocab.json"
+    static let languageMasksFile = "language_masks.json"
+    static let configFile = "config.json"
+    static let preprocessorConstantsFile = "preprocessor_constants.bin"
+
+    static let sampleRate = 16_000
+    static let nFFT = 512
+    static let hopLength = 160
+    static let winLength = 400
+    static let nMels = 80
+    static let melFrames = 1_024
+    static let encoderDim = 1_024
+    static let predHiddenDim = 640
+    static let predLayers = 2
+    static let blankId = 256
+    static let sosId = 5_632
+    static let rnntMaxSymbols = 10
+    static let chunkSeconds = 10.0
+    static let overlapSeconds = 1.0
+
+    static let requiredSharedPackages = [
+        encoderPackage,
+        rnntDecoderPackage,
+        jointEncPackage,
+        jointPredPackage,
+        jointPreNetPackage,
+    ]
+
+    static let requiredLanguagePackages = IndicASRLanguage.allCases.map(\.jointPostNetPackage)
+    static let requiredMetadataFiles = [vocabFile, languageMasksFile, configFile, preprocessorConstantsFile]
+
+    static func packageRelativeDirectory(_ packageName: String) -> String {
+        if packageName == encoderPackage {
+            return "coreml/encoder/\(packageName)"
+        }
+        return "coreml/rnnt/\(packageName)"
+    }
+
+    static func metadataRelativePath(_ fileName: String) -> String {
+        "metadata/\(fileName)"
+    }
+
+    static var defaultCacheDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/muesli/models", isDirectory: true)
+            .appendingPathComponent("indic-conformer-rnnt-coreml", isDirectory: true)
+    }
+}
+
+private struct IndicASRModelLayout {
+    let root: URL
+    let encoderDirectory: URL
+    let rnntDirectory: URL
+    let metadataDirectory: URL
+
+    func packageURL(_ packageName: String) -> URL {
+        if packageName == IndicASRConfig.encoderPackage {
+            return encoderDirectory.appendingPathComponent(packageName, isDirectory: true)
+        }
+        return rnntDirectory.appendingPathComponent(packageName, isDirectory: true)
+    }
+
+    func compiledURL(_ packageName: String) -> URL {
+        packageURL(packageName)
+            .deletingLastPathComponent()
+            .appendingPathComponent(packageName.replacingOccurrences(of: ".mlpackage", with: ".mlmodelc"), isDirectory: true)
+    }
+
+    func metadataURL(_ fileName: String) -> URL {
+        metadataDirectory.appendingPathComponent(fileName, isDirectory: false)
+    }
+}
+
+enum IndicASRModelStore {
+    static func isAvailableLocally() -> Bool {
+        if let overrideDir = localOverrideDirectory(), let layout = layout(at: overrideDir), modelsExist(in: layout) {
+            return true
+        }
+        guard let layout = layout(at: cacheDirectory()) else { return false }
+        return modelsExist(in: layout)
+    }
+
+    fileprivate static func resolvedLayout(progress: ((Double, String?) -> Void)? = nil) async throws -> IndicASRModelLayout {
+        if let overrideDir = localOverrideDirectory(), let layout = layout(at: overrideDir), modelsExist(in: layout) {
+            progress?(1.0, "Using local Indic ASR model override")
+            return layout
+        }
+
+        let target = cacheDirectory()
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        if let layout = layout(at: target), modelsExist(in: layout) {
+            progress?(1.0, "Indic ASR already available")
+            return layout
+        }
+
+        try await downloadMissingFiles(to: target, progress: progress)
+        if let layout = layout(at: target), modelsExist(in: layout) {
+            return layout
+        }
+
+        throw NSError(domain: "IndicASR", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "Indic ASR CoreML artifacts are not installed correctly. Retry the download or set \(IndicASRConfig.envOverride) to a directory containing the CoreML packages.",
+        ])
+    }
+
+    static func cacheDirectory() -> URL {
+        IndicASRConfig.defaultCacheDirectory
+    }
+
+    static func localOverrideDirectory() -> URL? {
+        if let raw = ProcessInfo.processInfo.environment[IndicASRConfig.envOverride], !raw.isEmpty {
+            return URL(fileURLWithPath: raw, isDirectory: true)
+        }
+        return nil
+    }
+
+    private static func layout(at directory: URL) -> IndicASRModelLayout? {
+        let fm = FileManager.default
+        let directEncoder = directory.appendingPathComponent(IndicASRConfig.encoderPackage, isDirectory: true)
+        let directDecoder = directory.appendingPathComponent(IndicASRConfig.rnntDecoderPackage, isDirectory: true)
+        if fm.fileExists(atPath: directEncoder.path), fm.fileExists(atPath: directDecoder.path) {
+            return IndicASRModelLayout(root: directory, encoderDirectory: directory, rnntDirectory: directory, metadataDirectory: directory)
+        }
+
+        let hfEncoder = directory.appendingPathComponent("coreml/encoder", isDirectory: true)
+        let hfRNNT = directory.appendingPathComponent("coreml/rnnt", isDirectory: true)
+        let hfMetadata = directory.appendingPathComponent("metadata", isDirectory: true)
+        if fm.fileExists(atPath: hfEncoder.appendingPathComponent(IndicASRConfig.encoderPackage).path),
+           fm.fileExists(atPath: hfRNNT.appendingPathComponent(IndicASRConfig.rnntDecoderPackage).path) {
+            return IndicASRModelLayout(root: directory, encoderDirectory: hfEncoder, rnntDirectory: hfRNNT, metadataDirectory: hfMetadata)
+        }
+
+        let splitEncoder = directory.appendingPathComponent("20260526-182651-convert", isDirectory: true)
+        let splitRNNT = directory.appendingPathComponent("jarvis-rnnt-coreml", isDirectory: true)
+        let splitMetadata = directory.appendingPathComponent("metadata", isDirectory: true)
+        if fm.fileExists(atPath: splitEncoder.appendingPathComponent(IndicASRConfig.encoderPackage).path),
+           fm.fileExists(atPath: splitRNNT.appendingPathComponent(IndicASRConfig.rnntDecoderPackage).path) {
+            return IndicASRModelLayout(root: directory, encoderDirectory: splitEncoder, rnntDirectory: splitRNNT, metadataDirectory: splitMetadata)
+        }
+
+        return nil
+    }
+
+    private static func modelsExist(in layout: IndicASRModelLayout) -> Bool {
+        let fm = FileManager.default
+        let packages = IndicASRConfig.requiredSharedPackages + IndicASRConfig.requiredLanguagePackages
+        let hasPackages = packages.allSatisfy { packageName in
+            let packageURL = layout.packageURL(packageName)
+            let compiledURL = layout.compiledURL(packageName)
+            let compiledData = compiledURL.appendingPathComponent("coremldata.bin")
+            return fm.fileExists(atPath: packageURL.path) || fm.fileExists(atPath: compiledData.path)
+        }
+        let hasMetadata = IndicASRConfig.requiredMetadataFiles.allSatisfy { fileName in
+            fm.fileExists(atPath: layout.metadataURL(fileName).path)
+        }
+        return hasPackages && hasMetadata
+    }
+
+    private static func remoteURL(for relativePath: String) -> URL {
+        var url = URL(string: "https://huggingface.co/\(IndicASRConfig.repoId)/resolve/main")!
+        for component in relativePath.split(separator: "/") {
+            url.appendPathComponent(String(component), isDirectory: false)
+        }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "download", value: "1")]
+        return components.url!
+    }
+
+    private static func downloadMissingFiles(to directory: URL, progress: ((Double, String?) -> Void)?) async throws {
+        let fm = FileManager.default
+        let packages = IndicASRConfig.requiredSharedPackages + IndicASRConfig.requiredLanguagePackages
+        let packageFiles = packages.flatMap { packageName in
+            let packageDirectory = IndicASRConfig.packageRelativeDirectory(packageName)
+            return [
+                "\(packageDirectory)/Manifest.json",
+                "\(packageDirectory)/Data/com.apple.CoreML/model.mlmodel",
+            ]
+        }
+        let metadataFiles = IndicASRConfig.requiredMetadataFiles.map(IndicASRConfig.metadataRelativePath)
+        let required = packageFiles + metadataFiles
+        let missing = required.filter { relativePath in
+            if let packageName = packages.first(where: { relativePath.hasPrefix("\(IndicASRConfig.packageRelativeDirectory($0))/") }) {
+                let compiledDirectory = directory
+                    .appendingPathComponent(IndicASRConfig.packageRelativeDirectory(packageName))
+                    .deletingLastPathComponent()
+                    .appendingPathComponent(packageName.replacingOccurrences(of: ".mlpackage", with: ".mlmodelc"), isDirectory: true)
+                if fm.fileExists(atPath: compiledDirectory.appendingPathComponent("coremldata.bin").path) {
+                    return false
+                }
+            }
+            return !fm.fileExists(atPath: directory.appendingPathComponent(relativePath).path)
+        }
+
+        let total = max(missing.count, 1)
+        for (index, relativePath) in missing.enumerated() {
+            progress?(Double(index) / Double(total), "Downloading Indic ASR...")
+            let destination = directory.appendingPathComponent(relativePath)
+            try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try await downloadWithRetry(from: remoteURL(for: relativePath), to: destination)
+        }
+        progress?(1.0, "Indic ASR download complete")
+    }
+}
+
+private final class IndicASRTokenizer {
+    private let vocab: [IndicASRLanguage: [String]]
+
+    init(vocabURL: URL) throws {
+        let data = try Data(contentsOf: vocabURL)
+        let raw = try JSONDecoder().decode([String: [String]].self, from: data)
+        var parsed: [IndicASRLanguage: [String]] = [:]
+        for language in IndicASRLanguage.allCases {
+            guard let tokens = raw[language.rawValue], tokens.count > IndicASRConfig.blankId else {
+                throw NSError(domain: "IndicASR", code: 20, userInfo: [
+                    NSLocalizedDescriptionKey: "Indic ASR vocab is missing \(language.rawValue) tokens.",
+                ])
+            }
+            parsed[language] = tokens
+        }
+        self.vocab = parsed
+    }
+
+    func decode(_ tokenIds: [Int], language: IndicASRLanguage) -> String {
+        guard let tokens = vocab[language] else { return "" }
+        let pieces = tokenIds.compactMap { tokenId -> String? in
+            guard tokenId != IndicASRConfig.blankId, tokenId >= 0, tokenId < tokens.count else {
+                return nil
+            }
+            return tokens[tokenId]
+        }
+        return pieces.joined()
+            .replacingOccurrences(of: "\u{2581}", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private final class IndicASRMelSpectrogram {
+    private struct PreprocessorConstants {
+        let nFFT: Int
+        let winLength: Int
+        let nBins: Int
+        let nMels: Int
+        let preemphasis: Float
+        let logZeroGuard: Float
+        let normGuard: Float
+        let window: [Float]
+        let filterBank: [Float]
+
+        static func load(from url: URL) throws -> PreprocessorConstants {
+            let data = try Data(contentsOf: url)
+            let headerSize = 8 + 4 * MemoryLayout<Int32>.stride + 3 * MemoryLayout<Float>.stride
+            guard data.count >= headerSize else {
+                throw NSError(domain: "IndicASR", code: 22, userInfo: [
+                    NSLocalizedDescriptionKey: "Indic ASR preprocessor constants file is truncated.",
+                ])
+            }
+            guard String(data: data[0..<8], encoding: .ascii) == "IASRPC01" else {
+                throw NSError(domain: "IndicASR", code: 23, userInfo: [
+                    NSLocalizedDescriptionKey: "Indic ASR preprocessor constants file has an unsupported format.",
+                ])
+            }
+
+            func int32(at offset: Int) -> Int {
+                Int(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: Int32.self) }.littleEndian)
+            }
+            func float32(at offset: Int) -> Float {
+                data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: Float.self) }
+            }
+
+            let nFFT = int32(at: 8)
+            let winLength = int32(at: 12)
+            let nBins = int32(at: 16)
+            let nMels = int32(at: 20)
+            let preemphasis = float32(at: 24)
+            let logZeroGuard = float32(at: 28)
+            let normGuard = float32(at: 32)
+            let expectedFloatCount = winLength + nMels * nBins
+            let expectedSize = headerSize + expectedFloatCount * MemoryLayout<Float>.stride
+            guard nFFT == IndicASRConfig.nFFT,
+                  winLength == IndicASRConfig.winLength,
+                  nBins == IndicASRConfig.nFFT / 2 + 1,
+                  nMels == IndicASRConfig.nMels,
+                  data.count == expectedSize else {
+                throw NSError(domain: "IndicASR", code: 24, userInfo: [
+                    NSLocalizedDescriptionKey: "Indic ASR preprocessor constants do not match the expected model shape.",
+                ])
+            }
+
+            var values = [Float](repeating: 0, count: expectedFloatCount)
+            _ = values.withUnsafeMutableBytes { destination in
+                data.copyBytes(to: destination, from: headerSize..<expectedSize)
+            }
+            return PreprocessorConstants(
+                nFFT: nFFT,
+                winLength: winLength,
+                nBins: nBins,
+                nMels: nMels,
+                preemphasis: preemphasis,
+                logZeroGuard: logZeroGuard,
+                normGuard: normGuard,
+                window: Array(values[0..<winLength]),
+                filterBank: Array(values[winLength..<values.count])
+            )
+        }
+    }
+
+    private let filterBank: [Float]
+    private let window: [Float]
+    private let preemphasis: Float
+    private let logZeroGuard: Float
+    private let normGuard: Float
+    private let fftSetup: FFTSetup
+    private let fftLog2n: vDSP_Length
+    private let nBins = IndicASRConfig.nFFT / 2 + 1
+
+    init(constantsURL: URL) throws {
+        let constants = try PreprocessorConstants.load(from: constantsURL)
+        self.filterBank = constants.filterBank
+        self.window = constants.window
+        self.preemphasis = constants.preemphasis
+        self.logZeroGuard = constants.logZeroGuard
+        self.normGuard = constants.normGuard
+        let log2n = vDSP_Length(log2(Double(IndicASRConfig.nFFT)))
+        self.fftLog2n = log2n
+        guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            throw NSError(domain: "IndicASR", code: 21, userInfo: [
+                NSLocalizedDescriptionKey: "Failed to create Indic ASR FFT setup.",
+            ])
+        }
+        self.fftSetup = setup
+    }
+
+    deinit {
+        vDSP_destroy_fftsetup(fftSetup)
+    }
+
+    func compute(audio: [Float]) -> (mel: [Float], realFrameCount: Int) {
+        guard !audio.isEmpty else {
+            return ([Float](repeating: 0, count: IndicASRConfig.nMels * IndicASRConfig.melFrames), 0)
+        }
+
+        let nFFT = IndicASRConfig.nFFT
+        let winLength = IndicASRConfig.winLength
+        let hop = IndicASRConfig.hopLength
+        let nMels = IndicASRConfig.nMels
+        let melFrames = IndicASRConfig.melFrames
+        let halfN = nFFT / 2
+        let pad = nFFT / 2
+        let windowOffset = (nFFT - winLength) / 2
+
+        let emphasized = Self.preemphasize(audio, coefficient: preemphasis)
+        let padded = Self.reflectPad(emphasized, left: pad, right: pad)
+        guard padded.count >= nFFT else {
+            return ([Float](repeating: 0, count: nMels * melFrames), 0)
+        }
+
+        let frameCount = 1 + (padded.count - nFFT) / hop
+        let realFrameCount = min(frameCount, melFrames)
+        if realFrameCount == 0 {
+            return ([Float](repeating: 0, count: nMels * melFrames), 0)
+        }
+
+        var frame = [Float](repeating: 0, count: nFFT)
+        var realPart = [Float](repeating: 0, count: halfN)
+        var imagPart = [Float](repeating: 0, count: halfN)
+        var powerSpec = [Float](repeating: 0, count: realFrameCount * nBins)
+        var reSq = [Float](repeating: 0, count: halfN - 1)
+        var imSq = [Float](repeating: 0, count: halfN - 1)
+
+        padded.withUnsafeBufferPointer { paddedBuffer in
+            for frameIndex in 0..<realFrameCount {
+                let start = frameIndex * hop
+                frame.withUnsafeMutableBufferPointer { frameBuffer in
+                    vDSP_vclr(frameBuffer.baseAddress!, 1, vDSP_Length(nFFT))
+                    vDSP_vmul(
+                        paddedBuffer.baseAddress! + start + windowOffset, 1,
+                        window, 1,
+                        frameBuffer.baseAddress! + windowOffset, 1,
+                        vDSP_Length(winLength)
+                    )
+                }
+
+                realPart.withUnsafeMutableBufferPointer { realBuffer in
+                    imagPart.withUnsafeMutableBufferPointer { imagBuffer in
+                        var split = DSPSplitComplex(realp: realBuffer.baseAddress!, imagp: imagBuffer.baseAddress!)
+                        frame.withUnsafeBufferPointer { frameBuffer in
+                            frameBuffer.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfN) { complexPtr in
+                                vDSP_ctoz(complexPtr, 2, &split, 1, vDSP_Length(halfN))
+                            }
+                        }
+                        vDSP_fft_zrip(fftSetup, &split, 1, fftLog2n, FFTDirection(kFFTDirection_Forward))
+                        powerSpec.withUnsafeMutableBufferPointer { powerBuffer in
+                            let destination = powerBuffer.baseAddress! + frameIndex * nBins
+                            destination[0] = realBuffer[0] * realBuffer[0]
+                            destination[halfN] = imagBuffer[0] * imagBuffer[0]
+                            vDSP_vsq(realBuffer.baseAddress! + 1, 1, &reSq, 1, vDSP_Length(halfN - 1))
+                            vDSP_vsq(imagBuffer.baseAddress! + 1, 1, &imSq, 1, vDSP_Length(halfN - 1))
+                            vDSP_vadd(reSq, 1, imSq, 1, destination + 1, 1, vDSP_Length(halfN - 1))
+                        }
+                    }
+                }
+            }
+        }
+
+        var powerSpecT = [Float](repeating: 0, count: nBins * realFrameCount)
+        vDSP_mtrans(powerSpec, 1, &powerSpecT, 1, vDSP_Length(nBins), vDSP_Length(realFrameCount))
+
+        var melRaw = [Float](repeating: 0, count: nMels * realFrameCount)
+        vDSP_mmul(filterBank, 1, powerSpecT, 1, &melRaw, 1,
+                  vDSP_Length(nMels), vDSP_Length(realFrameCount), vDSP_Length(nBins))
+
+        var guardValue = logZeroGuard
+        var logMel = [Float](repeating: 0, count: nMels * realFrameCount)
+        vDSP_vsadd(melRaw, 1, &guardValue, &logMel, 1, vDSP_Length(logMel.count))
+        var vectorLength = Int32(logMel.count)
+        vvlogf(&logMel, logMel, &vectorLength)
+
+        var normalized = [Float](repeating: 0, count: nMels * melFrames)
+        let realFrameVLength = vDSP_Length(realFrameCount)
+        let invNm1 = 1.0 / Float(max(realFrameCount - 1, 1))
+        for melIndex in 0..<nMels {
+            let sourceOffset = melIndex * realFrameCount
+            let destinationOffset = melIndex * melFrames
+            var mean: Float = 0
+            logMel.withUnsafeBufferPointer { buffer in
+                vDSP_meanv(buffer.baseAddress! + sourceOffset, 1, &mean, realFrameVLength)
+            }
+            var negMean = -mean
+            var centered = [Float](repeating: 0, count: realFrameCount)
+            logMel.withUnsafeBufferPointer { buffer in
+                vDSP_vsadd(buffer.baseAddress! + sourceOffset, 1, &negMean, &centered, 1, realFrameVLength)
+            }
+            var sumSq: Float = 0
+            vDSP_dotpr(centered, 1, centered, 1, &sumSq, realFrameVLength)
+            let std = sqrtf(max(sumSq * invNm1, logZeroGuard)) + normGuard
+            var invStd = 1.0 / std
+            normalized.withUnsafeMutableBufferPointer { buffer in
+                vDSP_vsmul(centered, 1, &invStd, buffer.baseAddress! + destinationOffset, 1, realFrameVLength)
+            }
+        }
+
+        return (normalized, realFrameCount)
+    }
+
+    private static func preemphasize(_ audio: [Float], coefficient: Float) -> [Float] {
+        var emphasized = [Float](repeating: 0, count: audio.count)
+        guard !audio.isEmpty else { return emphasized }
+        emphasized[0] = audio[0]
+        if audio.count > 1 {
+            for index in 1..<audio.count {
+                emphasized[index] = audio[index] - coefficient * audio[index - 1]
+            }
+        }
+        return emphasized
+    }
+
+    private static func reflectPad(_ input: [Float], left: Int, right: Int) -> [Float] {
+        guard input.count > 1 else {
+            let value = input.first ?? 0
+            return [Float](repeating: value, count: left + input.count + right)
+        }
+        var padded = [Float](repeating: 0, count: left + input.count + right)
+        for index in 0..<left {
+            padded[index] = input[reflectIndex(left - index, count: input.count)]
+        }
+        for index in 0..<input.count {
+            padded[left + index] = input[index]
+        }
+        for index in 0..<right {
+            padded[left + input.count + index] = input[reflectIndex(input.count - 2 - index, count: input.count)]
+        }
+        return padded
+    }
+
+    private static func reflectIndex(_ rawIndex: Int, count: Int) -> Int {
+        guard count > 1 else { return 0 }
+        let period = 2 * count - 2
+        var index = rawIndex % period
+        if index < 0 { index += period }
+        if index >= count {
+            index = period - index
+        }
+        return index
+    }
+}
+
+@available(macOS 15, *)
+private struct IndicASRModels {
+    let encoder: MLModel
+    let decoder: MLModel
+    let jointEnc: MLModel
+    let jointPred: MLModel
+    let jointPreNet: MLModel
+    let jointPostNets: [IndicASRLanguage: MLModel]
+    let tokenizer: IndicASRTokenizer
+    let melExtractor: IndicASRMelSpectrogram
+
+    static func load(from layout: IndicASRModelLayout, computeUnits: MLComputeUnits = .all) async throws -> IndicASRModels {
+        let config = MLModelConfiguration()
+        config.computeUnits = computeUnits
+
+        var postNets: [IndicASRLanguage: MLModel] = [:]
+        for language in IndicASRLanguage.allCases {
+            postNets[language] = try await loadModel(packageName: language.jointPostNetPackage, from: layout, configuration: config)
+        }
+
+        return IndicASRModels(
+            encoder: try await loadModel(packageName: IndicASRConfig.encoderPackage, from: layout, configuration: config),
+            decoder: try await loadModel(packageName: IndicASRConfig.rnntDecoderPackage, from: layout, configuration: config),
+            jointEnc: try await loadModel(packageName: IndicASRConfig.jointEncPackage, from: layout, configuration: config),
+            jointPred: try await loadModel(packageName: IndicASRConfig.jointPredPackage, from: layout, configuration: config),
+            jointPreNet: try await loadModel(packageName: IndicASRConfig.jointPreNetPackage, from: layout, configuration: config),
+            jointPostNets: postNets,
+            tokenizer: try IndicASRTokenizer(vocabURL: layout.metadataURL(IndicASRConfig.vocabFile)),
+            melExtractor: try IndicASRMelSpectrogram(constantsURL: layout.metadataURL(IndicASRConfig.preprocessorConstantsFile))
+        )
+    }
+
+    private static func loadModel(packageName: String, from layout: IndicASRModelLayout, configuration: MLModelConfiguration) async throws -> MLModel {
+        let packageURL = layout.packageURL(packageName)
+        let compiledURL = layout.compiledURL(packageName)
+
+        let modelURL: URL
+        if FileManager.default.fileExists(atPath: compiledURL.path) {
+            modelURL = compiledURL
+        } else {
+            let compiledTemp = try await MLModel.compileModel(at: packageURL)
+            try? FileManager.default.removeItem(at: compiledURL)
+            try FileManager.default.copyItem(at: compiledTemp, to: compiledURL)
+            try? FileManager.default.removeItem(at: compiledTemp)
+            modelURL = compiledURL
+        }
+
+        return try await MLModel.load(contentsOf: modelURL, configuration: configuration)
+    }
+}
+
+@available(macOS 15, *)
+actor IndicASRTranscriber {
+    private var models: IndicASRModels?
+    private var loadTask: Task<IndicASRModels, Error>?
+
+    func loadModels(progress: ((Double, String?) -> Void)? = nil) async throws {
+        if models != nil { return }
+        if let loadTask {
+            models = try await loadTask.value
+            return
+        }
+
+        let task = Task<IndicASRModels, Error> {
+            progress?(0.05, "Loading Indic ASR CoreML artifacts...")
+            let layout = try await IndicASRModelStore.resolvedLayout(progress: progress)
+            let loaded = try await IndicASRModels.load(from: layout)
+            progress?(1.0, "Indic ASR loaded")
+            return loaded
+        }
+
+        loadTask = task
+        do {
+            models = try await task.value
+            loadTask = nil
+        } catch {
+            loadTask = nil
+            throw error
+        }
+    }
+
+    func prepare(progress: ((Double, String?) -> Void)? = nil) async throws {
+        try await loadModels(progress: progress)
+    }
+
+    func transcribe(
+        wavURL: URL,
+        language: IndicASRLanguage = IndicASRLanguage.defaultLanguage
+    ) async throws -> (text: String, processingTime: Double) {
+        try await loadModels()
+        guard let models else {
+            throw NSError(domain: "IndicASR", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Indic ASR models are not loaded.",
+            ])
+        }
+
+        let start = CFAbsoluteTimeGetCurrent()
+        let samples = try AudioConverter().resampleAudioFile(wavURL)
+        let text = try await IndicASRRNNTGreedyDecoder(models: models).transcribe(audioSamples: samples, language: language)
+        return (text, CFAbsoluteTimeGetCurrent() - start)
+    }
+
+    func shutdown() {
+        loadTask?.cancel()
+        loadTask = nil
+        models = nil
+    }
+}
+
+@available(macOS 15, *)
+private struct IndicASRRNNTGreedyDecoder {
+    let models: IndicASRModels
+
+    func transcribe(audioSamples: [Float], language: IndicASRLanguage) async throws -> String {
+        let sampleRate = IndicASRConfig.sampleRate
+        let chunkSize = max(1, Int(IndicASRConfig.chunkSeconds * Double(sampleRate)))
+        let stepSize = max(1, Int((IndicASRConfig.chunkSeconds - IndicASRConfig.overlapSeconds) * Double(sampleRate)))
+        var transcripts: [String] = []
+        var start = 0
+
+        while start < audioSamples.count {
+            let end = min(start + chunkSize, audioSamples.count)
+            let chunk = Array(audioSamples[start..<end])
+            let chunkText = try await transcribeChunk(audioSamples: chunk, language: language)
+            if !chunkText.isEmpty {
+                transcripts.append(chunkText)
+            }
+            if end == audioSamples.count { break }
+            start += stepSize
+        }
+
+        return transcripts.joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func transcribeChunk(audioSamples: [Float], language: IndicASRLanguage) async throws -> String {
+        guard let jointPostNet = models.jointPostNets[language] else {
+            throw NSError(domain: "IndicASR", code: 30, userInfo: [
+                NSLocalizedDescriptionKey: "Missing Indic ASR joint post-net for \(language.label).",
+            ])
+        }
+
+        let mel = models.melExtractor.compute(audio: audioSamples)
+        fputs("[indicasr] mel frames=\(mel.realFrameCount), samples=\(audioSamples.count)\n", stderr)
+        let melArray = try makeFloatArray(shape: [1, IndicASRConfig.nMels, IndicASRConfig.melFrames], values: mel.mel)
+        let lengthArray = try MLMultiArray(shape: [1], dataType: .int32)
+        lengthArray[0] = NSNumber(value: Int32(mel.realFrameCount))
+
+        let encoderInput = try MLDictionaryFeatureProvider(dictionary: [
+            "audio_signal": MLFeatureValue(multiArray: melArray),
+            "length": MLFeatureValue(multiArray: lengthArray),
+        ])
+        let encoderOutput = try await models.encoder.prediction(from: encoderInput)
+        guard let encoded = encoderOutput.featureValue(for: "outputs")?.multiArrayValue,
+              let encodedLengths = encoderOutput.featureValue(for: "encoded_lengths")?.multiArrayValue else {
+            throw NSError(domain: "IndicASR", code: 31, userInfo: [
+                NSLocalizedDescriptionKey: "Indic ASR encoder did not return outputs.",
+            ])
+        }
+
+        let encodedFrameCount = min(max(encodedLengths[0].intValue, 0), IndicASRConfig.melFrames)
+        fputs("[indicasr] encoded frames=\(encodedFrameCount), encoded shape=\(encoded.shape)\n", stderr)
+        guard encodedFrameCount > 0 else { return "" }
+
+        var hState = try zeroFloatArray(shape: [IndicASRConfig.predLayers, 1, IndicASRConfig.predHiddenDim])
+        var cState = try zeroFloatArray(shape: [IndicASRConfig.predLayers, 1, IndicASRConfig.predHiddenDim])
+        var previousToken = IndicASRConfig.sosId
+        var tokenIds: [Int] = []
+
+        for frameIndex in 0..<encodedFrameCount {
+            if frameIndex > 0 && frameIndex % 10 == 0 { await Task.yield() }
+            if frameIndex > 0 && frameIndex % 100 == 0 {
+                fputs("[indicasr] decoded frame \(frameIndex)/\(encodedFrameCount), tokens=\(tokenIds.count)\n", stderr)
+            }
+            let encFrame = try await runJointEncFrame(encoded: encoded, frameIndex: frameIndex)
+
+            for _ in 0..<IndicASRConfig.rnntMaxSymbols {
+                let decoderResult = try await runDecoder(previousToken: previousToken, hState: hState, cState: cState)
+                let predFrame = try await runJointPred(decoderResult.outputs)
+                let jointInput = try addArrays(encFrame, predFrame, shape: [1, 1, IndicASRConfig.predHiddenDim])
+                let preNetOutput = try await predict(
+                    model: models.jointPreNet,
+                    inputName: "input",
+                    input: jointInput,
+                    outputName: "output"
+                )
+                let logits = try await predict(
+                    model: jointPostNet,
+                    inputName: "input",
+                    input: preNetOutput,
+                    outputName: "output"
+                )
+                let predicted = argmax(logits, count: IndicASRConfig.blankId + 1)
+                if predicted == IndicASRConfig.blankId {
+                    break
+                }
+
+                tokenIds.append(predicted)
+                previousToken = predicted
+                hState = try copyAsFloat32(decoderResult.hState)
+                cState = try copyAsFloat32(decoderResult.cState)
+            }
+        }
+
+        let text = models.tokenizer.decode(tokenIds, language: language)
+        fputs("[indicasr] decoded tokens=\(tokenIds.count), text chars=\(text.count)\n", stderr)
+        return text
+    }
+
+    private func runJointEncFrame(encoded: MLMultiArray, frameIndex: Int) async throws -> MLMultiArray {
+        let input = try MLMultiArray(shape: [1, 1, NSNumber(value: IndicASRConfig.encoderDim)], dataType: .float32)
+        let ptr = input.dataPointer.bindMemory(to: Float.self, capacity: IndicASRConfig.encoderDim)
+        let encodedStrides = encoded.strides.map(\.intValue)
+        for dim in 0..<IndicASRConfig.encoderDim {
+            let sourceOffset = encodedStrides[1] * dim + encodedStrides[2] * frameIndex
+            ptr[dim] = floatValue(encoded, offset: sourceOffset)
+        }
+        return try await predict(model: models.jointEnc, inputName: "input", input: input, outputName: "output")
+    }
+
+    private func runDecoder(previousToken: Int, hState: MLMultiArray, cState: MLMultiArray) async throws -> (outputs: MLMultiArray, hState: MLMultiArray, cState: MLMultiArray) {
+        let tokenArray = try MLMultiArray(shape: [1, 1], dataType: .int32)
+        tokenArray[0] = NSNumber(value: Int32(previousToken))
+        let tokenLength = try MLMultiArray(shape: [1], dataType: .int32)
+        tokenLength[0] = NSNumber(value: Int32(1))
+        let input = try MLDictionaryFeatureProvider(dictionary: [
+            "targets": MLFeatureValue(multiArray: tokenArray),
+            "target_length": MLFeatureValue(multiArray: tokenLength),
+            "states_1": MLFeatureValue(multiArray: hState),
+            "cell_state_in": MLFeatureValue(multiArray: cState),
+        ])
+        let output = try await models.decoder.prediction(from: input)
+        guard let decoderOutputs = output.featureValue(for: "outputs")?.multiArrayValue,
+              let nextHState = output.featureValue(for: "states")?.multiArrayValue,
+              let nextCState = output.featureValue(for: "cell_state_out")?.multiArrayValue else {
+            throw NSError(domain: "IndicASR", code: 32, userInfo: [
+                NSLocalizedDescriptionKey: "Indic ASR RNNT decoder did not return expected state outputs.",
+            ])
+        }
+        return (decoderOutputs, nextHState, nextCState)
+    }
+
+    private func runJointPred(_ decoderOutputs: MLMultiArray) async throws -> MLMultiArray {
+        let input = try MLMultiArray(shape: [1, 1, NSNumber(value: IndicASRConfig.predHiddenDim)], dataType: .float32)
+        let ptr = input.dataPointer.bindMemory(to: Float.self, capacity: IndicASRConfig.predHiddenDim)
+        let strides = decoderOutputs.strides.map(\.intValue)
+        for dim in 0..<IndicASRConfig.predHiddenDim {
+            ptr[dim] = floatValue(decoderOutputs, offset: strides[1] * dim)
+        }
+        return try await predict(model: models.jointPred, inputName: "input", input: input, outputName: "output")
+    }
+
+    private func predict(model: MLModel, inputName: String, input: MLMultiArray, outputName: String) async throws -> MLMultiArray {
+        let provider = try MLDictionaryFeatureProvider(dictionary: [
+            inputName: MLFeatureValue(multiArray: input),
+        ])
+        let output = try await model.prediction(from: provider)
+        guard let result = output.featureValue(for: outputName)?.multiArrayValue else {
+            throw NSError(domain: "IndicASR", code: 33, userInfo: [
+                NSLocalizedDescriptionKey: "Indic ASR CoreML model did not return \(outputName).",
+            ])
+        }
+        return result
+    }
+
+    private func makeFloatArray(shape: [Int], values: [Float]) throws -> MLMultiArray {
+        let array = try MLMultiArray(shape: shape.map(NSNumber.init(value:)), dataType: .float32)
+        let ptr = array.dataPointer.bindMemory(to: Float.self, capacity: array.count)
+        let count = min(values.count, array.count)
+        _ = values.withUnsafeBufferPointer { source in
+            memcpy(ptr, source.baseAddress!, count * MemoryLayout<Float>.stride)
+        }
+        if count < array.count {
+            ptr.advanced(by: count).initialize(repeating: 0, count: array.count - count)
+        }
+        return array
+    }
+
+    private func zeroFloatArray(shape: [Int]) throws -> MLMultiArray {
+        let count = shape.reduce(1, *)
+        return try makeFloatArray(shape: shape, values: [Float](repeating: 0, count: count))
+    }
+
+    private func addArrays(_ lhs: MLMultiArray, _ rhs: MLMultiArray, shape: [Int]) throws -> MLMultiArray {
+        let output = try MLMultiArray(shape: shape.map(NSNumber.init(value:)), dataType: .float32)
+        let ptr = output.dataPointer.bindMemory(to: Float.self, capacity: output.count)
+        for index in 0..<output.count {
+            ptr[index] = floatValue(lhs, linearIndex: index) + floatValue(rhs, linearIndex: index)
+        }
+        return output
+    }
+
+    private func copyAsFloat32(_ source: MLMultiArray) throws -> MLMultiArray {
+        let output = try MLMultiArray(shape: source.shape, dataType: .float32)
+        let ptr = output.dataPointer.bindMemory(to: Float.self, capacity: output.count)
+        for index in 0..<source.count {
+            ptr[index] = floatValue(source, linearIndex: index)
+        }
+        return output
+    }
+
+    private func floatValue(_ array: MLMultiArray, linearIndex: Int) -> Float {
+        floatValue(array, offset: linearIndex)
+    }
+
+    private func floatValue(_ array: MLMultiArray, offset: Int) -> Float {
+        switch array.dataType {
+        case .float32:
+            return array.dataPointer.bindMemory(to: Float.self, capacity: array.count)[offset]
+        case .float16:
+            return Float(array.dataPointer.bindMemory(to: Float16.self, capacity: array.count)[offset])
+        case .double:
+            return Float(array.dataPointer.bindMemory(to: Double.self, capacity: array.count)[offset])
+        case .int32:
+            return Float(array.dataPointer.bindMemory(to: Int32.self, capacity: array.count)[offset])
+        default:
+            return array[offset].floatValue
+        }
+    }
+
+    private func argmax(_ logits: MLMultiArray, count: Int) -> Int {
+        var bestIndex = 0
+        var bestValue = -Float.infinity
+        for index in 0..<min(count, logits.count) {
+            let value = floatValue(logits, linearIndex: index)
+            if value > bestValue {
+                bestValue = value
+                bestIndex = index
+            }
+        }
+        return bestIndex
+    }
+}

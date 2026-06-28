@@ -137,6 +137,10 @@ struct SettingsView: View {
         appState.config.resolvedCohereLanguage
     }
 
+    private var selectedIndicASRLanguage: IndicASRLanguage {
+        appState.config.resolvedIndicASRLanguage
+    }
+
     private var dictationMicrophoneOptions: [DictationMicrophoneOption] {
         var options = [DictationMicrophoneOption(uid: nil, label: "Automatic")]
         options += dictationInputDevices.map { device in
@@ -538,6 +542,18 @@ struct SettingsView: View {
                         }
                     }
                 }
+                if appState.selectedBackend.backend == BackendOption.indicASR.backend {
+                    Divider().background(MuesliTheme.surfaceBorder)
+                    settingsRow("Indic language") {
+                        settingsMenu(
+                            selection: selectedIndicASRLanguage.label,
+                            options: IndicASRLanguage.allCases.map(\.label)
+                        ) { label in
+                            guard let language = IndicASRLanguage.allCases.first(where: { $0.label == label }) else { return }
+                            controller.selectIndicASRLanguage(language)
+                        }
+                    }
+                }
                 Divider().background(MuesliTheme.surfaceBorder)
                 settingsRow(
                     "Microphone",
@@ -685,6 +701,18 @@ struct SettingsView: View {
                         ) { label in
                             guard let language = CohereTranscribeLanguage.allCases.first(where: { $0.label == label }) else { return }
                             controller.selectCohereLanguage(language)
+                        }
+                    }
+                }
+                if appState.selectedMeetingTranscriptionBackend.backend == BackendOption.indicASR.backend {
+                    Divider().background(MuesliTheme.surfaceBorder)
+                    settingsRow("Indic language") {
+                        settingsMenu(
+                            selection: selectedIndicASRLanguage.label,
+                            options: IndicASRLanguage.allCases.map(\.label)
+                        ) { label in
+                            guard let language = IndicASRLanguage.allCases.first(where: { $0.label == label }) else { return }
+                            controller.selectIndicASRLanguage(language)
                         }
                     }
                 }

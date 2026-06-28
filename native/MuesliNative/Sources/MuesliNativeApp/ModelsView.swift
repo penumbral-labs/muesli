@@ -197,6 +197,13 @@ struct ModelsView: View {
         )
     }
 
+    private var indicASRLanguageSelection: Binding<IndicASRLanguage> {
+        Binding(
+            get: { appState.config.resolvedIndicASRLanguage },
+            set: { controller.selectIndicASRLanguage($0) }
+        )
+    }
+
     private var postProcessorSection: some View {
         VStack(alignment: .leading, spacing: MuesliTheme.spacing12) {
             VStack(alignment: .leading, spacing: MuesliTheme.spacing4) {
@@ -562,6 +569,7 @@ struct ModelsView: View {
         case "qwen": return "qwen-logo"
         case "nemotron": return "nvidia-logo"
         case "canary": return "qwen-logo"
+        case "indicasr": return nil
         case "sensevoice": return "qwen-logo"
         default: return nil
         }
@@ -685,6 +693,24 @@ struct ModelsView: View {
 
                     Picker("", selection: cohereLanguageSelection) {
                         ForEach(CohereTranscribeLanguage.allCases, id: \.self) { language in
+                            Text(language.label).tag(language)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 220, alignment: .leading)
+                }
+            }
+
+            if option.backend == BackendOption.indicASR.backend {
+                HStack(alignment: .center, spacing: MuesliTheme.spacing12) {
+                    Text("Language")
+                        .font(MuesliTheme.caption())
+                        .foregroundStyle(MuesliTheme.textTertiary)
+                        .frame(width: 64, alignment: .leading)
+
+                    Picker("", selection: indicASRLanguageSelection) {
+                        ForEach(IndicASRLanguage.allCases, id: \.self) { language in
                             Text(language.label).tag(language)
                         }
                     }
@@ -1007,6 +1033,8 @@ struct ModelsView: View {
             try? fm.removeItem(at: CanaryQwenModelStore.cacheDirectory())
         case "cohere":
             try? fm.removeItem(at: CohereTranscribeModelStore.cacheDirectory())
+        case "indicasr":
+            try? fm.removeItem(at: IndicASRModelStore.cacheDirectory())
         case "sensevoice":
             SenseVoiceTranscriber.deleteModelFiles(fileManager: fm)
         case "fluidaudio":
@@ -1082,6 +1110,8 @@ struct ModelsView: View {
             return CanaryQwenModelStore.isAvailableLocally()
         case "cohere":
             return CohereTranscribeModelStore.isAvailableLocally()
+        case "indicasr":
+            return IndicASRModelStore.isAvailableLocally()
         case "sensevoice":
             return SenseVoiceTranscriber.isModelDownloaded()
         default:
