@@ -14,9 +14,12 @@ struct SpeechTranscriptionResult: Sendable {
 }
 
 actor TranscriptionCoordinator {
+    static let explicitlyRoutedBackendIdentifiers: Set<String> = [
+        "whisper", "nemotron35", "qwen", "canary", "cohere", "sensevoice",
+    ]
+
     private let fluidTranscriber = FluidAudioTranscriber()
     private let whisperTranscriber = WhisperKitTranscriber()
-    private var _nemotronTranscriber: Any?
     private var _qwen3Transcriber: Any?
     private var _qwen3PostProcessor: Any?
     private var _canaryQwenTranscriber: Any?
@@ -25,20 +28,6 @@ actor TranscriptionCoordinator {
     private var vadManager: VadManager?
     private var diarizerManager: DiarizerManager?
     private var activeBackend: String?
-
-    @available(macOS 15, *)
-    private var nemotronTranscriber: NemotronStreamingTranscriber {
-        if _nemotronTranscriber == nil {
-            _nemotronTranscriber = NemotronStreamingTranscriber()
-        }
-        return _nemotronTranscriber as! NemotronStreamingTranscriber
-    }
-
-    /// Public accessor for streaming dictation — triggers lazy init if needed.
-    @available(macOS 15, *)
-    func getNemotronTranscriber() -> NemotronStreamingTranscriber {
-        return nemotronTranscriber
-    }
 
     private var _nemotron35Transcriber: Any?
     /// Selected Nemotron 3.5 language prompt id (101 = auto). Stored so it survives
@@ -220,20 +209,6 @@ actor TranscriptionCoordinator {
             try await whisperTranscriber.warmup()
             fputs("[muesli-native] WhisperKit warmup complete\n", stderr)
             progress?(1.0, nil)
-        case "nemotron":
-            if #available(macOS 15, *) {
-                try await nemotronTranscriber.loadModels(progress: progress)
-                // Warmup ANE so first dictation starts instantly
-                fputs("[muesli-native] Nemotron warmup: running silent chunk for ANE compilation...\n", stderr)
-                var state = try await nemotronTranscriber.makeStreamState()
-                let silence = [Float](repeating: 0, count: 8960)
-                _ = try? await nemotronTranscriber.transcribeChunk(samples: silence, state: &state)
-                fputs("[muesli-native] Nemotron warmup complete\n", stderr)
-            } else {
-                throw NSError(domain: "MuesliTranscriptionRuntime", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "Nemotron requires macOS 15 or later.",
-                ])
-            }
         case "nemotron35":
             if #available(macOS 15, *) {
                 await nemotron35Transcriber.setPromptId(nemotron35PromptId)
@@ -392,7 +367,6 @@ actor TranscriptionCoordinator {
         await whisperTranscriber.shutdown()
         await senseVoiceTranscriber.shutdown()
         if #available(macOS 15, *) {
-            await nemotronTranscriber.shutdown()
             if let nemotron35 = _nemotron35Transcriber as? Nemotron35StreamingTranscriber {
                 await nemotron35.shutdown()
             }
@@ -496,8 +470,6 @@ actor TranscriptionCoordinator {
         switch backend.backend {
         case "whisper":
             return try await transcribeWithWhisperKit(url: url)
-        case "nemotron":
-            return try await transcribeWithNemotron(url: url)
         case "nemotron35":
             return try await transcribeWithNemotron35(url: url)
         case "qwen":
@@ -615,28 +587,12 @@ actor TranscriptionCoordinator {
         }
     }
 
-    // MARK: - Nemotron Streaming (RNNT CoreML on ANE)
-
-    private func transcribeWithNemotron(url: URL) async throws -> SpeechTranscriptionResult {
-        if #available(macOS 15, *) {
-            fputs("[muesli-native] transcribing with Nemotron: \(url.lastPathComponent)\n", stderr)
-            let result = try await nemotronTranscriber.transcribe(wavURL: url)
-            fputs("[muesli-native] Nemotron result: \(result.text.prefix(80)) (took \(String(format: "%.3f", result.processingTime))s)\n", stderr)
-            let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return SpeechTranscriptionResult(
-                text: text,
-                segments: text.isEmpty ? [] : [SpeechSegment(start: 0, end: 0, text: text)]
-            )
-        } else {
-            throw NSError(domain: "Muesli", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "Nemotron requires macOS 15 or later.",
-            ])
-        }
-    }
+    // MARK: - Nemotron 3.5 Streaming (RNNT CoreML on ANE)
 
     private func transcribeWithNemotron35(url: URL) async throws -> SpeechTranscriptionResult {
         if #available(macOS 15, *) {
             fputs("[muesli-native] transcribing with Nemotron 3.5: \(url.lastPathComponent)\n", stderr)
+            await nemotron35Transcriber.setPromptId(nemotron35PromptId)
             let result = try await nemotron35Transcriber.transcribe(wavURL: url)
             fputs("[muesli-native] Nemotron 3.5 result: \(result.text.prefix(80)) (took \(String(format: "%.3f", result.processingTime))s)\n", stderr)
             let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)

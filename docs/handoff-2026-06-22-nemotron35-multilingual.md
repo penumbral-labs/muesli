@@ -3,13 +3,13 @@
 **Date:** 2026-06-22
 **Branch:** `claude/nemotron-asr-streaming-msek2t` (pushed to `origin` = github.com/prasadsunny1/muesli)
 **HEAD:** `22c1049f` · 8 commits ahead of `main` · **all pushed**, no PR opened yet
-**Status:** Feature complete + code-reviewed + refactored. Builds clean, full suite green (1002 tests / 114 suites). English transcription validated end-to-end on the real model. **Live multilingual (Hindi) mic test still pending** (needs a real mic + a rebuild).
+**Status:** Feature complete + code-reviewed + refactored. Builds clean, full suite green at the time of this handoff (1002 tests / 114 suites; repo-wide count has since increased on `main`). English transcription validated end-to-end on the real model. **Live multilingual (Hindi) mic test still pending** (needs a real mic + a rebuild).
 
 ---
 
 ## What this adds
 
-A second Nemotron ASR backend, **`nemotron35`**, shipping NVIDIA Nemotron 3.5 multilingual streaming RNNT (via FluidInference's CoreML conversion) alongside the existing English-only `nemotron`. Plus: hold-to-talk for both Nemotron backends, an in-app language picker, an upstream model-update check, and a dev-signing fix.
+The supported local Nemotron ASR backend, **`nemotron35`**, shipping NVIDIA Nemotron 3.5 multilingual streaming RNNT (via FluidInference's CoreML conversion). The older English-only `nemotron` app backend has been removed to avoid two confusing Nemotron choices. Plus: hold-to-talk, an in-app language picker, an upstream model-update check, and a dev-signing fix.
 
 ---
 
@@ -46,25 +46,25 @@ Full detail: `docs/plans/plan-2026-06-20-nemotron-3.5-multilingual-asr.md` §0.
 ## Architecture / file map
 
 - **`Sources/MuesliNativeApp/NemotronRNNTEngine.swift`** — shared engine (the dedup). `NemotronRNNTConfig` (per-model differences), neutral `RNNTStreamState`, `NemotronRNNTError`, and free funcs: `nemotronMakeStreamState`, `nemotronTranscribeChunk` (preprocessor→encoder(+optional prompt_id)→RNNT greedy decode), `nemotronDecodeTokens`, `nemotronLoadWavAsFloats`, `nemotronZeroFill`, `nemotronDownloadHuggingFaceTree` (with `skipRelativePrefix`). **Fix the pipeline here once.**
-- **`NemotronStreamingBackend.swift`** (EN) & **`Nemotron35StreamingBackend.swift`** (3.5) — thin actors: own MLModels + tokenizer + a `NemotronRNNTConfig` + cache/download paths; delegate to the engine. 3.5 has a settable `promptId` (config computed from it) + `setPromptId`, and the update-check helpers (`installedRevision`/`fetchRemoteRevision`/`updateAvailable`, `.revision` file).
-- **`StreamingDictationController.swift`** — protocol `NemotronStreamingTranscribing` now uses `RNNTStreamState`; `chunkSamples` is an injectable init param (8960 EN / 35840 for 3.5).
+- **`Nemotron35StreamingBackend.swift`** — thin actor: owns MLModels + tokenizer + a `NemotronRNNTConfig` + cache/download paths; delegates to the shared RNNT engine. It has a settable `promptId` (config computed from it) + `setPromptId`, and the update-check helpers (`installedRevision`/`fetchRemoteRevision`/`updateAvailable`, `.revision` file). The old English-only `NemotronStreamingBackend.swift` path has been removed from this PR.
+- **`StreamingDictationController.swift`** — protocol `NemotronStreamingTranscribing` uses `RNNTStreamState`; `chunkSamples` is injectable and currently set to 35840 for Nemotron 3.5.
 - **`TranscriptionRuntime.swift`** (`TranscriptionCoordinator`) — lazy `nemotron35Transcriber`, `getNemotron35Transcriber()` (async, applies prompt id), `setNemotron35PromptId`, preload/transcribe/shutdown cases for `"nemotron35"`.
-- **`MuesliController.swift`** — `isStreamingDictationBackend` (= nemotron|nemotron35) gates double-tap streaming + skips prepare/arm pre-warm; **handleStart no longer blocks hold-to-talk** (record→file path). `startNemotronStreamingAsync` branches transcriber+chunkSamples. `setNemotron35Language(_:)` + a push in `selectBackend`.
-- **`Models.swift`** — `BackendOption.nemotron35Multilingual` (in `experimental` + `onboarding`), `isDownloaded` case, `Nemotron35Language` enum, config `nemotron35Language` (key `nemotron35_language`, default `auto`) + `resolvedNemotron35Language`.
+- **`MuesliController.swift`** — `isStreamingDictationBackend` (= nemotron35) gates double-tap streaming + skips prepare/arm pre-warm; **handleStart no longer blocks hold-to-talk** (record→file path). `startNemotronStreamingAsync` resolves the Nemotron 3.5 transcriber and chunk size. `setNemotron35Language(_:)` + prompt propagation in startup/select/stream/transcribe paths.
+- **`Models.swift`** — `BackendOption.nemotron35Multilingual` (normal Models tab card + onboarding; no longer experimental), `isDownloaded` case, `Nemotron35Language` enum, config `nemotron35Language` (key `nemotron35_language`, default `auto`) + `resolvedNemotron35Language`.
 - **`ModelsView.swift`** — icon/delete/isDownloaded cases, Language picker card, "Update" affordance (`checkNemotron35Update`/`updateNemotron35`).
 - **`scripts/build_native_app.sh`** — `MUESLI_SKIP_SIGN=1` now **ad-hoc signs** the bundle (was: skip signing) so macOS TCC attributes Accessibility/Input-Monitoring grants.
 - **Tests:** `Tests/MuesliTests/NemotronStreamingTests.swift` (3.5 state/metadata/policy/language suites), `ModelsTests.swift`, `TranscriptionRuntimeTests.swift`.
 
-**Dictation modes (both Nemotron backends):** hold-to-talk → record then transcribe file (`transcribeWithNemotron35`); double-tap → live streaming (`StreamingDictationController`).
+**Dictation modes (Nemotron 3.5):** hold-to-talk → record then transcribe file (`transcribeWithNemotron35`); double-tap → live streaming (`StreamingDictationController`).
 
 ---
 
 ## How to resume on another machine
 
 1. `git fetch && git checkout claude/nemotron-asr-streaming-msek2t` (HEAD `22c1049f`).
-2. **Tests (no model/mic needed):** `swift test --package-path native/MuesliNative` — expect 1002/114 green. To keep the worktree small, pass `--scratch-path "$HOME/Library/Caches/muesli-spm/worktrees/nemotron35/build"` (see CLAUDE.md "SwiftPM build artifacts").
+2. **Tests (no model/mic needed):** `swift test --package-path native/MuesliNative` — this handoff observed 1002 tests / 114 suites green; current `main` may report a higher count. To keep the worktree small, pass `--scratch-path "$HOME/Library/Caches/muesli-spm/worktrees/nemotron35/build"` (see CLAUDE.md "SwiftPM build artifacts").
 3. **Run the dev app:** `MUESLI_SKIP_SIGN=1 ./scripts/dev-test.sh` (installs `/Applications/MuesliDev.app`, bundle id `com.muesli.dev`, data under `~/Library/Application Support/MuesliDev/`). Without the maintainer's Developer ID cert this is the path; it now ad-hoc signs.
-4. **Use the model:** Models tab → Experimental → "Nemotron 3.5 Multilingual" → Download (~665 MB, first load ~30s ANE warmup). Then select it; pick a Language (Auto/Hindi/…). Hold-to-talk or double-tap to dictate. Cache: `~/.cache/muesli/models/nemotron35-multilingual-2240ms/`.
+4. **Use the model:** Models tab → "Nemotron 3.5 Multilingual" → Download (~665 MB, first load ~30s ANE warmup). Then select it; pick a Language (Auto/Hindi/…). Hold-to-talk or double-tap to dictate. Cache: `~/.cache/muesli/models/nemotron35-multilingual-2240ms/`.
 5. **Headless E2E sanity** (no mic): generate speech with `say -o /tmp/s.aiff "…"` → `afconvert -f WAVE -d LEI16@16000 -c 1 /tmp/s.aiff /tmp/s.wav`, then rewrite a canonical 44-byte-header WAV (afconvert inserts an FLLR chunk pushing `data` past offset 44 — the backend's WAV loader assumes 44). Run a temp `@Test` gated by an env var that calls `Nemotron35StreamingTranscriber().loadModels()` + `transcribe(wavURL:)`. This is how English + explicit-prompt_id were validated; delete the temp test after.
 
 ---
@@ -92,5 +92,5 @@ Full detail: `docs/plans/plan-2026-06-20-nemotron-3.5-multilingual-asr.md` §0.
 
 - **Track choice:** multilingual (not latin) — Hindi requires it. Latin is ~2× faster per frame but Latin-script only.
 - **`prompt_id` and speed:** it's a single scalar (not a list); fixing a language affects *accuracy*, not *latency* (graph size unchanged). Real speed lever is the track.
-- **Onboarding membership** is an explicit curated list (not a derived `onboardingEligible` flag) — deliberate; EN Nemotron intentionally omitted (English-only).
+- **Onboarding membership** is an explicit curated list (not a derived `onboardingEligible` flag) — deliberate; Nemotron 3.5 is included as the supported Nemotron option.
 - **StreamState** is now a neutral top-level type (`RNNTStreamState`); each backend `typealias StreamState = RNNTStreamState` for back-compat.

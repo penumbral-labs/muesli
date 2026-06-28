@@ -9,11 +9,9 @@ import Foundation
 /// Pipeline: audio → preprocessor(mel) → encoder(with cache + prompt_id) → decoder+joint(RNNT greedy) → tokens
 /// Model: FluidInference/Nemotron-3.5-ASR-Streaming-Multilingual-0.6b-CoreML (multilingual/2240ms variant)
 ///
-/// Differs from the English-only `NemotronStreamingTranscriber` only in the
-/// `NemotronRNNTConfig` below (cache geometry, vocab/blank, chunk length, the
-/// language `prompt_id`, `<…>` tag stripping) and the download/cache paths. The
-/// shared chunk pipeline lives in `NemotronRNNTEngine`. Reuses the neutral
-/// `RNNTStreamState` so it conforms to `NemotronStreamingTranscribing` unchanged.
+/// The per-model `NemotronRNNTConfig` below captures cache geometry, vocab/blank,
+/// chunk length, the language `prompt_id`, and `<…>` tag stripping. The shared
+/// chunk pipeline lives in `NemotronRNNTEngine`.
 @available(macOS 15, iOS 18, *)
 actor Nemotron35StreamingTranscriber: NemotronStreamingTranscribing {
     private var preprocessor: MLModel?
@@ -22,6 +20,7 @@ actor Nemotron35StreamingTranscriber: NemotronStreamingTranscribing {
     private var joint: MLModel?
     private var tokenizer: [Int: String] = [:]
     private var loaded = false
+    private var loadedRevision: String?
 
     /// Selected language `prompt_id` fed to the encoder (101 = auto-detect).
     /// Set from app config via `setPromptId(_:)` before dictation.
@@ -65,9 +64,12 @@ actor Nemotron35StreamingTranscriber: NemotronStreamingTranscribing {
     }()
 
     func loadModels(progress: ((Double, String?) -> Void)? = nil) async throws {
-        if loaded { return }
-
         let modelDir = try await ensureModelsDownloaded(progress: progress)
+        let installedRevision = Self.installedRevision()
+        if loaded, loadedRevision == installedRevision { return }
+        if loaded {
+            shutdown()
+        }
 
         fputs("[nemotron35] loading CoreML models...\n", stderr)
         let mlConfig = MLModelConfiguration()
@@ -94,6 +96,7 @@ actor Nemotron35StreamingTranscriber: NemotronStreamingTranscribing {
         }
 
         loaded = true
+        loadedRevision = installedRevision
         fputs("[nemotron35] models ready (\(tokenizer.count) vocab tokens)\n", stderr)
     }
 
@@ -143,7 +146,7 @@ actor Nemotron35StreamingTranscriber: NemotronStreamingTranscribing {
 
     func shutdown() {
         preprocessor = nil; encoder = nil; decoder = nil; joint = nil
-        tokenizer = [:]; loaded = false
+        tokenizer = [:]; loaded = false; loadedRevision = nil
     }
 
     // MARK: - Model Download

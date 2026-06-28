@@ -66,6 +66,8 @@ struct ModelsView: View {
 
                 modelCard(option: .cohereTranscribe, logo: "cohere-logo")
 
+                modelCard(option: .nemotron35Multilingual, logo: "nvidia-logo")
+
                 experimentalSection
 
                 postProcessorSection
@@ -155,7 +157,7 @@ struct ModelsView: View {
                                 .foregroundStyle(MuesliTheme.textSecondary)
                         }
 
-                        Text("SenseVoice, Qwen, and streaming backends. Hidden by default because these are still slower and less polished.")
+                        Text("SenseVoice, Qwen, Canary, and legacy streaming backends. Hidden by default because these are still slower and less polished.")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(MuesliTheme.textPrimary)
                             .opacity(0.8)
@@ -202,7 +204,9 @@ struct ModelsView: View {
     private var nemotron35LanguageSelection: Binding<Nemotron35Language> {
         Binding(
             get: { appState.config.resolvedNemotron35Language },
-            set: { controller.setNemotron35Language($0) }
+            set: { language in
+                Task { await controller.setNemotron35Language(language) }
+            }
         )
     }
 
@@ -569,7 +573,6 @@ struct ModelsView: View {
         case "whisper": return "openai-logo"
         case "cohere": return "cohere-logo"
         case "qwen": return "qwen-logo"
-        case "nemotron": return "nvidia-logo"
         case "nemotron35": return "nvidia-logo"
         case "canary": return "qwen-logo"
         case "sensevoice": return "qwen-logo"
@@ -1025,11 +1028,15 @@ struct ModelsView: View {
     /// files (so the download isn't skipped), then start a fresh download.
     private func updateNemotron35(_ option: BackendOption) {
         Task {
-            await deleteModelFiles(option)
-            await MainActor.run {
-                downloadedModels.remove(option.model)
-                nemotron35UpdateAvailable = false
-                startDownload(option)
+            do {
+                try await deleteModelFiles(option)
+                await MainActor.run {
+                    downloadedModels.remove(option.model)
+                    nemotron35UpdateAvailable = false
+                    startDownload(option)
+                }
+            } catch {
+                fputs("[muesli-native] model update cleanup failed for \(option.backend)/\(option.model): \(error)\n", stderr)
             }
         }
     }
@@ -1043,30 +1050,30 @@ struct ModelsView: View {
         }
         // Remove cached model files
         Task {
-            await deleteModelFiles(option)
-            await MainActor.run {
-                _ = downloadedModels.remove(option.model)
+            do {
+                try await deleteModelFiles(option)
+                await MainActor.run {
+                    _ = downloadedModels.remove(option.model)
+                }
+            } catch {
+                fputs("[muesli-native] model delete failed for \(option.backend)/\(option.model): \(error)\n", stderr)
             }
         }
     }
 
-    private func deleteModelFiles(_ option: BackendOption) async {
+    private func deleteModelFiles(_ option: BackendOption) async throws {
         let fm = FileManager.default
         switch option.backend {
         case "whisper":
             WhisperKitTranscriber.deleteModel(option.model)
-        case "nemotron":
-            let path = fm.homeDirectoryForCurrentUser
-                .appendingPathComponent(".cache/muesli/models/nemotron-560ms")
-            try? fm.removeItem(at: path)
         case "nemotron35":
             let path = fm.homeDirectoryForCurrentUser
                 .appendingPathComponent(".cache/muesli/models/nemotron35-multilingual-2240ms")
-            try? fm.removeItem(at: path)
+            try removeItemIfPresent(at: path, fileManager: fm)
         case "canary":
-            try? fm.removeItem(at: CanaryQwenModelStore.cacheDirectory())
+            try removeItemIfPresent(at: CanaryQwenModelStore.cacheDirectory(), fileManager: fm)
         case "cohere":
-            try? fm.removeItem(at: CohereTranscribeModelStore.cacheDirectory())
+            try removeItemIfPresent(at: CohereTranscribeModelStore.cacheDirectory(), fileManager: fm)
         case "sensevoice":
             SenseVoiceTranscriber.deleteModelFiles(fileManager: fm)
         case "fluidaudio":
@@ -1077,17 +1084,22 @@ struct ModelsView: View {
                 let version = option.model.contains("v2") ? "v2" : "v3"
                 if let contents = try? fm.contentsOfDirectory(at: supportDir, includingPropertiesForKeys: nil) {
                     for dir in contents where dir.lastPathComponent.contains("parakeet") && dir.lastPathComponent.contains(version) {
-                        try? fm.removeItem(at: dir)
+                        try removeItemIfPresent(at: dir, fileManager: fm)
                     }
                 }
             }
         case "qwen":
             let path = fm.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support/FluidAudio/Models/qwen3-asr-0.6b-coreml")
-            try? fm.removeItem(at: path)
+            try removeItemIfPresent(at: path, fileManager: fm)
         default:
             break
         }
+    }
+
+    private func removeItemIfPresent(at url: URL, fileManager: FileManager) throws {
+        guard fileManager.fileExists(atPath: url.path) else { return }
+        try fileManager.removeItem(at: url)
     }
 
     // MARK: - Check Downloaded Status
@@ -1129,10 +1141,6 @@ struct ModelsView: View {
         switch option.backend {
         case "whisper":
             return WhisperKitTranscriber.isModelDownloaded(option.model)
-        case "nemotron":
-            let path = fm.homeDirectoryForCurrentUser
-                .appendingPathComponent(".cache/muesli/models/nemotron-560ms/encoder/encoder_int8.mlmodelc")
-            return fm.fileExists(atPath: path.path)
         case "nemotron35":
             let path = fm.homeDirectoryForCurrentUser
                 .appendingPathComponent(".cache/muesli/models/nemotron35-multilingual-2240ms/encoder.mlmodelc/coremldata.bin")

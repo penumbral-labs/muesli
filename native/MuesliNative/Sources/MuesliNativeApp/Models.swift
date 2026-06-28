@@ -64,21 +64,12 @@ struct BackendOption: Equatable {
         recommended: false
     )
 
-    static let nemotronStreaming = BackendOption(
-        backend: "nemotron",
-        model: "FluidInference/nemotron-speech-streaming-en-0.6b-coreml",
-        label: "Nemotron Streaming (Experimental)",
-        sizeLabel: "~600 MB",
-        description: "Experimental. NVIDIA streaming RNNT. English-only. Hold-to-talk or double-tap handsfree (live text). No punctuation (RNNT limitation). Append-only — no corrections.",
-        recommended: false
-    )
-
     static let nemotron35Multilingual = BackendOption(
         backend: "nemotron35",
         model: "FluidInference/Nemotron-3.5-ASR-Streaming-Multilingual-0.6b-CoreML",
-        label: "Nemotron 3.5 Multilingual (Experimental)",
+        label: "Nemotron 3.5 Multilingual",
         sizeLabel: "~665 MB",
-        description: "Experimental. NVIDIA Nemotron 3.5 streaming RNNT. Multilingual incl. Hindi, Chinese, Japanese + 100+ locales (auto-detect). Native punctuation. Hold-to-talk or double-tap handsfree (live text). Append-only — no corrections.",
+        description: "NVIDIA Nemotron 3.5 streaming RNNT via FluidInference. Multilingual incl. Hindi, Chinese, Japanese + 100+ locales (auto-detect). Native punctuation. Hold-to-talk or double-tap handsfree (live text). Append-only — no corrections.",
         recommended: false
     )
 
@@ -130,17 +121,15 @@ struct BackendOption: Equatable {
     )
 
     static let experimental: [BackendOption] = [
-        .senseVoiceSmall, .qwen3Asr, .canaryQwen, .nemotronStreaming, .nemotron35Multilingual,
+        .senseVoiceSmall, .qwen3Asr, .canaryQwen,
     ]
 
     /// Models available for download and use.
-    static let all: [BackendOption] = parakeetFamily + whisperFamily + [.cohereTranscribe] + experimental
+    static let all: [BackendOption] = parakeetFamily + whisperFamily + [.cohereTranscribe, .nemotron35Multilingual] + experimental
 
     /// Curated first-run choices shown in onboarding's "Other models" section.
-    /// This is a deliberate hand-picked list, not a derived rule: experimental models
-    /// are excluded by default, but Nemotron 3.5 Multilingual is included as a vetted
-    /// exception (broad language coverage incl. Hindi, hold-to-talk capable). The EN
-    /// Nemotron is intentionally omitted (English-only, narrower first-run value).
+    /// This is a deliberate hand-picked list, not a derived rule. Experimental models
+    /// are excluded by default.
     static let onboarding: [BackendOption] = [.parakeetMultilingual, .whisperTinyEnglish, .whisperSmall, .cohereTranscribe, .nemotron35Multilingual]
 
     /// Models coming soon — shown greyed out in the Models tab.
@@ -153,6 +142,10 @@ struct BackendOption: Equatable {
 
     static func resolve(backend: String, model: String) -> BackendOption? {
         all.first { $0.backend == backend && $0.model == model }
+    }
+
+    var isStreamingDictationBackend: Bool {
+        backend == "nemotron35"
     }
 
     static func resolveDownloaded(
@@ -192,10 +185,6 @@ struct BackendOption: Equatable {
                 .appendingPathComponent("Library/Application Support/FluidAudio/Models/qwen3-asr-0.6b-coreml")
             return fm.fileExists(atPath: supportDir.appendingPathComponent("int8/vocab.json").path)
                 || fm.fileExists(atPath: supportDir.appendingPathComponent("f32/vocab.json").path)
-        case "nemotron":
-            let path = fm.homeDirectoryForCurrentUser
-                .appendingPathComponent(".cache/muesli/models/nemotron-560ms/encoder/encoder_int8.mlmodelc")
-            return fm.fileExists(atPath: path.path)
         case "nemotron35":
             let path = fm.homeDirectoryForCurrentUser
                 .appendingPathComponent(".cache/muesli/models/nemotron35-multilingual-2240ms/encoder.mlmodelc/coremldata.bin")
@@ -270,7 +259,8 @@ enum Nemotron35Language: String, CaseIterable, Codable, Sendable {
     }
 
     static func resolved(_ rawValue: String?) -> Self {
-        guard let rawValue, let language = Self(rawValue: rawValue) else {
+        guard let rawValue,
+              let language = Self(rawValue: rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
             return defaultLanguage
         }
         return language

@@ -4,13 +4,12 @@ import Foundation
 
 /// Shared RNNT streaming engine for the NVIDIA Nemotron CoreML backends.
 ///
-/// Both `NemotronStreamingTranscriber` (English `nemotron`) and
-/// `Nemotron35StreamingTranscriber` (multilingual `nemotron35`) run the identical
-/// pipeline — preprocessor(mel) → encoder(with cache) → decoder+joint(RNNT greedy) —
-/// differing only in cache geometry, vocab/blank size, chunk length, the optional
-/// language `prompt_id` input, and tokenizer tag handling. Those differences are
-/// captured in `NemotronRNNTConfig`; the actual model calls live here so a fix to the
-/// decode loop, mel padding, or cache wiring lands once.
+/// Shared RNNT helpers for Nemotron CoreML streaming backends.
+///
+/// The active app backend is `Nemotron35StreamingTranscriber` (multilingual
+/// `nemotron35`). Per-model geometry, vocab/blank size, chunk length, optional
+/// language `prompt_id`, and tokenizer tag handling live in `NemotronRNNTConfig`;
+/// the decode loop, mel padding, and cache wiring live here.
 
 /// Per-model geometry/behaviour. Values come from each variant's `metadata.json`.
 struct NemotronRNNTConfig {
@@ -291,9 +290,16 @@ func nemotronDownloadHuggingFaceTree(
     logPrefix: String,
     onFileDownloaded: (() -> Void)? = nil
 ) async throws {
-    guard let url = URL(string: apiURL) else { return }
-    let (data, _) = try await URLSession.shared.data(from: url)
-    guard let entries = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+    guard let url = URL(string: apiURL) else {
+        throw NemotronRNNTError.downloadFailed("Invalid HuggingFace API URL: \(apiURL)")
+    }
+    let (data, response) = try await URLSession.shared.data(from: url)
+    if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+        throw NemotronRNNTError.downloadFailed("HuggingFace tree request failed with HTTP \(http.statusCode): \(apiURL)")
+    }
+    guard let entries = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        throw NemotronRNNTError.downloadFailed("Unexpected HuggingFace tree payload for \(apiURL)")
+    }
 
     for entry in entries {
         guard let path = entry["path"] as? String, let type = entry["type"] as? String else { continue }
@@ -309,7 +315,9 @@ func nemotronDownloadHuggingFaceTree(
                 repoID: repoID, apiURL: subAPI, remotePath: remotePath, localDir: localDir,
                 skipRelativePrefix: skipRelativePrefix, logPrefix: logPrefix, onFileDownloaded: onFileDownloaded)
         } else if type == "file" {
-            let fileURL = URL(string: "https://huggingface.co/\(repoID)/resolve/main/\(path)")!
+            guard let fileURL = URL(string: "https://huggingface.co/\(repoID)/resolve/main/\(path)") else {
+                throw NemotronRNNTError.downloadFailed("Invalid HuggingFace file URL for \(path)")
+            }
             let localFile = localDir.appendingPathComponent(relativePath)
             if FileManager.default.fileExists(atPath: localFile.path) { continue }
 

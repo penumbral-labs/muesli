@@ -30,20 +30,20 @@ case "${shard}" in
     filters=(
       WhisperCppTranscriberTests
       FluidAudioTranscriberTests
-      NemotronStreamingTranscriberTests
       BackendCoverageTests
       CanaryQwenBackendTests
       FillerWordFilterTests
       JaroWinklerTests
       CustomWordMatcherApplyTests
-      NemotronStreamStateTests
       StreamingDictationControllerTests
       DeltaPasteTests
       TranscriptAccumulationTests
       StreamingDictationControllerLifecycleTests
-      NemotronBackendMetadataTests
-      NemotronHoldToTalkPolicyTests
+      NemotronDictationModePolicyTests
       TranscriptionCoordinatorNemotronTests
+      Nemotron35StreamStateTests
+      Nemotron35BackendMetadataTests
+      Nemotron35LanguageTests
       SpeechSegmentTests
       SpeechTranscriptionResultTests
       TranscriptionCoordinatorTests
