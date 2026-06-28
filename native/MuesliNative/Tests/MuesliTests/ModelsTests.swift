@@ -1,4 +1,5 @@
 import Testing
+import Accelerate
 import AppKit
 import Foundation
 import MuesliCore
@@ -79,6 +80,39 @@ struct BackendOptionTests {
     func indicASRBackend() {
         #expect(BackendOption.indicASR.backend == "indicasr")
         #expect(BackendOption.indicASR.model.contains("indic-conformer"))
+    }
+
+    @Test("Indic ASR mel transpose uses row-major vDSP parameter order")
+    func indicASRMelTransposeParameterOrder() {
+        let rows = 2
+        let columns = 3
+        let frameMajor: [Float] = [
+            1, 2, 3,
+            4, 5, 6,
+        ]
+        let expectedColumnMajorTranspose: [Float] = [
+            1, 4,
+            2, 5,
+            3, 6,
+        ]
+
+        var actual = [Float](repeating: 0, count: frameMajor.count)
+        vDSP_mtrans(
+            frameMajor, 1,
+            &actual, 1,
+            vDSP_Length(columns),
+            vDSP_Length(rows)
+        )
+        #expect(actual == expectedColumnMajorTranspose)
+
+        var swapped = [Float](repeating: 0, count: frameMajor.count)
+        vDSP_mtrans(
+            frameMajor, 1,
+            &swapped, 1,
+            vDSP_Length(rows),
+            vDSP_Length(columns)
+        )
+        #expect(swapped != expectedColumnMajorTranspose)
     }
 
     @Test("SenseVoice uses native FluidAudio CoreML model")

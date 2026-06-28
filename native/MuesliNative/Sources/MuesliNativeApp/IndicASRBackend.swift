@@ -611,7 +611,10 @@ actor IndicASRTranscriber {
     func loadModels(progress: ((Double, String?) -> Void)? = nil) async throws {
         if models != nil { return }
         if let loadTask {
-            models = try await loadTask.value
+            let expectedGeneration = loadGeneration
+            let loaded = try await loadTask.value
+            guard loadGeneration == expectedGeneration else { return }
+            models = loaded
             return
         }
 
