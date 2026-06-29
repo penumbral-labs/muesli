@@ -878,7 +878,8 @@ struct SettingsView: View {
                             selection: appState.config.resolvedAutoExportMarkdownContent.displayName,
                             options: MeetingExportContent.allCases.map(\.displayName)
                         ) { label in
-                            guard let content = MeetingExportContent.allCases.first(where: { $0.displayName == label }) else { return }
+                            guard let index = MeetingExportContent.allCases.firstIndex(where: { $0.displayName == label }) else { return }
+                            let content = MeetingExportContent.allCases[index]
                             controller.updateConfig { $0.autoExportMarkdownContent = content.rawValue }
                         }
                     }

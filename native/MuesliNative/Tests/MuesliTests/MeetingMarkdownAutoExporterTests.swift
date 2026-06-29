@@ -30,6 +30,7 @@ struct MeetingMarkdownAutoExporterTests {
         config.autoExportMarkdownFolderPath = "   "
 
         let result = exporter.performExport(meeting: makeMeeting(), config: config)
+        exporter.waitForPendingLogWrites()
 
         #expect(result == nil)
         let log = try String(contentsOf: exporter.logURL, encoding: .utf8)
@@ -45,6 +46,7 @@ struct MeetingMarkdownAutoExporterTests {
         config.autoExportMarkdownFolderPath = "relative/notes"
 
         let result = exporter.performExport(meeting: makeMeeting(), config: config)
+        exporter.waitForPendingLogWrites()
 
         #expect(result == nil)
         let log = try String(contentsOf: exporter.logURL, encoding: .utf8)

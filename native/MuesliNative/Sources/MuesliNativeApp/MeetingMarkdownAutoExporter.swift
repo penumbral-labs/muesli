@@ -86,15 +86,18 @@ final class MeetingMarkdownAutoExporter: MeetingMarkdownAutoExporting {
         if !fileManager.fileExists(atPath: firstCandidate.path) {
             return firstCandidate
         }
-        var index = 2
-        while true {
+        for index in 2...Self.maxCollisionAttempts {
             let candidate = folder.appendingPathComponent("\(baseName)-\(index).md")
             if !fileManager.fileExists(atPath: candidate.path) {
                 return candidate
             }
-            index += 1
         }
+        // Degenerate case (folder saturated with the same base name): fall back to
+        // a UUID-suffixed name so we never overwrite and never loop unbounded.
+        return folder.appendingPathComponent("\(baseName)-\(UUID().uuidString).md")
     }
+
+    private static let maxCollisionAttempts = 1000
 
     private func baseFilename(meeting: MeetingRecord, content: MeetingExportContent) -> String {
         let filename = MeetingExporter.suggestedFilename(meeting: meeting, content: content, fileExtension: "md")
@@ -112,15 +115,23 @@ final class MeetingMarkdownAutoExporter: MeetingMarkdownAutoExporting {
 
     // MARK: - Logging
 
+    /// Blocks until all queued log writes have drained. Intended for tests that
+    /// assert on log file contents after a synchronous `performExport` call.
+    func waitForPendingLogWrites() {
+        logQueue.sync {}
+    }
+
     private func writeLog(_ message: String) {
         let line = "[\(Self.isoFormatter.string(from: dateProvider()))] \(message)\n"
         Self.logger.log("\(line, privacy: .public)")
 
-        logQueue.sync {
+        logQueue.async { [self] in
             do {
                 try fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
                 if !fileManager.fileExists(atPath: logURL.path) {
-                    fileManager.createFile(atPath: logURL.path, contents: nil)
+                    guard fileManager.createFile(atPath: logURL.path, contents: nil) else {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
                 }
                 let handle = try FileHandle(forWritingTo: logURL)
                 defer { try? handle.close() }
