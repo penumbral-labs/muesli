@@ -109,6 +109,15 @@ struct BackendOption: Equatable {
         recommended: false
     )
 
+    static let gemma4E2BLiteRT = BackendOption(
+        backend: "gemma4-litert",
+        model: Gemma4LiteRTModelStore.repoID,
+        label: "Gemma 4 E2B",
+        sizeLabel: "~2.6 GB",
+        description: "Experimental direct audio-to-polished-text Gemma 4 backend using LiteRT-LM. Downloads managed local weights, requires macOS 15+, and is best for short dictations while output limits are tuned.",
+        recommended: false
+    )
+
     // Default alias
     static let whisper = parakeetMultilingual
 
@@ -130,7 +139,7 @@ struct BackendOption: Equatable {
     )
 
     static let experimental: [BackendOption] = [
-        .senseVoiceSmall, .qwen3Asr, .canaryQwen, .indicASR,
+        .senseVoiceSmall, .qwen3Asr, .canaryQwen, .indicASR, .gemma4E2BLiteRT,
     ]
 
     /// Models available for download and use.
@@ -206,6 +215,8 @@ struct BackendOption: Equatable {
             return IndicASRModelStore.isAvailableLocally()
         case "sensevoice":
             return SenseVoiceTranscriber.isModelDownloaded()
+        case "gemma4-litert":
+            return Gemma4LiteRTModelStore.isAvailableLocally()
         default:
             return false
         }

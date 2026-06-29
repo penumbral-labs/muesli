@@ -76,6 +76,192 @@ struct SenseVoiceTranscriberTests {
     }
 }
 
+@Suite("Gemma4LiteRTTranscriber")
+struct Gemma4LiteRTTranscriberTests {
+
+    @Test("gemma4 model uses managed LiteRT-LM metadata")
+    func gemma4Model() {
+        #expect(BackendOption.gemma4E2BLiteRT.backend == "gemma4-litert")
+        #expect(BackendOption.gemma4E2BLiteRT.model == Gemma4LiteRTModelStore.repoID)
+        #expect(BackendOption.gemma4E2BLiteRT.description.contains("managed local weights"))
+        #expect(Gemma4LiteRTModelStore.downloadURL.absoluteString.contains(Gemma4LiteRTModelStore.repoID))
+        #expect(Gemma4LiteRTModelStore.downloadURL.absoluteString.contains(Gemma4LiteRTModelStore.modelFilename))
+    }
+
+    @Test("gemma4 stays experimental and out of onboarding")
+    func gemma4Experimental() {
+        #expect(BackendOption.experimental.contains(.gemma4E2BLiteRT))
+        #expect(!BackendOption.onboarding.contains(.gemma4E2BLiteRT))
+    }
+
+    @Test("gemma4 model store uses env override and detects local file")
+    func gemma4ModelStoreEnvOverride() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("muesli-gemma4-store-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let modelURL = dir.appendingPathComponent("model.litertlm")
+        try Data([0x4c, 0x54, 0x4d]).write(to: modelURL)
+
+        let environment = [Gemma4LiteRTModelStore.modelPathEnvVar: modelURL.path]
+        #expect(Gemma4LiteRTModelStore.resolvedModelURL(environment: environment) == modelURL)
+        #expect(Gemma4LiteRTModelStore.isAvailableLocally(environment: environment))
+    }
+
+    @Test("gemma4 override directory is not treated as a model file")
+    func gemma4ModelStoreRejectsDirectoryOverride() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("muesli-gemma4-directory-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let sentinelURL = dir.appendingPathComponent("keep-me.txt")
+        try Data("keep".utf8).write(to: sentinelURL)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let environment = [Gemma4LiteRTModelStore.modelPathEnvVar: dir.path]
+        #expect(!Gemma4LiteRTModelStore.isAvailableLocally(environment: environment))
+        #expect(!Gemma4LiteRTModelStore.isValidLiteRTLMFile(at: dir, minimumSizeBytes: 1))
+
+        try Gemma4LiteRTModelStore.deleteModelFiles(environment: environment)
+
+        #expect(FileManager.default.fileExists(atPath: dir.path))
+        #expect(FileManager.default.fileExists(atPath: sentinelURL.path))
+    }
+
+    @Test("gemma4 delete removes only explicit model override file")
+    func gemma4DeleteRespectsModelOverride() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("muesli-gemma4-delete-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let modelURL = dir.appendingPathComponent("model.litertlm")
+        let siblingURL = dir.appendingPathComponent("keep-me.txt")
+        try Data([0x4c, 0x54, 0x4d]).write(to: modelURL)
+        try Data("keep".utf8).write(to: siblingURL)
+
+        let environment = [Gemma4LiteRTModelStore.modelPathEnvVar: modelURL.path]
+        try Gemma4LiteRTModelStore.deleteModelFiles(environment: environment)
+
+        #expect(!FileManager.default.fileExists(atPath: modelURL.path))
+        #expect(FileManager.default.fileExists(atPath: siblingURL.path))
+        #expect(!Gemma4LiteRTModelStore.isAvailableLocally(environment: environment))
+    }
+
+    @Test("gemma4 default paths use managed model cache")
+    func gemma4DefaultPathsUseManagedCache() {
+        #expect(Gemma4LiteRTModelStore.cacheRelativePath == ".cache/muesli/models/gemma-4-e2b-litert-lm")
+        #expect(Gemma4LiteRTModelStore.managedModelURL().path.hasSuffix("/.cache/muesli/models/gemma-4-e2b-litert-lm/\(Gemma4LiteRTModelStore.modelFilename)"))
+        #expect(Gemma4LiteRTModelStore.managedLiteRTCacheDirectory().path.hasSuffix("/.cache/muesli/models/gemma-4-e2b-litert-lm/litert-cache"))
+    }
+
+    @Test("gemma4 managed download validation rejects tiny files")
+    func gemma4ManagedDownloadValidationRejectsTinyFiles() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("muesli-gemma4-small-\(UUID().uuidString).litertlm")
+        try Data([0x4c, 0x54, 0x4d]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(Gemma4LiteRTModelStore.isValidLiteRTLMFile(at: url, minimumSizeBytes: 1))
+        #expect(!Gemma4LiteRTModelStore.isValidLiteRTLMFile(
+            at: url,
+            minimumSizeBytes: Gemma4LiteRTModelStore.minimumDownloadedModelSizeBytes
+        ))
+    }
+
+    @Test("gemma4 defaults to CPU backend unless GPU is explicit")
+    func gemma4BackendSelection() {
+        #expect(Gemma4LiteRTModelStore.resolvedBackend(environment: [:]) == "cpu")
+        #expect(Gemma4LiteRTModelStore.resolvedBackend(environment: [Gemma4LiteRTModelStore.backendEnvVar: "gpu"]) == "gpu")
+        #expect(Gemma4LiteRTModelStore.resolvedBackend(environment: [Gemma4LiteRTModelStore.backendEnvVar: "webgpu"]) == "cpu")
+    }
+
+    @available(macOS 15, *)
+    @Test("gemma4 response parser throws on unrecognized content")
+    func gemma4ResponseParserThrowsOnUnknownShape() {
+        #expect(throws: Gemma4LiteRTTranscriber.TranscriberError.self) {
+            try Gemma4LiteRTTranscriber.textContent(fromResponseJSON: #"{"status":"ok"}"#)
+        }
+        #expect(throws: Gemma4LiteRTTranscriber.TranscriberError.self) {
+            try Gemma4LiteRTTranscriber.textContent(fromResponseJSON: #"{"content":[]}"#)
+        }
+        #expect(throws: Gemma4LiteRTTranscriber.TranscriberError.self) {
+            try Gemma4LiteRTTranscriber.textContent(
+                fromResponseJSON: #"{"content":[{"type":"audio","data":"ignored"}]}"#
+            )
+        }
+    }
+
+    @available(macOS 15, *)
+    @Test("gemma4 response parser extracts supported content shapes")
+    func gemma4ResponseParserExtractsSupportedShapes() throws {
+        let stringContent = try Gemma4LiteRTTranscriber.textContent(
+            fromResponseJSON: #"{"content":"hello world"}"#
+        )
+        #expect(stringContent == "hello world")
+
+        let arrayContent = try Gemma4LiteRTTranscriber.textContent(
+            fromResponseJSON: #"{"content":[{"type":"text","text":"hello"},{"type":"text","text":"again"}]}"#
+        )
+        #expect(arrayContent == "hello again")
+    }
+
+    @available(macOS 15, *)
+    @Test("gemma4 rejects assistant-style chat responses")
+    func gemma4RejectsAssistantStyleChatResponses() {
+        #expect(throws: Gemma4LiteRTTranscriber.TranscriberError.self) {
+            try Gemma4LiteRTTranscriber.validatedTranscript(
+                fromResponseJSON: #"{"content":"Hello! I understand you're looking for a quick and accurate transcription service. I can certainly help you with that."}"#
+            )
+        }
+        #expect(Gemma4LiteRTTranscriber.looksLikeAssistantResponse(
+            "Please upload the audio file and I can transcribe it."
+        ))
+        #expect(!Gemma4LiteRTTranscriber.looksLikeAssistantResponse(
+            "Hello, I am trying to check whether you can hear me properly."
+        ))
+    }
+
+    @available(macOS 15, *)
+    @Test("gemma4 validated transcript passes normal dictation")
+    func gemma4ValidatedTranscriptPassesNormalDictation() throws {
+        let text = try Gemma4LiteRTTranscriber.validatedTranscript(
+            fromResponseJSON: #"{"content":"Hello, I am trying to check whether you can hear me properly."}"#
+        )
+        #expect(text == "Hello, I am trying to check whether you can hear me properly.")
+    }
+
+    @available(macOS 15, *)
+    @Test("gemma4 user message sends only audio payload")
+    func gemma4UserMessageContainsOnlyAudioPayload() throws {
+        let wavURL = URL(fileURLWithPath: "/tmp/muesli-gemma4-sample.wav")
+        let messageJSON = try Gemma4LiteRTTranscriber.userMessageJSONString(wavURL: wavURL)
+        let data = try #require(messageJSON.data(using: .utf8))
+        let message = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let content = try #require(message["content"] as? [[String: String]])
+
+        #expect(message["role"] as? String == "user")
+        #expect(content == [["type": "audio", "path": wavURL.path]])
+        #expect(!messageJSON.contains("Transcribe this recording"))
+        #expect(!messageJSON.contains("Transcribe this audio"))
+    }
+
+    @available(macOS 15, *)
+    @Test("gemma4 optional runtime smoke test")
+    func gemma4OptionalRuntimeSmoke() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["MUESLI_GEMMA4_LITERT_RUNTIME_SMOKE"] == "1",
+              let samplePath = environment["MUESLI_GEMMA4_LITERT_SAMPLE_WAV"] else {
+            return
+        }
+
+        let transcriber = Gemma4LiteRTTranscriber()
+        try await transcriber.prepare()
+        let result = try await transcriber.transcribe(wavURL: URL(fileURLWithPath: samplePath))
+        #expect(!result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+}
+
 @Suite("Backend coverage")
 struct BackendCoverageTests {
 
@@ -87,6 +273,7 @@ struct BackendCoverageTests {
         #expect(backendCounts["whisper"]! >= 1, "Whisper should have at least 1 model")
         #expect(backendCounts["sensevoice"]! >= 1, "SenseVoice should have at least 1 model")
         #expect(backendCounts["nemotron35"]! == 1, "Nemotron 3.5 should be the only Nemotron backend")
+        #expect(backendCounts["gemma4-litert"]! == 1, "Gemma 4 LiteRT should have exactly 1 experimental model")
     }
 
     @Test("size labels are human-readable")

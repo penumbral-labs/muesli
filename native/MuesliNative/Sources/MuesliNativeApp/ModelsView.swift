@@ -563,7 +563,8 @@ struct ModelsView: View {
     @ViewBuilder
     private func brandLogo(_ name: String?) -> some View {
         if let name,
-           let url = Bundle.main.url(forResource: name, withExtension: "png"),
+           let url = Bundle.main.url(forResource: name, withExtension: "png")
+                ?? Bundle.main.url(forResource: name, withExtension: "svg"),
            let nsImage = NSImage(contentsOf: url) {
             Image(nsImage: nsImage)
                 .resizable()
@@ -584,6 +585,7 @@ struct ModelsView: View {
         case "canary": return "qwen-logo"
         case "indicasr": return "ai4bharat-logo"
         case "sensevoice": return "qwen-logo"
+        case "gemma4-litert": return "google-logo"
         default: return nil
         }
     }
@@ -1107,6 +1109,9 @@ struct ModelsView: View {
             }
         case "sensevoice":
             SenseVoiceTranscriber.deleteModelFiles(fileManager: fm)
+        case "gemma4-litert":
+            await controller.transcriptionCoordinator.unloadGemma4LiteRTTranscriber()
+            try Gemma4LiteRTModelStore.deleteModelFiles(fileManager: fm)
         case "fluidaudio":
             // FluidAudio models are in ~/Library/Application Support/FluidAudio/Models/
             let supportDir = fm.homeDirectoryForCurrentUser
@@ -1200,6 +1205,8 @@ struct ModelsView: View {
             return IndicASRModelStore.isAvailableLocally()
         case "sensevoice":
             return SenseVoiceTranscriber.isModelDownloaded()
+        case "gemma4-litert":
+            return Gemma4LiteRTModelStore.isAvailableLocally(fileManager: fm)
         default:
             return false
         }

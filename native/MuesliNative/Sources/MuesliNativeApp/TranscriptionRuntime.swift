@@ -15,7 +15,7 @@ struct SpeechTranscriptionResult: Sendable {
 
 actor TranscriptionCoordinator {
     static let explicitlyRoutedBackendIdentifiers: Set<String> = [
-        "whisper", "nemotron35", "qwen", "canary", "cohere", "indicasr", "sensevoice",
+        "whisper", "nemotron35", "qwen", "canary", "cohere", "indicasr", "sensevoice", "gemma4-litert",
     ]
 
     private let fluidTranscriber = FluidAudioTranscriber()
@@ -25,6 +25,7 @@ actor TranscriptionCoordinator {
     private var _canaryQwenTranscriber: Any?
     private var _cohereTranscriber: Any?
     private var _indicASRTranscriber: Any?
+    private var _gemma4LiteRTTranscriber: Any?
     private let senseVoiceTranscriber = SenseVoiceTranscriber()
     private var vadManager: VadManager?
     private var diarizerManager: DiarizerManager?
@@ -68,6 +69,13 @@ actor TranscriptionCoordinator {
     func unloadNemotron35Transcriber() async {
         if #available(macOS 15, *), let transcriber = _nemotron35Transcriber as? Nemotron35StreamingTranscriber {
             await transcriber.shutdown()
+        }
+    }
+
+    func unloadGemma4LiteRTTranscriber() async {
+        if #available(macOS 15, *), let transcriber = _gemma4LiteRTTranscriber as? Gemma4LiteRTTranscriber {
+            await transcriber.shutdown()
+            _gemma4LiteRTTranscriber = nil
         }
     }
 
@@ -164,6 +172,14 @@ actor TranscriptionCoordinator {
             _indicASRTranscriber = IndicASRTranscriber()
         }
         return _indicASRTranscriber as! IndicASRTranscriber
+    }
+
+    @available(macOS 15, *)
+    private var gemma4LiteRTTranscriber: Gemma4LiteRTTranscriber {
+        if _gemma4LiteRTTranscriber == nil {
+            _gemma4LiteRTTranscriber = Gemma4LiteRTTranscriber()
+        }
+        return _gemma4LiteRTTranscriber as! Gemma4LiteRTTranscriber
     }
 
     func preload(
@@ -276,6 +292,14 @@ actor TranscriptionCoordinator {
             }
         case "sensevoice":
             try await senseVoiceTranscriber.loadModels(progress: progress)
+        case "gemma4-litert":
+            if #available(macOS 15, *) {
+                try await gemma4LiteRTTranscriber.prepare(progress: progress)
+            } else {
+                throw NSError(domain: "MuesliTranscriptionRuntime", code: 7, userInfo: [
+                    NSLocalizedDescriptionKey: "Gemma 4 E2B requires macOS 15 or later.",
+                ])
+            }
         default:
             throw NSError(domain: "MuesliTranscriptionRuntime", code: 5, userInfo: [
                 NSLocalizedDescriptionKey: "Unknown transcription backend: \(backend.backend)",
@@ -406,6 +430,9 @@ actor TranscriptionCoordinator {
             await canaryQwenTranscriber.shutdown()
             await cohereTranscriber.shutdown()
             await indicASRTranscriber.shutdown()
+            if let gemma4 = _gemma4LiteRTTranscriber as? Gemma4LiteRTTranscriber {
+                await gemma4.shutdown()
+            }
         }
     }
 
@@ -517,6 +544,8 @@ actor TranscriptionCoordinator {
             return try await transcribeWithIndicASR(url: url, language: indicASRLanguage)
         case "sensevoice":
             return try await transcribeWithSenseVoice(url: url)
+        case "gemma4-litert":
+            return try await transcribeWithGemma4LiteRT(url: url)
         default:
             return try await transcribeWithFluidAudio(url: url)
         }
@@ -582,6 +611,27 @@ actor TranscriptionCoordinator {
             // FluidAudio's SenseVoice API returns plain text only, so timestamped segments are not available here.
             segments: text.isEmpty ? [] : [SpeechSegment(start: 0, end: 0, text: text)]
         )
+    }
+
+    // MARK: - Gemma 4 E2B (LiteRT-LM multimodal)
+
+    private func transcribeWithGemma4LiteRT(url: URL) async throws -> SpeechTranscriptionResult {
+        if #available(macOS 15, *) {
+            Gemma4LiteRTLogging.log("transcribing \(url.lastPathComponent)")
+            let transcriber = gemma4LiteRTTranscriber
+            try await transcriber.prepare()
+            let result = try await transcriber.transcribe(wavURL: url)
+            Gemma4LiteRTLogging.log("result chars=\(result.text.count), processingTime=\(String(format: "%.3f", result.processingTime))s")
+            let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return SpeechTranscriptionResult(
+                text: text,
+                segments: text.isEmpty ? [] : [SpeechSegment(start: 0, end: 0, text: text)]
+            )
+        } else {
+            throw NSError(domain: "Muesli", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Gemma 4 E2B requires macOS 15 or later.",
+            ])
+        }
     }
 
     private func transcribeWithCanaryQwen(url: URL) async throws -> SpeechTranscriptionResult {
