@@ -176,6 +176,21 @@ struct Gemma4LiteRTTranscriberTests {
         #expect(Gemma4LiteRTModelStore.resolvedBackend(environment: [Gemma4LiteRTModelStore.backendEnvVar: "webgpu"]) == "cpu")
     }
 
+    @Test("gemma4 default prompt is hardened for ASR-only output")
+    func gemma4DefaultPromptIsASROnly() {
+        let prompt = Gemma4LiteRTModelStore.defaultPrompt.lowercased()
+
+        #expect(prompt.contains("asr transcription engine"))
+        #expect(prompt.contains("speech segment"))
+        #expect(prompt.contains("return only the spoken words"))
+        #expect(prompt.contains("never answer the speaker"))
+        #expect(prompt.contains("never offer help"))
+        #expect(prompt.contains("never ask for an upload"))
+        #expect(prompt.contains("never mention that you cannot access audio"))
+        #expect(prompt.contains("do not summarize"))
+        #expect(prompt.contains("return an empty transcript"))
+    }
+
     @available(macOS 15, *)
     @Test("gemma4 response parser throws on unrecognized content")
     func gemma4ResponseParserThrowsOnUnknownShape() {
