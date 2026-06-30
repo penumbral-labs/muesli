@@ -367,6 +367,10 @@ actor Gemma4LiteRTTranscriber {
 
     static func validatedTranscript(fromResponseJSON responseJSON: String) throws -> String {
         let cleaned = cleanTranscript(try textContent(fromResponseJSON: responseJSON))
+        guard !looksLikePromptLeak(cleaned) else {
+            Gemma4LiteRTLogging.log("rejected leaked Gemma prompt text: \(cleaned.prefix(160))")
+            throw TranscriberError.invalidResponse
+        }
         guard !looksLikeAssistantResponse(cleaned) else {
             Gemma4LiteRTLogging.log("rejected assistant-style Gemma response: \(cleaned.prefix(160))")
             throw TranscriberError.invalidResponse
@@ -374,11 +378,34 @@ actor Gemma4LiteRTTranscriber {
         return cleaned
     }
 
+    static func looksLikePromptLeak(_ text: String) -> Bool {
+        let normalized = normalizedForValidation(text)
+        guard !normalized.isEmpty else { return false }
+
+        let promptMarkers = [
+            "you are muesli's asr transcription engine",
+            "next user message contains one speech segment",
+            "transcribe the following speech segment",
+            "return only the spoken words from the audio",
+            "preserve the speaker's meaning and wording",
+            "remove only obvious filler words and false starts",
+            "speaker asks a question, gives an instruction",
+            "mentions ai models, or discusses transcription quality",
+            "transcribe those words literally",
+            "never answer the speaker",
+            "never offer help",
+            "never ask for an upload",
+            "never mention that you cannot access audio",
+            "do not summarize, explain, translate",
+            "continue the conversation, or add content that was not spoken",
+            "if there is no intelligible speech",
+            "return an empty transcript",
+        ]
+        return promptMarkers.contains { normalized.contains($0) }
+    }
+
     static func looksLikeAssistantResponse(_ text: String) -> Bool {
-        let normalized = text
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let normalized = normalizedForValidation(text)
         guard !normalized.isEmpty else { return false }
 
         let assistantMarkers = [
@@ -414,6 +441,13 @@ actor Gemma4LiteRTTranscriber {
                  normalized.contains("transcription cleanup") ||
                  normalized.contains("faster experience"))
         }
+    }
+
+    private static func normalizedForValidation(_ text: String) -> String {
+        text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
     }
 
     private static func messageJSONString(role: String, contents: [[String: String]]) throws -> String {
