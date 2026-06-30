@@ -114,7 +114,7 @@ struct BackendOption: Equatable {
         model: Gemma4LiteRTModelStore.repoID,
         label: "Gemma 4 E2B",
         sizeLabel: "~2.6 GB",
-        description: "Experimental direct audio-to-polished-text Gemma 4 backend using LiteRT-LM. Downloads managed local weights, requires macOS 15+, and is best for short dictations while output limits are tuned.",
+        description: "Experimental Gemma 4 LiteRT-LM evaluation backend. Downloads managed local weights, requires macOS 15+, and is not production ASR until an ASR-tuned Gemma artifact is available; chat-style outputs fail closed.",
         recommended: false
     )
 

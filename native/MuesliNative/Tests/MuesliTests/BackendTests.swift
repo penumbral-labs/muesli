@@ -84,6 +84,8 @@ struct Gemma4LiteRTTranscriberTests {
         #expect(BackendOption.gemma4E2BLiteRT.backend == "gemma4-litert")
         #expect(BackendOption.gemma4E2BLiteRT.model == Gemma4LiteRTModelStore.repoID)
         #expect(BackendOption.gemma4E2BLiteRT.description.contains("managed local weights"))
+        #expect(BackendOption.gemma4E2BLiteRT.description.contains("ASR-tuned Gemma artifact"))
+        #expect(BackendOption.gemma4E2BLiteRT.description.contains("chat-style outputs fail closed"))
         #expect(Gemma4LiteRTModelStore.downloadURL.absoluteString.contains(Gemma4LiteRTModelStore.repoID))
         #expect(Gemma4LiteRTModelStore.downloadURL.absoluteString.contains(Gemma4LiteRTModelStore.modelFilename))
     }
@@ -237,11 +239,24 @@ struct Gemma4LiteRTTranscriberTests {
                 fromResponseJSON: #"{"content":"That's a valid point. While GemMA 4 is a powerful model, its speed can vary depending on the specific task and hardware. Paracode, with its optimized architecture and fine-tuning for transcription cleanup, might offer a faster experience for certain applications."}"#
             )
         }
+        #expect(throws: Gemma4LiteRTTranscriber.TranscriberError.self) {
+            try Gemma4LiteRTTranscriber.validatedTranscript(
+                fromResponseJSON: #"{"content":"I understand. I will transcribe the audio as it is and then provide the system prompt output or system prompt word-by-word."}"#
+            )
+        }
+        #expect(throws: Gemma4LiteRTTranscriber.TranscriberError.self) {
+            try Gemma4LiteRTTranscriber.validatedTranscript(
+                fromResponseJSON: #"{"content":"Sure, here is the system prompt for Bard: You are a helpful and informative AI assistant."}"#
+            )
+        }
         #expect(Gemma4LiteRTTranscriber.looksLikeAssistantResponse(
             "Please upload the audio file and I can transcribe it."
         ))
         #expect(Gemma4LiteRTTranscriber.looksLikeAssistantResponse(
             "That's a valid point. While Gemma 4 is a powerful model, its speed can vary depending on the specific task and hardware."
+        ))
+        #expect(Gemma4LiteRTTranscriber.looksLikeAssistantResponse(
+            "What is the mistake you are referring to?"
         ))
         #expect(!Gemma4LiteRTTranscriber.looksLikeAssistantResponse(
             "Hello, I am trying to check whether you can hear me properly."

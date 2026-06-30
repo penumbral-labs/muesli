@@ -157,8 +157,8 @@ struct BackendOptionTests {
         #expect(BackendOption.gemma4E2BLiteRT.sizeLabel == "~2.6 GB")
         #expect(BackendOption.gemma4E2BLiteRT.description.contains("LiteRT-LM"))
         #expect(BackendOption.gemma4E2BLiteRT.description.contains("Downloads managed local weights"))
-        #expect(BackendOption.gemma4E2BLiteRT.description.contains("short dictations"))
-        #expect(BackendOption.gemma4E2BLiteRT.description.contains("output limits"))
+        #expect(BackendOption.gemma4E2BLiteRT.description.contains("ASR-tuned Gemma artifact"))
+        #expect(BackendOption.gemma4E2BLiteRT.description.contains("chat-style outputs fail closed"))
         #expect(BackendOption.experimental.contains(.gemma4E2BLiteRT))
         #expect(!BackendOption.onboarding.contains(.gemma4E2BLiteRT))
     }
