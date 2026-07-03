@@ -66,14 +66,14 @@ struct MeetingRecordingWriterTests {
     }
 
     @Test("persistTemporaryRecording transcodes to M4A by default")
-    func persistTemporaryRecordingTranscodesToM4AByDefault() throws {
+    func persistTemporaryRecordingTranscodesToM4AByDefault() async throws {
         let writer = try MeetingRecordingWriter()
         writer.appendSystem(Array(repeating: Int16(1200), count: 16_000))
         let tempURL = try #require(writer.stop())
         let supportDirectory = makeTemporaryDirectory()
         let startedAt = Date(timeIntervalSince1970: 1_711_000_000)
 
-        let savedURL = try MeetingRecordingWriter.persistTemporaryRecording(
+        let savedURL = try await MeetingRecordingWriter.persistTemporaryRecordingAsync(
             from: tempURL,
             meetingTitle: "Weekly Product Sync",
             startedAt: startedAt,
