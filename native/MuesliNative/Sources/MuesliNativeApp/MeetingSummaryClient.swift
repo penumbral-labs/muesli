@@ -38,8 +38,11 @@ enum MeetingSummaryRetryPolicy {
         }
 
         switch summaryError {
-        case .requestFailed(_, let underlying):
+        case .requestFailed(let backend, let underlying):
             if isPermanentRequestFailure(underlying) {
+                return false
+            }
+            if isLocalBackend(backend), isLocalEndpointUnavailable(underlying) {
                 return false
             }
             return true
@@ -47,11 +50,23 @@ enum MeetingSummaryRetryPolicy {
             return true
         case .backendFailed(_, let statusCode, _):
             guard let statusCode else { return false }
-            return statusCode == 408
-                || statusCode == 409
-                || statusCode == 425
-                || statusCode == 429
-                || (500..<600).contains(statusCode)
+            return isTransientHTTPStatus(statusCode)
+        }
+    }
+
+    static func effectiveRetryCount(configuredCount: Int, after error: Error) -> Int {
+        let retryCount = clampedRetryCount(configuredCount)
+        guard retryCount > 0, shouldRetry(error) else { return 0 }
+        guard let summaryError = error as? MeetingSummaryError else { return 0 }
+
+        switch summaryError {
+        case .requestFailed(let backend, _),
+             .emptyResponse(let backend),
+             .backendFailed(let backend, _, _):
+            if isLocalBackend(backend) {
+                return min(retryCount, 1)
+            }
+            return retryCount
         }
     }
 
@@ -69,6 +84,33 @@ enum MeetingSummaryRetryPolicy {
         default:
             return false
         }
+    }
+
+    private static func isLocalBackend(_ backend: String) -> Bool {
+        let normalized = backend.lowercased()
+        return normalized == MeetingSummaryBackendOption.ollama.backend
+            || normalized == MeetingSummaryBackendOption.lmStudio.backend
+            || normalized == "lm studio"
+    }
+
+    private static func isLocalEndpointUnavailable(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else {
+            return false
+        }
+        switch urlError.code {
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isTransientHTTPStatus(_ statusCode: Int) -> Bool {
+        statusCode == 408
+            || statusCode == 409
+            || statusCode == 425
+            || statusCode == 429
+            || (500..<600).contains(statusCode)
     }
 
     static func retryDelay(forAttempt attempt: Int) -> TimeInterval {
@@ -143,12 +185,15 @@ enum MeetingSummaryClient {
             do {
                 return try await operation()
             } catch {
-                guard attempt < retryCount,
-                      MeetingSummaryRetryPolicy.shouldRetry(error) else {
+                let effectiveRetryCount = MeetingSummaryRetryPolicy.effectiveRetryCount(
+                    configuredCount: retryCount,
+                    after: error
+                )
+                guard attempt < effectiveRetryCount else {
                     throw error
                 }
                 attempt += 1
-                fputs("[summary] retrying summary generation after failure (\(attempt)/\(retryCount)): \(error.localizedDescription)\n", stderr)
+                fputs("[summary] retrying summary generation after failure (\(attempt)/\(effectiveRetryCount)): \(error.localizedDescription)\n", stderr)
                 try await sleep(MeetingSummaryRetryPolicy.retryDelay(forAttempt: attempt))
             }
         }
