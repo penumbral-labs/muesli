@@ -20,6 +20,104 @@ enum MeetingSummaryError: LocalizedError {
     }
 }
 
+enum MeetingSummaryRetryPolicy {
+    static let defaultRetryCount = 3
+    static let maximumRetryCount = 5
+
+    static func clampedRetryCount(_ count: Int) -> Int {
+        min(max(count, 0), maximumRetryCount)
+    }
+
+    static func shouldRetry(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return false
+        }
+
+        guard let summaryError = error as? MeetingSummaryError else {
+            return false
+        }
+
+        switch summaryError {
+        case .requestFailed(let backend, let underlying):
+            if isPermanentRequestFailure(underlying) {
+                return false
+            }
+            if isLocalBackend(backend), isLocalEndpointUnavailable(underlying) {
+                return false
+            }
+            return true
+        case .emptyResponse:
+            return true
+        case .backendFailed(_, let statusCode, _):
+            guard let statusCode else { return false }
+            return isTransientHTTPStatus(statusCode)
+        }
+    }
+
+    static func effectiveRetryCount(configuredCount: Int, after error: Error) -> Int {
+        let retryCount = clampedRetryCount(configuredCount)
+        guard retryCount > 0, shouldRetry(error) else { return 0 }
+        guard let summaryError = error as? MeetingSummaryError else { return 0 }
+
+        switch summaryError {
+        case .requestFailed(let backend, _),
+             .emptyResponse(let backend),
+             .backendFailed(let backend, _, _):
+            if isLocalBackend(backend) {
+                return min(retryCount, 1)
+            }
+            return retryCount
+        }
+    }
+
+    private static func isPermanentRequestFailure(_ error: Error) -> Bool {
+        if error is CancellationError || error is ChatGPTAuthError {
+            return true
+        }
+
+        guard let urlError = error as? URLError else {
+            return false
+        }
+        switch urlError.code {
+        case .badURL, .unsupportedURL, .cancelled:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isLocalBackend(_ backend: String) -> Bool {
+        let normalized = backend.lowercased()
+        return normalized == MeetingSummaryBackendOption.ollama.backend
+            || normalized == MeetingSummaryBackendOption.lmStudio.backend
+            || normalized == "lm studio"
+    }
+
+    private static func isLocalEndpointUnavailable(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else {
+            return false
+        }
+        switch urlError.code {
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isTransientHTTPStatus(_ statusCode: Int) -> Bool {
+        statusCode == 408
+            || statusCode == 409
+            || statusCode == 425
+            || statusCode == 429
+            || (500..<600).contains(statusCode)
+    }
+
+    static func retryDelay(forAttempt attempt: Int) -> TimeInterval {
+        min(pow(2.0, Double(max(attempt - 1, 0))), 8.0)
+    }
+}
+
 enum MeetingSummaryClient {
     private static let logger = Logger(subsystem: "com.muesli.native", category: "MeetingSummary")
     private static let openAIURL = URL(string: "https://api.openai.com/v1/responses")!
@@ -60,6 +158,55 @@ enum MeetingSummaryClient {
         existingNotes: String? = nil,
         manualNotesToRetain: String? = nil,
         visualContext: String? = nil
+    ) async throws -> String {
+        try await withSummaryRetries(maxRetries: config.meetingSummaryRetryCount) {
+            try await summarizeOnce(
+                transcript: transcript,
+                meetingTitle: meetingTitle,
+                config: config,
+                template: template,
+                existingNotes: existingNotes,
+                manualNotesToRetain: manualNotesToRetain,
+                visualContext: visualContext
+            )
+        }
+    }
+
+    static func withSummaryRetries(
+        maxRetries: Int,
+        sleep: (TimeInterval) async throws -> Void = { delay in
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        },
+        operation: () async throws -> String
+    ) async throws -> String {
+        let retryCount = MeetingSummaryRetryPolicy.clampedRetryCount(maxRetries)
+        var attempt = 0
+        while true {
+            do {
+                return try await operation()
+            } catch {
+                let effectiveRetryCount = MeetingSummaryRetryPolicy.effectiveRetryCount(
+                    configuredCount: retryCount,
+                    after: error
+                )
+                guard attempt < effectiveRetryCount else {
+                    throw error
+                }
+                attempt += 1
+                fputs("[summary] retrying summary generation after failure (\(attempt)/\(effectiveRetryCount)): \(error.localizedDescription)\n", stderr)
+                try await sleep(MeetingSummaryRetryPolicy.retryDelay(forAttempt: attempt))
+            }
+        }
+    }
+
+    private static func summarizeOnce(
+        transcript: String,
+        meetingTitle: String,
+        config: AppConfig,
+        template: MeetingTemplateSnapshot,
+        existingNotes: String?,
+        manualNotesToRetain: String?,
+        visualContext: String?
     ) async throws -> String {
         let backend = (config.meetingSummaryBackend.isEmpty ? MeetingSummaryBackendOption.chatGPT.backend : config.meetingSummaryBackend).lowercased()
         let generatedNotes: String

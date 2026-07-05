@@ -528,6 +528,7 @@ struct AppConfigTests {
         #expect(config.meetingRecordingFileFormat == MeetingRecordingFileFormat.m4a.rawValue)
         #expect(config.resolvedMeetingRecordingFileFormat == .m4a)
         #expect(config.openRouterAPIKey.isEmpty)
+        #expect(config.meetingSummaryRetryCount == MeetingSummaryRetryPolicy.defaultRetryCount)
         #expect(config.ollamaURL == "http://localhost:11434")
         #expect(config.ollamaModel == "qwen3.5")
         #expect(config.lmStudioURL == "http://localhost:1234")
@@ -741,6 +742,7 @@ struct AppConfigTests {
         config.customLLMAPIKey = "custom-key"
         config.customLLMModel = "custom-model"
         config.customLLMFormat = "anthropic"
+        config.meetingSummaryRetryCount = 5
         config.postProcessorBackend = TranscriptCleanupBackendOption.hosted(.openRouter).backend
         config.postProcessorChatGPTModel = "gpt-5.4-mini"
         config.postProcessorOpenAIModel = "gpt-5.4-mini"
@@ -816,6 +818,7 @@ struct AppConfigTests {
         #expect(decoded.customLLMAPIKey == "custom-key")
         #expect(decoded.customLLMModel == "custom-model")
         #expect(decoded.customLLMFormat == "anthropic")
+        #expect(decoded.meetingSummaryRetryCount == 5)
         #expect(decoded.postProcessorBackend == "openrouter")
         #expect(decoded.postProcessorChatGPTModel == "gpt-5.4-mini")
         #expect(decoded.postProcessorOpenAIModel == "gpt-5.4-mini")
@@ -892,6 +895,7 @@ struct AppConfigTests {
         #expect(json["custom_llm_api_key"] != nil)
         #expect(json["custom_llm_model"] != nil)
         #expect(json["custom_llm_format"] != nil)
+        #expect(json["meeting_summary_retry_count"] != nil)
         #expect(json["post_processor_backend"] != nil)
         #expect(json["post_processor_chatgpt_model"] != nil)
         #expect(json["post_processor_openai_model"] != nil)
@@ -966,11 +970,27 @@ struct AppConfigTests {
         #expect(config.customLLMAPIKey.isEmpty)
         #expect(config.customLLMModel.isEmpty)
         #expect(config.customLLMFormat == "openai")
+        #expect(config.meetingSummaryRetryCount == MeetingSummaryRetryPolicy.defaultRetryCount)
         #expect(config.postProcessorBackend == TranscriptCleanupBackendOption.local.backend)
         #expect(config.activeTranscriptCleanupPromptId == TranscriptCleanupPrompts.defaultID)
         #expect(config.customTranscriptCleanupPrompts.isEmpty)
         #expect(config.enableScreenContext == false)
         #expect(config.enableDictationOCRContext == false)
+    }
+
+    @Test("meeting summary retry count is clamped on decode")
+    func meetingSummaryRetryCountIsClampedOnDecode() throws {
+        let negativeConfig = try JSONDecoder().decode(
+            AppConfig.self,
+            from: Data(#"{"meeting_summary_retry_count": -3}"#.utf8)
+        )
+        let excessiveConfig = try JSONDecoder().decode(
+            AppConfig.self,
+            from: Data(#"{"meeting_summary_retry_count": 99}"#.utf8)
+        )
+
+        #expect(negativeConfig.meetingSummaryRetryCount == 0)
+        #expect(excessiveConfig.meetingSummaryRetryCount == MeetingSummaryRetryPolicy.maximumRetryCount)
     }
 
     @Test("unknown cleanup backend resolves to local")
