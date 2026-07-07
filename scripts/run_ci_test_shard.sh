@@ -61,6 +61,9 @@ case "${shard}" in
       MeetingDetectorTests
       MeetingRecordingWriterTests
       MeetingResumePolicyTests
+      MeetingFollowUpPolicyTests
+      MeetingFollowUpThreadTests
+      MeetingFollowUpSummaryPromptTests
       MeetingSummaryClientTests
       MeetingsNavigationTests
       MeetingBrowserLogicTests

@@ -75,6 +75,7 @@ struct MeetingDetailView: View {
     @State private var showFolderPopover = false
     @State private var showNewFolderPrompt = false
     @State private var newFolderName = ""
+    @State private var threadContext: MeetingThreadContext?
 
     init(
         meeting: MeetingRecord?,
@@ -110,6 +111,9 @@ struct MeetingDetailView: View {
                     content(for: meeting)
                 }
                 .background(MuesliTheme.backgroundBase)
+                .onAppear {
+                    threadContext = controller.meetingThreadContext(for: meeting.id)
+                }
                 .onChange(of: meeting.id) { _, _ in
                     syncLocalState(with: meeting)
                 }
@@ -211,6 +215,8 @@ struct MeetingDetailView: View {
                     }
 
                     folderPill(for: meeting)
+
+                    threadBreadcrumb
                 }
 
                 Spacer(minLength: MuesliTheme.spacing16)
@@ -998,12 +1004,22 @@ struct MeetingDetailView: View {
         .help(isPaused ? "Resume recording" : "Pause recording")
     }
 
-    /// Shown on a finished meeting when no recording is active. Appends the next
-    /// recording segment to this existing meeting artifact.
+    /// Shown on a finished meeting when no recording is active. The primary
+    /// action resumes recording into this meeting artifact; the menu also offers
+    /// starting a linked follow-up meeting.
     @ViewBuilder
     private func resumeRecordingButton(for meeting: MeetingRecord) -> some View {
-        Button {
-            controller.resumeFinishedMeeting(meetingID: meeting.id)
+        Menu {
+            Button {
+                controller.resumeFinishedMeeting(meetingID: meeting.id)
+            } label: {
+                Label("Resume recording", systemImage: "record.circle")
+            }
+            Button {
+                controller.startFollowUpMeeting(fromMeetingID: meeting.id)
+            } label: {
+                Label("Start a follow-up", systemImage: "arrow.turn.down.right")
+            }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "record.circle")
@@ -1020,10 +1036,13 @@ struct MeetingDetailView: View {
                 RoundedRectangle(cornerRadius: MuesliTheme.cornerSmall)
                     .strokeBorder(MuesliTheme.accent.opacity(0.35), lineWidth: 1)
             )
+        } primaryAction: {
+            controller.resumeFinishedMeeting(meetingID: meeting.id)
         }
+        .menuStyle(.button)
         .buttonStyle(.plain)
         .fixedSize()
-        .help("Resume recording")
+        .help("Resume recording, or start a follow-up meeting")
     }
 
     private var stopRecordingButton: some View {
@@ -1069,6 +1088,52 @@ struct MeetingDetailView: View {
         .padding(.vertical, 4)
         .background(MuesliTheme.accentSubtle)
         .clipShape(Capsule())
+    }
+
+    /// Breadcrumb strip shown when this meeting is part of a follow-up thread:
+    /// a link up to the predecessor, "Part N of M", and a link down to the
+    /// successor. Root meetings show no predecessor link; the latest meeting in
+    /// the thread shows no successor link.
+    @ViewBuilder
+    private var threadBreadcrumb: some View {
+        if let threadContext {
+            VStack(alignment: .leading, spacing: 4) {
+                if let predecessor = threadContext.predecessor {
+                    threadLink(
+                        icon: "arrow.turn.left.up",
+                        text: "Follow-up to: \(predecessor.title) \u{00B7} \(MeetingBrowserLogic.formatStartTime(predecessor.startTime))",
+                        targetID: predecessor.id
+                    )
+                }
+                Text("Part \(threadContext.position) of \(threadContext.count)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(MuesliTheme.textTertiary)
+                if let successor = threadContext.successor {
+                    threadLink(
+                        icon: "arrow.turn.left.down",
+                        text: "Followed by: \(successor.title) \u{00B7} \(MeetingBrowserLogic.formatStartTime(successor.startTime))",
+                        targetID: successor.id
+                    )
+                }
+            }
+        }
+    }
+
+    private func threadLink(icon: String, text: String, targetID: Int64) -> some View {
+        Button {
+            controller.showMeetingDocument(id: targetID)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .semibold))
+                Text(text)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(MuesliTheme.accent)
+        }
+        .buttonStyle(.plain)
+        .help("Open this meeting")
     }
 
     @ViewBuilder
@@ -1447,6 +1512,7 @@ struct MeetingDetailView: View {
         let previousMeetingID = loadedMeetingID
         let meetingChanged = previousMeetingID != meeting?.id
         loadedMeetingID = meeting?.id
+        threadContext = meeting.flatMap { controller.meetingThreadContext(for: $0.id) }
         editableTitle = meeting?.title ?? ""
         if meetingChanged || !isEditingNotes {
             editableNotes = meeting.map { Self.notesContent(for: $0) } ?? ""

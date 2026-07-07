@@ -229,6 +229,9 @@ public struct MeetingRecord: Identifiable, Codable, Sendable {
     public let selectedTemplateKind: MeetingTemplateKind?
     public let selectedTemplatePrompt: String?
     public let source: MeetingSource
+    /// Self-referencing link: the meeting this one is a follow-up to. A chain of
+    /// these pointers forms a meeting thread (root has nil).
+    public let followUpToID: Int64?
 
     public init(
         id: Int64,
@@ -249,7 +252,8 @@ public struct MeetingRecord: Identifiable, Codable, Sendable {
         selectedTemplateName: String? = nil,
         selectedTemplateKind: MeetingTemplateKind? = nil,
         selectedTemplatePrompt: String? = nil,
-        source: MeetingSource = .meeting
+        source: MeetingSource = .meeting,
+        followUpToID: Int64? = nil
     ) {
         self.id = id
         self.title = title
@@ -270,6 +274,7 @@ public struct MeetingRecord: Identifiable, Codable, Sendable {
         self.selectedTemplateKind = selectedTemplateKind
         self.selectedTemplatePrompt = selectedTemplatePrompt
         self.source = source
+        self.followUpToID = followUpToID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -292,6 +297,7 @@ public struct MeetingRecord: Identifiable, Codable, Sendable {
         case selectedTemplateKind
         case selectedTemplatePrompt
         case source
+        case followUpToID
     }
 
     public init(from decoder: Decoder) throws {
@@ -315,7 +321,8 @@ public struct MeetingRecord: Identifiable, Codable, Sendable {
             selectedTemplateName: try c.decodeIfPresent(String.self, forKey: .selectedTemplateName),
             selectedTemplateKind: try c.decodeIfPresent(MeetingTemplateKind.self, forKey: .selectedTemplateKind),
             selectedTemplatePrompt: try c.decodeIfPresent(String.self, forKey: .selectedTemplatePrompt),
-            source: (try? c.decode(MeetingSource.self, forKey: .source)) ?? .meeting
+            source: (try? c.decode(MeetingSource.self, forKey: .source)) ?? .meeting,
+            followUpToID: try c.decodeIfPresent(Int64.self, forKey: .followUpToID)
         )
     }
 
