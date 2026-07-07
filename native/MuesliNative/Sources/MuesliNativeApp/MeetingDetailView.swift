@@ -37,7 +37,9 @@ private struct LiveTranscriptSection: View {
             transcript: MeetingResumePolicy.combinedResumeTranscript(
                 prior: transcriptPrefix,
                 new: appState.liveMeetingTranscript
-            )
+            ),
+            partialYou: appState.liveMeetingPartialYou,
+            partialOthers: appState.liveMeetingPartialOthers
         )
     }
 }

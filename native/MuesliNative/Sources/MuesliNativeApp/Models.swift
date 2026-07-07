@@ -1020,6 +1020,9 @@ struct AppConfig: Codable {
     var enableScreenContext: Bool = false
     var enableDictationOCRContext: Bool = false
     var useCoreAudioTap: Bool = true
+    /// Display-only streaming partials in the live meeting transcript (needs the
+    /// Nemotron 3.5 streaming model on disk; kill switch, never downloads).
+    var enableLiveStreamingPartials: Bool = true
     var meetingHookEnabled: Bool = false
     var meetingHookPath: String = ""
     var meetingHookTimeoutSeconds: Int = 30
@@ -1129,6 +1132,7 @@ struct AppConfig: Codable {
         case enableScreenContext = "enable_screen_context"
         case enableDictationOCRContext = "enable_dictation_ocr_context"
         case useCoreAudioTap = "use_core_audio_tap"
+        case enableLiveStreamingPartials = "enable_live_streaming_partials"
         case meetingHookEnabled = "meeting_hook_enabled"
         case meetingHookPath = "meeting_hook_path"
         case meetingHookTimeoutSeconds = "meeting_hook_timeout_seconds"
@@ -1296,6 +1300,7 @@ struct AppConfig: Codable {
         enableScreenContext = (try? c.decode(Bool.self, forKey: .enableScreenContext)) ?? defaults.enableScreenContext
         enableDictationOCRContext = (try? c.decode(Bool.self, forKey: .enableDictationOCRContext)) ?? defaults.enableDictationOCRContext
         useCoreAudioTap = (try? c.decode(Bool.self, forKey: .useCoreAudioTap)) ?? defaults.useCoreAudioTap
+        enableLiveStreamingPartials = (try? c.decode(Bool.self, forKey: .enableLiveStreamingPartials)) ?? defaults.enableLiveStreamingPartials
         meetingHookEnabled = (try? c.decode(Bool.self, forKey: .meetingHookEnabled)) ?? defaults.meetingHookEnabled
         meetingHookPath = (try? c.decode(String.self, forKey: .meetingHookPath)) ?? defaults.meetingHookPath
         meetingHookTimeoutSeconds = (try? c.decode(Int.self, forKey: .meetingHookTimeoutSeconds)) ?? defaults.meetingHookTimeoutSeconds

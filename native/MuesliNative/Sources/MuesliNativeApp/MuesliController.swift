@@ -4763,8 +4763,21 @@ final class MuesliController: NSObject {
                         self.appState.liveMeetingTranscript += lines.joined(separator: "\n") + "\n"
                     }
                 }
+                meetingSession.onPartialTranscript = { [weak self] speaker, tail in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        guard self.appState.liveMeetingTranscriptOwnerID == meetingID else { return }
+                        if speaker == "You" {
+                            self.appState.liveMeetingPartialYou = tail
+                        } else {
+                            self.appState.liveMeetingPartialOthers = tail
+                        }
+                    }
+                }
                 appState.liveMeetingTranscriptOwnerID = meetingID
                 appState.liveMeetingTranscript = ""
+                appState.liveMeetingPartialYou = ""
+                appState.liveMeetingPartialOthers = ""
                 let micHealthWarningLock = NSLock()
                 var lastForwardedMicHealthWarning: String?
                 meetingSession.onMicHealthChanged = { [weak self] snapshot in
@@ -5377,6 +5390,8 @@ final class MuesliController: NSObject {
                 self.syncAppState()
                 if self.appState.liveMeetingTranscriptOwnerID == liveMeetingID {
                     self.appState.liveMeetingTranscript = ""
+                    self.appState.liveMeetingPartialYou = ""
+                    self.appState.liveMeetingPartialOthers = ""
                     self.appState.liveMeetingTranscriptOwnerID = nil
                 }
                 if let meetingResult {

@@ -55,6 +55,20 @@ actor TranscriptionCoordinator {
         return transcriber
     }
 
+    /// The Nemotron 3.5 streaming transcriber for display-only meeting partials:
+    /// loads models already on disk but never downloads them. Returns nil when
+    /// the model isn't downloaded or loading fails — partials silently stay off.
+    @available(macOS 15, *)
+    func getLoadedNemotron35TranscriberIfDownloaded() async -> Nemotron35StreamingTranscriber? {
+        guard BackendOption.nemotron35Multilingual.isDownloaded else { return nil }
+        do {
+            return try await getLoadedNemotron35Transcriber()
+        } catch {
+            fputs("[meeting-partials] nemotron35 load for live partials failed: \(error)\n", stderr)
+            return nil
+        }
+    }
+
     /// Set the Nemotron 3.5 language prompt id (from app config). Applies to the
     /// live transcriber if it already exists.
     func setNemotron35PromptId(_ id: Int32) async {

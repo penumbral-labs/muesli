@@ -16,6 +16,11 @@ private struct LiveTranscriptGroup: Identifiable {
 
 struct LiveTranscriptView: View {
     let transcript: String
+    /// Provisional streaming tails (issue #99): rendered as dimmed bubbles after
+    /// the committed captions, outside the incremental-parse invariant — they
+    /// never enter `transcript`, so `parsedLength` stays valid.
+    var partialYou: String = ""
+    var partialOthers: String = ""
     @State private var groups: [LiveTranscriptGroup] = []
     // Tracks how many characters of transcript have been parsed into groups.
     // On each onChange we only parse the new suffix, keeping updates O(k)
@@ -26,7 +31,7 @@ struct LiveTranscriptView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
-                    if groups.isEmpty {
+                    if groups.isEmpty && trimmedPartialYou.isEmpty && trimmedPartialOthers.isEmpty {
                         Text("Waiting for speech…")
                             .font(MuesliTheme.body())
                             .foregroundStyle(MuesliTheme.textTertiary)
@@ -34,6 +39,12 @@ struct LiveTranscriptView: View {
                     } else {
                         ForEach(groups) { group in
                             liveBubble(for: group)
+                        }
+                        if !trimmedPartialOthers.isEmpty {
+                            partialBubble(text: trimmedPartialOthers, speaker: "Others", isUser: false)
+                        }
+                        if !trimmedPartialYou.isEmpty {
+                            partialBubble(text: trimmedPartialYou, speaker: "You", isUser: true)
                         }
                         Color.clear
                             .frame(height: 1)
@@ -51,6 +62,12 @@ struct LiveTranscriptView: View {
                     }
                 }
             }
+            .onChange(of: partialYou) { _, _ in
+                scrollToBottom(proxy)
+            }
+            .onChange(of: partialOthers) { _, _ in
+                scrollToBottom(proxy)
+            }
             .onAppear {
                 // @State is freshly initialized on each tab switch, so this
                 // catches up with any chunks that arrived on another tab.
@@ -58,6 +75,22 @@ struct LiveTranscriptView: View {
                 DispatchQueue.main.async {
                     proxy.scrollTo("liveTranscriptBottom", anchor: .bottom)
                 }
+            }
+        }
+    }
+
+    private var trimmedPartialYou: String {
+        partialYou.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedPartialOthers: String {
+        partialOthers.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.15)) {
+                proxy.scrollTo("liveTranscriptBottom", anchor: .bottom)
             }
         }
     }
@@ -93,6 +126,39 @@ struct LiveTranscriptView: View {
                 ))
             }
         }
+    }
+
+    /// Provisional streaming tail: dimmed italic text with a dashed border so
+    /// it visibly reads as "still being spoken" until the committed caption
+    /// replaces it.
+    @ViewBuilder
+    private func partialBubble(text: String, speaker: String, isUser: Bool) -> some View {
+        HStack(alignment: .bottom, spacing: 6) {
+            if isUser { Spacer(minLength: 40) }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(speaker)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(MuesliTheme.textTertiary)
+                Text(text)
+                    .font(.system(size: 13))
+                    .italic()
+                    .foregroundStyle(MuesliTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(isUser ? MuesliTheme.accent.opacity(0.06) : MuesliTheme.surfacePrimary.opacity(0.5))
+            .clipShape(RoundedRectangle(cornerRadius: MuesliTheme.cornerSmall))
+            .overlay(
+                RoundedRectangle(cornerRadius: MuesliTheme.cornerSmall)
+                    .strokeBorder(
+                        MuesliTheme.surfaceBorder,
+                        style: StrokeStyle(lineWidth: 1, dash: [4, 3])
+                    )
+            )
+            if !isUser { Spacer(minLength: 40) }
+        }
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
     }
 
     @ViewBuilder

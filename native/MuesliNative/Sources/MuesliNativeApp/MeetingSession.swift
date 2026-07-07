@@ -172,6 +172,14 @@ final class MeetingSession {
     var manualNotesProvider: (() async -> String?)?
     var liveTitleProvider: (() async -> String?)?
     var onChunkTranscribed: (([SpeechSegment], String) -> Void)?
+    /// Display-only streaming partial for a source ("You"/"Others", tail text).
+    /// Empty text clears the source's tail. Called on a background thread.
+    var onPartialTranscript: ((String, String) -> Void)?
+    /// Streaming partial sessions (macOS 15+), type-erased because stored
+    /// properties cannot be availability-gated. Lock-guarded: assigned from an
+    /// async setup Task, fed on chunkRotationQueue, committed from
+    /// chunk-completion Tasks.
+    private let partialSessionsStorage = OSAllocatedUnfairLock<(mic: Any?, system: Any?)>(initialState: (nil, nil))
     private let screenContextCollector = MeetingScreenContextCollector()
     private var diagnostics: MeetingSessionDiagnostics?
 
@@ -283,6 +291,96 @@ final class MeetingSession {
             // OCR screenshots are safe when using CoreAudio tap (no SCStream conflict)
             await screenContextCollector.startPeriodicCapture(useOCR: config.useCoreAudioTap)
         }
+        setupStreamingPartialsIfAvailable()
+    }
+
+    /// Display-only streaming partials (#99): attach per-source sessions when
+    /// the Nemotron 3.5 streaming model is already on disk. Loading happens off
+    /// the start path so meeting start is never delayed; sessions attach when
+    /// ready. If recording ends first they are simply never fed.
+    private func setupStreamingPartialsIfAvailable() {
+        guard config.enableLiveStreamingPartials else { return }
+        guard #available(macOS 15, *) else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            guard let transcriber = await self.transcriptionCoordinator.getLoadedNemotron35TranscriberIfDownloaded() else { return }
+            let chunkSamples = transcriber.chunkSamples
+            let stillRecording = self.chunkRotationQueue.sync { self.isRecording }
+            guard stillRecording else { return }
+            let mic = MeetingStreamingPartialSession(transcriber: transcriber, chunkSamples: chunkSamples, label: "You")
+            mic.onPartialUpdate = { [weak self] text in self?.onPartialTranscript?("You", text) }
+            let system = MeetingStreamingPartialSession(transcriber: transcriber, chunkSamples: chunkSamples, label: "Others")
+            system.onPartialUpdate = { [weak self] text in self?.onPartialTranscript?("Others", text) }
+            self.partialSessionsStorage.withLock { s in
+                s.mic = mic
+                s.system = system
+            }
+            fputs("[meeting-partials] streaming partials active (chunkSamples=\(chunkSamples))\n", stderr)
+        }
+    }
+
+    @available(macOS 15, *)
+    private func micPartialSession() -> MeetingStreamingPartialSession? {
+        partialSessionsStorage.withLock { $0.mic as? MeetingStreamingPartialSession }
+    }
+
+    @available(macOS 15, *)
+    private func systemPartialSession() -> MeetingStreamingPartialSession? {
+        partialSessionsStorage.withLock { $0.system as? MeetingStreamingPartialSession }
+    }
+
+    private func feedMicPartialSession(_ samples: [Float]) {
+        guard #available(macOS 15, *) else { return }
+        micPartialSession()?.enqueue(samples)
+    }
+
+    private func feedSystemPartialSession(_ samples: [Float]) {
+        guard #available(macOS 15, *) else { return }
+        systemPartialSession()?.enqueue(samples)
+    }
+
+    private func markMicPartialBoundary() {
+        guard #available(macOS 15, *) else { return }
+        micPartialSession()?.markSegmentBoundary()
+    }
+
+    private func markSystemPartialBoundary() {
+        guard #available(macOS 15, *) else { return }
+        systemPartialSession()?.markSegmentBoundary()
+    }
+
+    private func commitMicPartialSegment() {
+        guard #available(macOS 15, *) else { return }
+        micPartialSession()?.commitSegment()
+    }
+
+    private func commitSystemPartialSegment() {
+        guard #available(macOS 15, *) else { return }
+        systemPartialSession()?.commitSegment()
+    }
+
+    private func suspendPartialSessions() {
+        guard #available(macOS 15, *) else { return }
+        micPartialSession()?.suspend()
+        systemPartialSession()?.suspend()
+    }
+
+    private func resumePartialSessions() {
+        guard #available(macOS 15, *) else { return }
+        micPartialSession()?.resume()
+        systemPartialSession()?.resume()
+    }
+
+    private func stopPartialSessions() {
+        guard #available(macOS 15, *) else { return }
+        let sessions = partialSessionsStorage.withLock { s -> (Any?, Any?) in
+            let taken = (s.mic, s.system)
+            s.mic = nil
+            s.system = nil
+            return taken
+        }
+        (sessions.0 as? MeetingStreamingPartialSession)?.stop()
+        (sessions.1 as? MeetingStreamingPartialSession)?.stop()
     }
 
     func pause() {
@@ -294,6 +392,7 @@ final class MeetingSession {
             retainedRecordingWriter?.markPauseBoundary()
             neuralAec.resetForStreaming()
             setPausedStateOnQueue(true)
+            suspendPartialSessions()
             return true
         }
         guard shouldPause else { return }
@@ -308,6 +407,7 @@ final class MeetingSession {
         let shouldResume = chunkRotationQueue.sync { () -> Bool in
             guard isRecording, isPaused else { return false }
             setPausedStateOnQueue(false)
+            resumePartialSessions()
             return true
         }
         guard shouldResume else { return }
@@ -332,6 +432,7 @@ final class MeetingSession {
             systemChunkRecorder = nil
             return (rawRecorder, systemRecorder)
         }
+        stopPartialSessions()
         vadController?.stop()
         vadController = nil
         systemVadController?.stop()
@@ -359,6 +460,7 @@ final class MeetingSession {
         var systemSegments: [SpeechSegment] = []
 
         // Stop VAD controller
+        stopPartialSessions()
         vadController?.stop()
         vadController = nil
         systemVadController?.stop()
@@ -619,6 +721,9 @@ final class MeetingSession {
         let chunkOffset = chunkTiming.startTimeSeconds
 
         fputs("[meeting] rotating raw mic chunk at offset=\(String(format: "%.0f", chunkOffset))s\n", stderr)
+        // Freeze the partial tail accumulated for this chunk; it stays visible
+        // until the chunk's committed caption lands.
+        markMicPartialBoundary()
 
         let task = Task { [weak self] () -> [SpeechSegment] in
             guard let self else { return [] }
@@ -638,6 +743,8 @@ final class MeetingSession {
             Task { [weak self] in
                 let segments = await task.value
                 guard self?.micChunkCollector.retire(id: retireID, segments: segments) == true else { return }
+                // Committed (even when empty) — drop the frozen partial prefix.
+                self?.commitMicPartialSegment()
                 guard !segments.isEmpty else { return }
                 self?.onChunkTranscribed?(segments, "You")
             }
@@ -663,6 +770,7 @@ final class MeetingSession {
         let chunkOffset = chunkTiming.startTimeSeconds
         let chunkDuration = chunkTiming.durationSeconds
         fputs("[meeting] rotating system chunk at offset=\(String(format: "%.0f", chunkOffset))s\n", stderr)
+        markSystemPartialBoundary()
 
         let task = Task { [weak self] () -> [SpeechSegment] in
             defer {
@@ -706,6 +814,7 @@ final class MeetingSession {
             Task { [weak self] in
                 let segments = await task.value
                 guard self?.systemChunkCollector.retire(id: retireID, segments: segments) == true else { return }
+                self?.commitSystemPartialSegment()
                 guard !segments.isEmpty else { return }
                 self?.onChunkTranscribed?(segments, "Others")
             }
@@ -806,6 +915,7 @@ final class MeetingSession {
             self.systemChunkTimingTracker.append(sampleCount: samples.count)
 
             let floatSamples = samples.map { Float($0) / 32767.0 }
+            self.feedSystemPartialSession(floatSamples)
             self.neuralAec.feedSystemSamples(floatSamples)
             let cleanedFloat = self.neuralAec.processStreamingMic([])
             self.appendCleanedMicSamplesOnQueue(cleanedFloat)
@@ -822,6 +932,9 @@ final class MeetingSession {
 
     private func appendCleanedMicSamplesOnQueue(_ cleanedFloat: [Float]) {
         guard !cleanedFloat.isEmpty else { return }
+        // Single funnel for all AEC'd mic audio — the streaming partial tail
+        // must consume exactly the stream the mic chunks record.
+        feedMicPartialSession(cleanedFloat)
         let cleanedInt16 = cleanedFloat.map { sample -> Int16 in
             Int16(max(-1.0, min(1.0, sample)) * 32767)
         }
