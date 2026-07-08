@@ -98,7 +98,33 @@ struct MuesliCLITests {
             savedMeetingID: nil
         )
 
-        #expect(result.transcript + "\n" == "hello from muesli\n")
+        #expect(result.textOutput == "hello from muesli\n")
+    }
+
+    @Test("transcribe markdown output includes title summary and transcript")
+    func transcribeMarkdownOutputIncludesSections() throws {
+        let result = MuesliAudioTranscriptionResult(
+            title: "Demo",
+            transcript: "hello from muesli",
+            summary: "## Summary\n\n- Done",
+            durationSeconds: 2,
+            wordCount: 3,
+            model: .parakeetV3,
+            warnings: [],
+            savedMeetingID: nil
+        )
+
+        #expect(result.markdownOutput == """
+        # Demo
+
+        ## Summary
+
+        - Done
+
+        ## Raw Transcript
+
+        hello from muesli
+        """)
     }
 
     @Test("transcribe json payload follows CLI envelope")
@@ -206,6 +232,9 @@ struct MuesliCLITests {
         #expect(meeting.rawTranscript == "save this imported meeting")
         #expect(meeting.formattedNotes == "## Summary\n\n- Saved")
         #expect(meeting.source == .audioImport)
+        let savedRecordingPath = try #require(meeting.savedRecordingPath)
+        #expect(FileManager.default.fileExists(atPath: savedRecordingPath))
+        #expect(URL(fileURLWithPath: savedRecordingPath).pathExtension == fixture.sourceURL.pathExtension)
         #expect(posted == 1)
     }
 

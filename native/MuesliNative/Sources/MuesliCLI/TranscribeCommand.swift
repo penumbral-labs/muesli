@@ -115,7 +115,7 @@ struct TranscribeCommand: AsyncParsableCommand {
         let outputText: String
         switch format {
         case .text:
-            outputText = result.transcript + "\n"
+            outputText = result.textOutput
         case .markdown:
             outputText = result.markdownOutput + "\n"
         case .json:
@@ -187,6 +187,10 @@ struct MuesliAudioTranscriptionResult {
     let model: TranscribeModel
     let warnings: [String]
     let savedMeetingID: Int64?
+
+    var textOutput: String {
+        transcript + "\n"
+    }
 
     var markdownOutput: String {
         var sections = ["# \(title)"]
@@ -278,8 +282,16 @@ struct MuesliAudioTranscriptionPipeline {
 
         let savedMeetingID: Int64?
         if request.saveMeeting {
-            let savedRecordingPath = try persistRecording(wavURL: prepared.wavURL, title: title, supportDirectory: context.supportDirectory)
             try context.store.migrateIfNeeded()
+            let savedRecordingPath: String?
+            do {
+                savedRecordingPath = try persistRecording(sourceURL: request.sourceURL, title: title, supportDirectory: context.supportDirectory)
+            } catch {
+                let message = "Saving audio copy failed: \(error.localizedDescription)"
+                warnings.append(message)
+                fputs("[muesli-cli] \(message)\n", stderr)
+                savedRecordingPath = nil
+            }
             let now = Date()
             let notes = summary ?? Self.rawTranscriptNotes(transcript: transcript, title: title, summaryRequested: request.summarize, warnings: warnings)
             savedMeetingID = try context.store.insertMeeting(
@@ -339,14 +351,17 @@ struct MuesliAudioTranscriptionPipeline {
         return stem.isEmpty ? "Imported Audio" : stem
     }
 
-    private func persistRecording(wavURL: URL, title: String, supportDirectory: URL) throws -> String {
+    private func persistRecording(sourceURL: URL, title: String, supportDirectory: URL) throws -> String {
         let recordingsDirectory = supportDirectory.appendingPathComponent("meeting-recordings", isDirectory: true)
         try FileManager.default.createDirectory(at: recordingsDirectory, withIntermediateDirectories: true)
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd'T'HH-mm-ss"
-        let filename = "\(formatter.string(from: Date()))_\(safeFilenameComponent(title))_\(UUID().uuidString.prefix(8)).wav"
+        let fileExtension = sourceURL.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "wav"
+            : sourceURL.pathExtension.lowercased()
+        let filename = "\(formatter.string(from: Date()))_\(safeFilenameComponent(title))_\(UUID().uuidString.prefix(8)).\(fileExtension)"
         let destinationURL = recordingsDirectory.appendingPathComponent(filename)
-        try FileManager.default.copyItem(at: wavURL, to: destinationURL)
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
         return destinationURL.path
     }
 
@@ -405,23 +420,17 @@ struct MuesliAudioFilePreparer: AudioPreparing {
         let duration = try await audioDuration(sourceURL: sourceURL)
         try Task.checkCancellation()
 
-        let samples: [Float]
-        do {
-            samples = try AudioConverter().resampleAudioFile(sourceURL)
-        } catch {
-            samples = try await decodeSamplesWithAssetReader(sourceURL: sourceURL)
-        }
-        guard !samples.isEmpty else {
+        let decoded = try await decodeAssetReaderToTemporaryWAV(sourceURL: sourceURL)
+        guard decoded.sampleCount > 0 else {
+            try? FileManager.default.removeItem(at: decoded.wavURL)
             throw PreparationError.noAudioTracks
         }
-
-        let wavURL = try CLIWavWriter.writeTemporaryWAV(samples: samples, directoryName: "muesli-cli-import")
-        let resolvedDuration = duration ?? Double(samples.count) / Double(CLIWavWriter.sampleRate)
+        let resolvedDuration = duration ?? Double(decoded.sampleCount) / Double(CLIWavWriter.sampleRate)
         guard resolvedDuration > 0, resolvedDuration.isFinite else {
-            try? FileManager.default.removeItem(at: wavURL)
+            try? FileManager.default.removeItem(at: decoded.wavURL)
             throw PreparationError.readError("Invalid audio duration.")
         }
-        return PreparedAudioFile(wavURL: wavURL, durationSeconds: resolvedDuration, deleteWhenDone: true)
+        return PreparedAudioFile(wavURL: decoded.wavURL, durationSeconds: resolvedDuration, deleteWhenDone: true)
     }
 
     private struct CompatibleWAVInfo {
@@ -461,7 +470,7 @@ struct MuesliAudioFilePreparer: AudioPreparing {
         return duration > 0 && duration.isFinite ? duration : nil
     }
 
-    private func decodeSamplesWithAssetReader(sourceURL: URL) async throws -> [Float] {
+    private func decodeAssetReaderToTemporaryWAV(sourceURL: URL) async throws -> (wavURL: URL, sampleCount: Int) {
         let asset = AVURLAsset(url: sourceURL)
         let tracks = try await asset.load(.tracks)
         guard let audioTrack = tracks.first(where: { $0.mediaType == .audio }) else {
@@ -488,16 +497,26 @@ struct MuesliAudioFilePreparer: AudioPreparing {
         }
 
         let converter = AudioConverter()
-        var samples: [Float] = []
-        while reader.status == .reading {
-            try Task.checkCancellation()
-            guard let sampleBuffer = output.copyNextSampleBuffer() else { break }
-            samples.append(contentsOf: try converter.resampleSampleBuffer(sampleBuffer))
+        let wavURL = try CLIWavWriter.temporaryWAVURL(directoryName: "muesli-cli-import")
+        do {
+            let sampleCount = try CLIWavWriter.writeWAV(to: wavURL) { handle in
+                var totalSamples = 0
+                while reader.status == .reading {
+                    try Task.checkCancellation()
+                    guard let sampleBuffer = output.copyNextSampleBuffer() else { break }
+                    let chunk = try converter.resampleSampleBuffer(sampleBuffer)
+                    totalSamples += try CLIWavWriter.append(samples: chunk, to: handle)
+                }
+                guard reader.status == .completed else {
+                    throw PreparationError.readError(reader.error?.localizedDescription ?? "Read did not complete")
+                }
+                return totalSamples
+            }
+            return (wavURL, sampleCount)
+        } catch {
+            try? FileManager.default.removeItem(at: wavURL)
+            throw error
         }
-        guard reader.status == .completed else {
-            throw PreparationError.readError(reader.error?.localizedDescription ?? "Read did not complete")
-        }
-        return samples
     }
 }
 
@@ -539,22 +558,54 @@ enum CLIWavWriter {
     static let channels: UInt16 = 1
     static let bitsPerSample: UInt16 = 16
 
-    static func writeTemporaryWAV(samples: [Float], directoryName: String) throws -> URL {
+    static func temporaryWAVURL(directoryName: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(directoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent(UUID().uuidString).appendingPathExtension("wav")
+        return dir.appendingPathComponent(UUID().uuidString).appendingPathExtension("wav")
+    }
+
+    static func writeTemporaryWAV(samples: [Float], directoryName: String) throws -> URL {
+        let url = try temporaryWAVURL(directoryName: directoryName)
         try writeWAV(samples: samples, to: url)
         return url
     }
 
     static func writeWAV(samples: [Float], to url: URL) throws {
-        let int16Samples = samples.map { sample -> Int16 in
-            Int16(max(-1.0, min(1.0, sample)) * 32767)
+        _ = try writeWAV(to: url) { handle in
+            try append(samples: samples, to: handle)
         }
+    }
+
+    @discardableResult
+    static func writeWAV(to url: URL, writeSamples: (FileHandle) throws -> Int) throws -> Int {
+        _ = FileManager.default.createFile(atPath: url.path, contents: header(dataSize: 0))
+        let handle = try FileHandle(forWritingTo: url)
+        do {
+            try handle.seekToEnd()
+            let sampleCount = try writeSamples(handle)
+            let dataSize = UInt32(sampleCount * Int(bitsPerSample / 8))
+            try handle.seek(toOffset: 0)
+            try handle.write(contentsOf: header(dataSize: dataSize))
+            try handle.close()
+            return sampleCount
+        } catch {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+    }
+
+    @discardableResult
+    static func append(samples: [Float], to handle: FileHandle) throws -> Int {
+        guard !samples.isEmpty else { return 0 }
         var data = Data()
-        data.append(header(dataSize: UInt32(int16Samples.count * 2)))
-        int16Samples.withUnsafeBufferPointer { data.append(Data(buffer: $0)) }
-        try data.write(to: url)
+        data.reserveCapacity(samples.count * 2)
+        for sample in samples {
+            var value = Int16(max(-1.0, min(1.0, sample)) * 32767).littleEndian
+            withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+        }
+        try handle.write(contentsOf: data)
+        return samples.count
     }
 
     private static func header(dataSize: UInt32) -> Data {
@@ -922,10 +973,23 @@ enum CLISummaryClient {
             pathParts = suffixParts
         } else if pathParts.last == suffixParts.first {
             pathParts = Array(pathParts.dropLast()) + suffixParts
-        } else if !pathParts.suffix(suffixParts.count).elementsEqual(suffixParts) {
+        } else if !isCompleteEndpointPath(pathParts, endpointSuffixParts: suffixParts) {
             pathParts.append(contentsOf: suffixParts)
         }
         components.path = "/" + pathParts.joined(separator: "/")
         return components.url
+    }
+
+    private static func isCompleteEndpointPath(_ pathParts: [String], endpointSuffixParts suffixParts: [String]) -> Bool {
+        if pathParts.suffix(suffixParts.count).elementsEqual(suffixParts) {
+            return true
+        }
+        if suffixParts == ["v1", "chat", "completions"] {
+            return pathParts.suffix(2).elementsEqual(["chat", "completions"])
+        }
+        if suffixParts == ["v1", "messages"] {
+            return pathParts.count >= suffixParts.count && pathParts.last == "messages"
+        }
+        return false
     }
 }

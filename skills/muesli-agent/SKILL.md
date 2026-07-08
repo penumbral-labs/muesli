@@ -11,11 +11,11 @@ Use the local `muesli-cli` CLI as the source of truth for meeting and dictation 
 
 Resolve the binary in this order:
 1. `command -v muesli-cli`
-2. `command -v muesli` for Homebrew installs that expose the cask alias
+2. `command -v muesli` only when the resolved path is a Homebrew cask alias to `Muesli.app/Contents/MacOS/muesli-cli`; verify with `muesli info`
 3. `/Applications/Muesli.app/Contents/MacOS/muesli-cli`
 4. A local SwiftPM build path inside this repo
 
-If discovery is uncertain, run `muesli-cli info` first.
+If discovery is uncertain, run the candidate binary with `info` first and reject unrelated `muesli` executables.
 
 ## Core workflow
 
@@ -32,7 +32,7 @@ If discovery is uncertain, run `muesli-cli info` first.
 
 ## Rules
 
-- Treat CLI stdout as the API. Data commands are JSON by default; `transcribe` is plain text by default and JSON with `--format json`.
+- Treat CLI stdout as the API. Data commands are JSON by default; `transcribe` is plain text by default, Markdown with `--format markdown`, and JSON with `--format json`.
 - Treat stderr as informational only.
 - Do not mutate `rawTranscript`; only update `formattedNotes`.
 - Prefer the meeting transcript when `notesState` is `missing` or `raw_transcript_fallback`.

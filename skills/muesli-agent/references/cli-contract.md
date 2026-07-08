@@ -13,7 +13,7 @@
 
 ## Output shape
 
-Data commands return JSON to stdout. `transcribe` returns plain transcript text by default; pass `--format json` to use the same success envelope.
+Data commands return JSON to stdout. `transcribe` returns plain transcript text by default, `--format markdown` emits markdown text with title, optional summary, and raw transcript sections, and `--format json` uses the same success envelope.
 
 Success envelope:
 ```json
