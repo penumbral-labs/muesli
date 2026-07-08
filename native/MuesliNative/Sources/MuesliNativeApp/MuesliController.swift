@@ -467,7 +467,7 @@ final class MuesliController: NSObject {
             named: "muesli-meeting-recordings",
             logDescription: "leftover temp meeting recording files"
         )
-        cleanupOrphanedMeetingWaveformCacheFiles()
+        cleanupHistoricalMeetingWaveformCacheFilesIfNeeded()
 
         hotkeyMonitor.onArm = { [weak self] in self?.handleArm() }
         hotkeyMonitor.onPrepare = { [weak self] in self?.handlePrepare() }
@@ -5734,18 +5734,28 @@ final class MuesliController: NSObject {
         }
     }
 
-    private func cleanupOrphanedMeetingWaveformCacheFiles() {
+    func cleanupHistoricalMeetingWaveformCacheFilesIfNeeded() {
+        guard !config.waveformCacheOrphanCleanupMigrationApplied else { return }
+        guard cleanupOrphanedMeetingWaveformCacheFiles() else { return }
+        config.waveformCacheOrphanCleanupMigrationApplied = true
+        appState.config = config
+        configStore.save(config)
+    }
+
+    @discardableResult
+    private func cleanupOrphanedMeetingWaveformCacheFiles() -> Bool {
         let meetings: [MeetingRecord]
         do {
             meetings = try dictationStore.recentMeetings(limit: nil)
         } catch {
-            return
+            return false
         }
         let recordingURLs = meetings.compactMap { savedRecordingURL(from: $0.savedRecordingPath) }
         RecordingWaveformCacheFiles.sweepOrphanedCachedWaveforms(
             retainedRecordingURLs: recordingURLs,
             supportDirectory: configStore.supportDirectory()
         )
+        return true
     }
 
     private func clearSavedMeetingRecordingsDirectory() throws {

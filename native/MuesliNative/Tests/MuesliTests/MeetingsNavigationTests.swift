@@ -347,6 +347,43 @@ struct MeetingsNavigationTests {
         #expect(FileManager.default.fileExists(atPath: missingCacheURL.path) == false)
     }
 
+    @Test("historical waveform cache cleanup runs only once")
+    func historicalWaveformCacheCleanupRunsOnlyOnce() throws {
+        let store = try makeStore()
+        let supportDirectory = makeSupportDirectory()
+        defer { try? FileManager.default.removeItem(at: supportDirectory) }
+        try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+        let configStore = ConfigStore(supportDirectory: supportDirectory)
+        let firstMissingRecordingURL = supportDirectory.appendingPathComponent("first-missing.m4a")
+        try Data("first".utf8).write(to: firstMissingRecordingURL)
+        let firstCacheURL = try RecordingWaveformCacheFiles.cacheURL(
+            for: firstMissingRecordingURL,
+            supportDirectory: supportDirectory
+        )
+        try Data("first-cache".utf8).write(to: firstCacheURL)
+        try FileManager.default.removeItem(at: firstMissingRecordingURL)
+        let controller = makeController(dictationStore: store, configStore: configStore)
+
+        controller.cleanupHistoricalMeetingWaveformCacheFilesIfNeeded()
+
+        #expect(FileManager.default.fileExists(atPath: firstCacheURL.path) == false)
+        #expect(configStore.load().waveformCacheOrphanCleanupMigrationApplied)
+
+        let secondMissingRecordingURL = supportDirectory.appendingPathComponent("second-missing.m4a")
+        try Data("second".utf8).write(to: secondMissingRecordingURL)
+        let secondCacheURL = try RecordingWaveformCacheFiles.cacheURL(
+            for: secondMissingRecordingURL,
+            supportDirectory: supportDirectory
+        )
+        try Data("second-cache".utf8).write(to: secondCacheURL)
+        try FileManager.default.removeItem(at: secondMissingRecordingURL)
+        let nextLaunchController = makeController(dictationStore: store, configStore: configStore)
+
+        nextLaunchController.cleanupHistoricalMeetingWaveformCacheFilesIfNeeded()
+
+        #expect(FileManager.default.fileExists(atPath: secondCacheURL.path))
+    }
+
     @Test("deleteMeeting refuses live meeting rows")
     func deleteMeetingRefusesLiveRows() throws {
         let store = try makeStore()
