@@ -1040,6 +1040,13 @@ final class MuesliController: NSObject {
             $0.backend == config.meetingSummaryBackend
         }) ?? .chatGPT
         selectedPostProcessorBackend = TranscriptCleanupBackendOption.resolved(config.postProcessorBackend)
+        applyConfigRuntimeSideEffects(
+            wasICloudSyncEnabled: wasICloudSyncEnabled,
+            hotkeyTriggerThresholdChanged: hotkeyTriggerThresholdChanged
+        )
+    }
+
+    private func applyConfigRuntimeSideEffects(wasICloudSyncEnabled: Bool, hotkeyTriggerThresholdChanged: Bool) {
         statusBarController?.refresh()
         statusBarController?.refreshIcon()
         indicator.refreshIcon()
@@ -1758,6 +1765,21 @@ final class MuesliController: NSObject {
                 message: "Download \(option.label) before using it for meeting transcription."
             )
             normalizeMeetingTranscriptionSelectionForAvailability()
+            return
+        }
+        if !requireDownloaded {
+            let wasICloudSyncEnabled = config.iCloudSyncEnabled
+            config.meetingTranscriptionBackend = option.backend
+            config.meetingTranscriptionModel = option.model
+            configStore.save(config)
+            selectedMeetingTranscriptionBackend = option
+            appState.selectedMeetingTranscriptionBackend = option
+            appState.config = config
+            activeMeetingSession?.updateBackend(option)
+            applyConfigRuntimeSideEffects(
+                wasICloudSyncEnabled: wasICloudSyncEnabled,
+                hotkeyTriggerThresholdChanged: false
+            )
             return
         }
         updateConfig {
