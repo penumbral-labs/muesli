@@ -4444,8 +4444,16 @@ final class MuesliController: NSObject {
     func startFollowUpMeeting(fromMeetingID meetingID: Int64) {
         guard !isMeetingRecording(), !isStartingMeetingRecording else { return }
         guard let clicked = meeting(id: meetingID), canStartFollowUpMeeting(clicked) else { return }
-        let attachTargetID = (try? dictationStore.latestMeetingIDInThread(of: meetingID)) ?? meetingID
-        let predecessor = meeting(id: attachTargetID) ?? clicked
+        let attachTargetID: Int64
+        do {
+            attachTargetID = try dictationStore.latestMeetingIDInThread(of: meetingID)
+        } catch {
+            fputs("[muesli-native] failed to resolve follow-up thread for \(meetingID): \(error)\n", stderr)
+            presentErrorAlert(title: "Follow-up failed", message: error.localizedDescription)
+            return
+        }
+        guard let predecessor = meeting(id: attachTargetID),
+              canStartFollowUpMeeting(predecessor) else { return }
         startMeetingRecording(
             title: MeetingFollowUpPolicy.followUpTitle(from: predecessor.title),
             openDocument: true,

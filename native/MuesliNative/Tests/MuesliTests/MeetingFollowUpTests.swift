@@ -1,4 +1,5 @@
 import Foundation
+import CloudKit
 import Testing
 import MuesliCore
 @testable import MuesliNativeApp
@@ -95,6 +96,22 @@ struct MeetingFollowUpThreadTests {
         )
     }
 
+    private func completeMeeting(_ store: DictationStore, id: Int64, title: String) throws {
+        let start = Date()
+        try store.completeLiveMeeting(
+            id: id,
+            title: title,
+            calendarEventID: nil,
+            startTime: start,
+            endTime: start.addingTimeInterval(60),
+            durationSeconds: 60,
+            rawTranscript: "\(title) transcript",
+            formattedNotes: "\(title) notes",
+            micAudioPath: nil,
+            systemAudioPath: nil
+        )
+    }
+
     @Test("follow-up link persists and reads back on the meeting record")
     func followUpLinkPersists() throws {
         let store = try makeStore()
@@ -173,6 +190,148 @@ struct MeetingFollowUpThreadTests {
         #expect(try store.meetingSuccessorID(of: a) == nil)
         #expect(try store.latestMeetingIDInThread(of: a) == a)
         #expect(try store.meetingThreadIDs(containing: a) == [a])
+    }
+
+    @Test("a predecessor can only have one live follow-up")
+    func oneLiveSuccessorPerPredecessor() throws {
+        let store = try makeStore()
+        let a = try makeMeeting(store, title: "A")
+        _ = try makeMeeting(store, title: "B", followUpToID: a)
+
+        #expect(throws: Error.self) {
+            _ = try makeMeeting(store, title: "C", followUpToID: a)
+        }
+    }
+
+    @Test("soft-deleting a middle meeting splits the remaining thread")
+    func deletedMiddleMeetingSplitsThread() throws {
+        let store = try makeStore()
+        let a = try makeMeeting(store, title: "A")
+        let b = try makeMeeting(store, title: "B", followUpToID: a)
+        let c = try makeMeeting(store, title: "C", followUpToID: b)
+
+        try store.deleteMeeting(id: b)
+
+        #expect(try store.meetingSuccessorID(of: a) == nil)
+        #expect(try store.meetingPredecessorID(of: c) == nil)
+        #expect(try store.meetingThreadIDs(containing: c) == [c])
+    }
+
+    @Test("purging a deleted predecessor does not fail with a live successor")
+    func purgeDeletedPredecessorWithSuccessor() throws {
+        let store = try makeStore()
+        let a = try makeMeeting(store, title: "A")
+        let b = try makeMeeting(store, title: "B", followUpToID: a)
+
+        try store.deleteMeeting(id: a)
+        let purged = try store.purgeSoftDeletedTextRecords(olderThan: 0, now: Date().addingTimeInterval(1))
+
+        #expect(purged.meetings == 1)
+        #expect(try store.meetingPredecessorID(of: b) == nil)
+    }
+
+    @Test("sync export carries stable predecessor record names")
+    func syncExportCarriesStablePredecessorRecordName() throws {
+        let store = try makeStore()
+        let rootID = try makeMeeting(store, title: "Root")
+        let followUpID = try makeMeeting(store, title: "Follow-up: Root", followUpToID: rootID)
+        try completeMeeting(store, id: rootID, title: "Root")
+        try completeMeeting(store, id: followUpID, title: "Follow-up: Root")
+
+        let records = try store.textRecordsNeedingSync(limit: 10)
+            .filter { $0.kind == .meeting }
+        let root = try #require(records.first { $0.title == "Root" })
+        let followUp = try #require(records.first { $0.title == "Follow-up: Root" })
+
+        #expect(root.followUpToRecordName == nil)
+        #expect(followUp.followUpToRecordName == root.id)
+    }
+
+    @Test("sync import resolves follow-up links by stable record name")
+    func syncImportResolvesStablePredecessorRecordName() throws {
+        let store = try makeStore()
+        let timestamp = Date(timeIntervalSince1970: 1_770_000_000)
+
+        #expect(try store.upsertSyncedTextRecord(SyncTextRecord(
+            id: "meeting-follow",
+            kind: .meeting,
+            title: "Follow-up: Root",
+            text: "follow transcript",
+            summaryText: "follow notes",
+            source: "macos",
+            meetingStatus: .completed,
+            createdAt: timestamp.addingTimeInterval(60),
+            updatedAt: timestamp.addingTimeInterval(60),
+            startedAt: timestamp.addingTimeInterval(60),
+            endedAt: timestamp.addingTimeInterval(120),
+            durationSeconds: 60,
+            wordCount: 2,
+            followUpToRecordName: "meeting-root"
+        )))
+        #expect(try store.upsertSyncedTextRecord(SyncTextRecord(
+            id: "meeting-root",
+            kind: .meeting,
+            title: "Root",
+            text: "root transcript",
+            summaryText: "root notes",
+            source: "macos",
+            meetingStatus: .completed,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            startedAt: timestamp,
+            endedAt: timestamp.addingTimeInterval(60),
+            durationSeconds: 60,
+            wordCount: 2
+        )))
+
+        let meetings = try store.recentMeetings(limit: 10)
+        let root = try #require(meetings.first { $0.title == "Root" })
+        let followUp = try #require(meetings.first { $0.title == "Follow-up: Root" })
+
+        #expect(followUp.followUpToRecordName == "meeting-root")
+        #expect(try store.meetingPredecessorID(of: followUp.id) == root.id)
+    }
+
+    @Test("CloudKit sync payload carries stable predecessor record name")
+    func cloudKitPayloadCarriesStablePredecessorRecordName() {
+        let timestamp = Date(timeIntervalSince1970: 1_770_000_000)
+        let cloud = MuesliICloudSyncEngine.syncZoneCloudRecord(from: SyncTextRecord(
+            id: "meeting-follow",
+            kind: .meeting,
+            title: "Follow-up: Root",
+            text: "follow transcript",
+            source: "macos",
+            meetingStatus: .completed,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            startedAt: timestamp,
+            endedAt: timestamp.addingTimeInterval(60),
+            durationSeconds: 60,
+            wordCount: 2,
+            followUpToRecordName: "meeting-root"
+        ))
+
+        #expect(cloud["followUpToRecordName"] as? String == "meeting-root")
+    }
+
+    @Test("legacy meeting record decode defaults follow-up fields")
+    func legacyMeetingRecordDecodeDefaultsFollowUpFields() throws {
+        let json = """
+        {
+          "id": 1,
+          "title": "Legacy",
+          "startTime": "2026-07-01T10:00:00Z",
+          "durationSeconds": 60,
+          "rawTranscript": "hello",
+          "formattedNotes": "notes",
+          "wordCount": 1,
+          "folderID": null
+        }
+        """
+        let record = try JSONDecoder().decode(MeetingRecord.self, from: Data(json.utf8))
+
+        #expect(record.followUpToID == nil)
+        #expect(record.followUpToRecordName == nil)
     }
 }
 
