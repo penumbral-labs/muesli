@@ -232,7 +232,7 @@ final class MuesliController: NSObject {
     private static let dictionaryCorrectionAccessibilityIntentTimeout: TimeInterval = 24 * 60 * 60
 
     private let runtime: RuntimePaths
-    private let configStore = ConfigStore()
+    private let configStore: ConfigStore
     private let dictationStore: DictationStore
     private let meetingHookDispatcher: MeetingHookDispatching
     private let meetingMarkdownAutoExporter: MeetingMarkdownAutoExporting
@@ -380,12 +380,14 @@ final class MuesliController: NSObject {
     init(
         runtime: RuntimePaths,
         dictationStore: DictationStore? = nil,
+        configStore: ConfigStore = ConfigStore(),
         meetingHookDispatcher: MeetingHookDispatching = MeetingHookRunner(),
         meetingMarkdownAutoExporter: MeetingMarkdownAutoExporting = MeetingMarkdownAutoExporter(),
         launchAtLoginManager: LaunchAtLoginManaging = SystemLaunchAtLoginManager(),
         audioDuckingController: AudioDuckingManaging = AudioDuckingController(),
         dictationAudioRoutingController: DictationAudioRouting = DictationAudioRouteController()
     ) {
+        self.configStore = configStore
         let loadedConfig = configStore.load()
         self.runtime = runtime
         self.dictationStore = dictationStore ?? DictationStore(
@@ -465,6 +467,7 @@ final class MuesliController: NSObject {
             named: "muesli-meeting-recordings",
             logDescription: "leftover temp meeting recording files"
         )
+        cleanupHistoricalMeetingWaveformCacheFilesIfNeeded()
 
         hotkeyMonitor.onArm = { [weak self] in self?.handleArm() }
         hotkeyMonitor.onPrepare = { [weak self] in self?.handlePrepare() }
@@ -4000,10 +4003,12 @@ final class MuesliController: NSObject {
         do {
             // Delete the retained file first so a failed file removal does not orphan
             // user-visible recording data after the meeting row disappears.
-            if let savedRecordingPath = meeting.savedRecordingPath {
+            if let savedRecordingPath = meeting.savedRecordingPath,
+               try shouldDeleteSavedMeetingRecording(at: savedRecordingPath, excluding: id) {
                 try deleteSavedMeetingRecording(at: savedRecordingPath)
             }
             try dictationStore.deleteMeeting(id: id)
+            cleanupOrphanedMeetingWaveformCacheFiles()
             scheduleICloudSyncAfterLocalChange()
         } catch let error as MeetingLifecycleError {
             presentErrorAlert(title: "Couldn't Delete Meeting", message: error.localizedDescription)
@@ -4071,11 +4076,12 @@ final class MuesliController: NSObject {
         }
 
         do {
+            try? clearSavedMeetingWaveformCache()
             try clearSavedMeetingRecordingsDirectory()
         } catch {
             presentErrorAlert(
                 title: "Couldn't Clear Meeting History",
-                message: "Saved meeting recordings could not be deleted, so meeting history was left in place. \(error.localizedDescription)"
+                message: "Saved meeting audio files could not be deleted, so meeting history was left in place. \(error.localizedDescription)"
             )
             return
         }
@@ -5658,7 +5664,7 @@ final class MuesliController: NSObject {
             tempURL: retainedRecordingURL,
             meetingTitle: result.title,
             startedAt: result.startTime,
-            supportDirectory: AppIdentity.supportDirectoryURL,
+            supportDirectory: configStore.supportDirectory(),
             fileFormat: config.resolvedMeetingRecordingFileFormat
         ))
     }
@@ -5728,22 +5734,91 @@ final class MuesliController: NSObject {
         }
     }
 
+    func cleanupHistoricalMeetingWaveformCacheFilesIfNeeded() {
+        guard !config.waveformCacheOrphanCleanupMigrationApplied else { return }
+        guard cleanupOrphanedMeetingWaveformCacheFiles() else { return }
+        guard cleanupLegacyJSONMeetingWaveformCacheFiles() else { return }
+        config.waveformCacheOrphanCleanupMigrationApplied = true
+        appState.config = config
+        configStore.save(config)
+    }
+
+    @discardableResult
+    private func cleanupOrphanedMeetingWaveformCacheFiles() -> Bool {
+        let meetings: [MeetingRecord]
+        do {
+            meetings = try dictationStore.recentMeetings(limit: nil)
+        } catch {
+            return false
+        }
+        let recordingURLs = meetings.compactMap { savedRecordingURL(from: $0.savedRecordingPath) }
+        let result = RecordingWaveformCacheFiles.sweepOrphanedCachedWaveforms(
+            retainedRecordingURLs: recordingURLs,
+            supportDirectory: configStore.supportDirectory()
+        )
+        if case .skipped = result {
+            return false
+        }
+        return true
+    }
+
+    private func cleanupLegacyJSONMeetingWaveformCacheFiles() -> Bool {
+        let result = RecordingWaveformCacheFiles.removeLegacyJSONWaveformCaches(
+            supportDirectory: configStore.supportDirectory()
+        )
+        if case .skipped = result {
+            return false
+        }
+        return true
+    }
+
     private func clearSavedMeetingRecordingsDirectory() throws {
-        let recordingsDirectory = AppIdentity.supportDirectoryURL
+        let recordingsDirectory = configStore.supportDirectory()
             .appendingPathComponent("meeting-recordings", isDirectory: true)
         guard FileManager.default.fileExists(atPath: recordingsDirectory.path) else { return }
         try FileManager.default.removeItem(at: recordingsDirectory)
     }
 
+    private func clearSavedMeetingWaveformCache() throws {
+        try RecordingWaveformCacheFiles.removeAllCachedWaveforms(
+            supportDirectory: configStore.supportDirectory()
+        )
+    }
+
     private func deleteSavedMeetingRecording(at path: String) throws {
-        let url = URL(fileURLWithPath: path)
+        guard let url = savedRecordingURL(from: path) else { return }
         guard FileManager.default.fileExists(atPath: url.path) else { return }
 
         do {
+            // Waveform cache is derived data; recording deletion must still proceed if cache cleanup fails.
+            try? RecordingWaveformCacheFiles.removeCachedWaveform(
+                for: url,
+                supportDirectory: configStore.supportDirectory()
+            )
             try FileManager.default.removeItem(at: url)
         } catch {
             throw MeetingLifecycleError.failedToDeleteRecording(underlying: error)
         }
+    }
+
+    private func shouldDeleteSavedMeetingRecording(at path: String, excluding meetingID: Int64) throws -> Bool {
+        guard let url = savedRecordingURL(from: path) else { return false }
+        let targetPath = url.standardizedFileURL.path
+        let meetings = try dictationStore.recentMeetings(limit: nil)
+        return !meetings.contains { meeting in
+            guard meeting.id != meetingID,
+                  let otherURL = savedRecordingURL(from: meeting.savedRecordingPath) else {
+                return false
+            }
+            return otherURL.standardizedFileURL.path == targetPath
+        }
+    }
+
+    private func savedRecordingURL(from path: String?) -> URL? {
+        guard let path else { return nil }
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return URL(fileURLWithPath: trimmed)
     }
 
     @MainActor
