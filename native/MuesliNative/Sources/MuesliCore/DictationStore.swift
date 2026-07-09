@@ -67,8 +67,6 @@ public final class DictationStore {
             cloud_change_tag TEXT,
             last_synced_at REAL,
             sync_dirty INTEGER NOT NULL DEFAULT 1,
-            follow_up_to_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
-            follow_up_to_record_name TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_dictations_timestamp ON dictations(timestamp DESC);
@@ -110,6 +108,8 @@ public final class DictationStore {
             cloud_transcript_record_name TEXT,
             last_synced_at REAL,
             sync_dirty INTEGER NOT NULL DEFAULT 1,
+            follow_up_to_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+            follow_up_to_record_name TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_meetings_start_time ON meetings(start_time DESC);
@@ -222,7 +222,7 @@ public final class DictationStore {
         }
         let _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_meetings_follow_up ON meetings(follow_up_to_id)", nil, nil, nil)
         let _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_meetings_follow_up_record_name ON meetings(follow_up_to_record_name)", nil, nil, nil)
-        let _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_live_follow_up_unique ON meetings(follow_up_to_id) WHERE follow_up_to_id IS NOT NULL AND deleted_at IS NULL", nil, nil, nil)
+        let _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_meetings_live_follow_up_unique", nil, nil, nil)
         let _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_dictations_cloud_record_name", nil, nil, nil)
         let _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_meetings_cloud_record_name", nil, nil, nil)
         let _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_dictations_cloud_record_name ON dictations(cloud_record_name)", nil, nil, nil)
@@ -751,10 +751,9 @@ public final class DictationStore {
         return sqlite3_column_int64(statement, 0)
     }
 
-    /// The meeting recorded as a follow-up to `id`, if any. v1 keeps threads
-    /// linear (follow-ups attach to the latest meeting in the thread), so at
-    /// most one successor is expected; the earliest row wins if data ever
-    /// contains a branch.
+    /// The earliest meeting recorded as a follow-up to `id`, if any.
+    /// A predecessor may have multiple follow-ups; callers that need the whole
+    /// set should use `meetingThreadIDs(containing:)`.
     public func meetingSuccessorID(of id: Int64) throws -> Int64? {
         let db = try openDatabase()
         defer { sqlite3_close(db) }
@@ -762,6 +761,10 @@ public final class DictationStore {
     }
 
     private func meetingSuccessorID(of id: Int64, db: OpaquePointer?) throws -> Int64? {
+        try meetingSuccessorIDs(of: id, db: db).first
+    }
+
+    private func meetingSuccessorIDs(of id: Int64, db: OpaquePointer?) throws -> [Int64] {
         var statement: OpaquePointer?
         let sql = """
         SELECT child.id
@@ -771,35 +774,29 @@ public final class DictationStore {
          AND child.deleted_at IS NULL
         WHERE predecessor.id = ?
           AND predecessor.deleted_at IS NULL
-        ORDER BY child.id ASC
-        LIMIT 1
+        ORDER BY child.start_time ASC, child.id ASC
         """
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw lastError(db)
         }
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, id)
-        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-        return sqlite3_column_int64(statement, 0)
-    }
 
-    /// Walks successor links from `id` to the latest meeting in its thread.
-    /// Follow-ups always attach here, even when started from an older meeting
-    /// in the chain, keeping threads linear. Visited-set guards against cycles.
-    public func latestMeetingIDInThread(of id: Int64) throws -> Int64 {
-        let db = try openDatabase()
-        defer { sqlite3_close(db) }
-        var current = id
-        var visited: Set<Int64> = [id]
-        while let next = try meetingSuccessorID(of: current, db: db) {
-            guard visited.insert(next).inserted else { break }
-            current = next
+        var ids: [Int64] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            ids.append(sqlite3_column_int64(statement, 0))
         }
-        return current
+        return ids
     }
 
-    /// The full thread containing `id`, ordered root → latest. A meeting with
-    /// no links returns just itself.
+    /// Returns the latest chronological meeting in the follow-up tree that
+    /// contains `id`. A predecessor can have multiple follow-ups.
+    public func latestMeetingIDInThread(of id: Int64) throws -> Int64 {
+        try meetingThreadIDs(containing: id).last ?? id
+    }
+
+    /// The follow-up tree containing `id`, ordered chronologically. A meeting
+    /// with no links returns just itself.
     public func meetingThreadIDs(containing id: Int64) throws -> [Int64] {
         let db = try openDatabase()
         defer { sqlite3_close(db) }
@@ -812,14 +809,33 @@ public final class DictationStore {
             root = predecessor
         }
 
-        // Walk forward from the root.
-        var thread: [Int64] = [root]
-        var forwardVisited: Set<Int64> = [root]
-        var current = root
-        while let next = try meetingSuccessorID(of: current, db: db) {
-            guard forwardVisited.insert(next).inserted else { break }
-            thread.append(next)
-            current = next
+        let sql = """
+        WITH RECURSIVE thread(id, start_time, path) AS (
+            SELECT id, start_time, ',' || id || ','
+            FROM meetings
+            WHERE id = ?
+              AND deleted_at IS NULL
+            UNION ALL
+            SELECT child.id, child.start_time, thread.path || child.id || ','
+            FROM meetings AS child
+            JOIN thread ON child.follow_up_to_id = thread.id
+            WHERE child.deleted_at IS NULL
+              AND instr(thread.path, ',' || child.id || ',') = 0
+        )
+        SELECT id
+        FROM thread
+        ORDER BY start_time ASC, id ASC
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, root)
+
+        var thread: [Int64] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            thread.append(sqlite3_column_int64(statement, 0))
         }
         return thread
     }

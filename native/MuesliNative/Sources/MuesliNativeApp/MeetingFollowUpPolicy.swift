@@ -1,12 +1,6 @@
 import Foundation
 import MuesliCore
 
-/// Decides when a completed meeting can spawn a follow-up meeting and how the
-/// new meeting derives from its predecessor (title, carried-forward context).
-///
-/// A follow-up is a *new* meeting row linked to its predecessor through
-/// `follow_up_to_id`, unlike resume, which reopens the same row. Threads stay
-/// linear: follow-ups always attach to the latest meeting in the thread.
 /// Neighbors and position of a meeting inside its follow-up thread, for the
 /// detail-view breadcrumb.
 struct MeetingThreadContext {
@@ -16,6 +10,12 @@ struct MeetingThreadContext {
     let count: Int
 }
 
+/// Decides when a completed meeting can spawn a follow-up meeting and how the
+/// new meeting derives from its predecessor (title, carried-forward context).
+///
+/// A follow-up is a *new* meeting row linked to its predecessor through
+/// `follow_up_to_id`, unlike resume, which reopens the same row. A meeting can
+/// have multiple follow-ups; related meetings are ordered chronologically.
 enum MeetingFollowUpPolicy {
     static let titlePrefix = "Follow-up: "
 

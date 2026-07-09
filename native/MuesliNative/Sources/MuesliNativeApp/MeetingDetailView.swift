@@ -1107,9 +1107,8 @@ struct MeetingDetailView: View {
     }
 
     /// Breadcrumb strip shown when this meeting is part of a follow-up thread:
-    /// a link up to the predecessor, "Part N of M", and a link down to the
-    /// successor. Root meetings show no predecessor link; the latest meeting in
-    /// the thread shows no successor link.
+    /// a link to the direct predecessor, "Part N of M", and the next
+    /// chronological related meeting. Root meetings show no predecessor link.
     @ViewBuilder
     private var threadBreadcrumb: some View {
         if let threadContext {

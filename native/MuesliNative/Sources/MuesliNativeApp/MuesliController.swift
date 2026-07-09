@@ -4437,22 +4437,13 @@ final class MuesliController: NSObject {
     }
 
     /// Starts a *new* meeting linked into `meetingID`'s thread (vs. resume, which
-    /// reopens the same row). Follow-ups attach to the latest meeting in the
-    /// thread even when started from an older one, keeping threads linear. The
-    /// new meeting inherits the predecessor's folder and carries its notes into
-    /// the summary prompt so open action items follow the thread.
+    /// reopens the same row). Follow-ups attach to the selected meeting, so a
+    /// meeting can have more than one follow-up. The new meeting inherits the
+    /// predecessor's folder and carries its notes into the summary prompt so
+    /// open action items follow the thread.
     func startFollowUpMeeting(fromMeetingID meetingID: Int64) {
         guard !isMeetingRecording(), !isStartingMeetingRecording else { return }
-        guard let clicked = meeting(id: meetingID), canStartFollowUpMeeting(clicked) else { return }
-        let attachTargetID: Int64
-        do {
-            attachTargetID = try dictationStore.latestMeetingIDInThread(of: meetingID)
-        } catch {
-            fputs("[muesli-native] failed to resolve follow-up thread for \(meetingID): \(error)\n", stderr)
-            presentErrorAlert(title: "Follow-up failed", message: error.localizedDescription)
-            return
-        }
-        guard let predecessor = meeting(id: attachTargetID),
+        guard let predecessor = meeting(id: meetingID),
               canStartFollowUpMeeting(predecessor) else { return }
         startMeetingRecording(
             title: MeetingFollowUpPolicy.followUpTitle(from: predecessor.title),
@@ -4469,7 +4460,7 @@ final class MuesliController: NSObject {
         do {
             let thread = try dictationStore.meetingThreadIDs(containing: meetingID)
             guard thread.count > 1, let index = thread.firstIndex(of: meetingID) else { return nil }
-            let predecessorID = index > 0 ? thread[index - 1] : nil
+            let predecessorID = try dictationStore.meetingPredecessorID(of: meetingID)
             let successorID = index + 1 < thread.count ? thread[index + 1] : nil
             return MeetingThreadContext(
                 predecessor: predecessorID.flatMap { meeting(id: $0) },

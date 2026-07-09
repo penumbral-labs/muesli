@@ -1,5 +1,6 @@
 import Foundation
 import CloudKit
+import SQLite3
 import Testing
 import MuesliCore
 @testable import MuesliNativeApp
@@ -86,14 +87,42 @@ struct MeetingFollowUpThreadTests {
     }
 
     @discardableResult
-    private func makeMeeting(_ store: DictationStore, title: String, followUpToID: Int64? = nil, folderID: Int64? = nil) throws -> Int64 {
+    private func makeMeeting(
+        _ store: DictationStore,
+        title: String,
+        startTime: Date = Date(),
+        followUpToID: Int64? = nil,
+        folderID: Int64? = nil
+    ) throws -> Int64 {
         try store.createLiveMeeting(
             title: title,
             calendarEventID: nil,
-            startTime: Date(),
+            startTime: startTime,
             folderID: folderID,
             followUpToID: followUpToID
         )
+    }
+
+    private func tableColumns(_ table: String, store: DictationStore) throws -> Set<String> {
+        var db: OpaquePointer?
+        guard sqlite3_open(store.resolvedDatabaseURL.path, &db) == SQLITE_OK else {
+            throw NSError(domain: "MeetingFollowUpTests", code: 1)
+        }
+        defer { sqlite3_close(db) }
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(table))", -1, &statement, nil) == SQLITE_OK else {
+            throw NSError(domain: "MeetingFollowUpTests", code: 2)
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var columns = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let name = sqlite3_column_text(statement, 1) {
+                columns.insert(String(cString: name))
+            }
+        }
+        return columns
     }
 
     private func completeMeeting(_ store: DictationStore, id: Int64, title: String) throws {
@@ -122,6 +151,19 @@ struct MeetingFollowUpThreadTests {
         #expect(followUp.followUpToID == rootID)
         let root = try #require(try store.meeting(id: rootID))
         #expect(root.followUpToID == nil)
+    }
+
+    @Test("fresh schema stores follow-up metadata on meetings only")
+    func freshSchemaStoresFollowUpMetadataOnMeetingsOnly() throws {
+        let store = try makeStore()
+
+        let dictationColumns = try tableColumns("dictations", store: store)
+        let meetingColumns = try tableColumns("meetings", store: store)
+
+        #expect(!dictationColumns.contains("follow_up_to_id"))
+        #expect(!dictationColumns.contains("follow_up_to_record_name"))
+        #expect(meetingColumns.contains("follow_up_to_id"))
+        #expect(meetingColumns.contains("follow_up_to_record_name"))
     }
 
     @Test("created follow-up inherits the requested folder")
@@ -192,15 +234,19 @@ struct MeetingFollowUpThreadTests {
         #expect(try store.meetingThreadIDs(containing: a) == [a])
     }
 
-    @Test("a predecessor can only have one live follow-up")
-    func oneLiveSuccessorPerPredecessor() throws {
+    @Test("a predecessor can have multiple live follow-ups ordered chronologically")
+    func multipleLiveFollowUpsPerPredecessor() throws {
         let store = try makeStore()
-        let a = try makeMeeting(store, title: "A")
-        _ = try makeMeeting(store, title: "B", followUpToID: a)
+        let start = Date(timeIntervalSince1970: 1_770_000_000)
+        let a = try makeMeeting(store, title: "A", startTime: start)
+        let later = try makeMeeting(store, title: "Later follow-up", startTime: start.addingTimeInterval(120), followUpToID: a)
+        let earlier = try makeMeeting(store, title: "Earlier follow-up", startTime: start.addingTimeInterval(60), followUpToID: a)
 
-        #expect(throws: Error.self) {
-            _ = try makeMeeting(store, title: "C", followUpToID: a)
-        }
+        #expect(try store.meetingPredecessorID(of: earlier) == a)
+        #expect(try store.meetingPredecessorID(of: later) == a)
+        #expect(try store.meetingSuccessorID(of: a) == earlier)
+        #expect(try store.meetingThreadIDs(containing: a) == [a, earlier, later])
+        #expect(try store.latestMeetingIDInThread(of: a) == later)
     }
 
     @Test("soft-deleting a middle meeting splits the remaining thread")
@@ -269,6 +315,22 @@ struct MeetingFollowUpThreadTests {
             followUpToRecordName: "meeting-root"
         )))
         #expect(try store.upsertSyncedTextRecord(SyncTextRecord(
+            id: "meeting-follow-2",
+            kind: .meeting,
+            title: "Second follow-up: Root",
+            text: "second follow transcript",
+            summaryText: "second follow notes",
+            source: "macos",
+            meetingStatus: .completed,
+            createdAt: timestamp.addingTimeInterval(180),
+            updatedAt: timestamp.addingTimeInterval(180),
+            startedAt: timestamp.addingTimeInterval(180),
+            endedAt: timestamp.addingTimeInterval(240),
+            durationSeconds: 60,
+            wordCount: 3,
+            followUpToRecordName: "meeting-root"
+        )))
+        #expect(try store.upsertSyncedTextRecord(SyncTextRecord(
             id: "meeting-root",
             kind: .meeting,
             title: "Root",
@@ -287,9 +349,13 @@ struct MeetingFollowUpThreadTests {
         let meetings = try store.recentMeetings(limit: 10)
         let root = try #require(meetings.first { $0.title == "Root" })
         let followUp = try #require(meetings.first { $0.title == "Follow-up: Root" })
+        let secondFollowUp = try #require(meetings.first { $0.title == "Second follow-up: Root" })
 
         #expect(followUp.followUpToRecordName == "meeting-root")
+        #expect(secondFollowUp.followUpToRecordName == "meeting-root")
         #expect(try store.meetingPredecessorID(of: followUp.id) == root.id)
+        #expect(try store.meetingPredecessorID(of: secondFollowUp.id) == root.id)
+        #expect(try store.meetingThreadIDs(containing: root.id) == [root.id, followUp.id, secondFollowUp.id])
     }
 
     @Test("CloudKit sync payload carries stable predecessor record name")
@@ -332,6 +398,28 @@ struct MeetingFollowUpThreadTests {
 
         #expect(record.followUpToID == nil)
         #expect(record.followUpToRecordName == nil)
+    }
+
+    @Test("meeting record Codable round-trip preserves follow-up fields")
+    func meetingRecordRoundTripPreservesFollowUpFields() throws {
+        let record = MeetingRecord(
+            id: 2,
+            title: "Follow-up: Legacy",
+            startTime: "2026-07-01T11:00:00Z",
+            durationSeconds: 120,
+            rawTranscript: "hello again",
+            formattedNotes: "notes again",
+            wordCount: 2,
+            folderID: nil,
+            followUpToID: 1,
+            followUpToRecordName: "meeting-root"
+        )
+
+        let data = try JSONEncoder().encode(record)
+        let decoded = try JSONDecoder().decode(MeetingRecord.self, from: data)
+
+        #expect(decoded.followUpToID == 1)
+        #expect(decoded.followUpToRecordName == "meeting-root")
     }
 }
 

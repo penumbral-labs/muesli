@@ -232,8 +232,8 @@ public struct MeetingRecord: Identifiable, Codable, Sendable {
     public let selectedTemplateKind: MeetingTemplateKind?
     public let selectedTemplatePrompt: String?
     public let source: MeetingSource
-    /// Self-referencing link: the meeting this one is a follow-up to. A chain of
-    /// these pointers forms a meeting thread (root has nil).
+    /// Self-referencing link: the meeting this one is a follow-up to. A meeting
+    /// can have multiple follow-ups; root meetings have nil.
     public let followUpToID: Int64?
     /// Stable sync identity for the predecessor. Local row ids differ across
     /// devices, so sync uses the predecessor's cloud record name.
