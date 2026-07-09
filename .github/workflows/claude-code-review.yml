@@ -11,10 +11,29 @@ on:
     #   - "src/**/*.jsx"
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      review_worthy: ${{ steps.classify.outputs.review_worthy }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: classify
+        run: |
+          FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+          echo "Changed files:"
+          printf '%s\n' "$FILES"
+          printf '%s\n' "$FILES" | ./scripts/classify_changed_files.sh
+
   claude-review:
+    needs: changes
     # Fork PRs never receive the id-token permission, so the action's OIDC
     # exchange fails; skip cleanly instead of reporting a spurious failure.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository && needs.changes.outputs.review_worthy == 'true'
 
     # Optional: Filter by PR author
     # if: |
