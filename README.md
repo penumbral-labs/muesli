@@ -5,6 +5,10 @@
 <h1 align="center">Muesli</h1>
 
 <p align="center">
+<a href="https://trendshift.io/repositories/25442?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25442" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25442" alt="Muesli-HQ%2Fmuesli | Trendshift" width="250" height="55"/></a>
+</p>
+
+<p align="center">
   <strong>Local-first dictation & meeting transcription for macOS</strong><br>
   100% on-device speech-to-text · Zero cloud costs · Privacy by default
 </p>
