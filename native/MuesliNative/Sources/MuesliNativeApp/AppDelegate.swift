@@ -14,9 +14,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStandardEditMenu()
 
-        let telemetryConfig = TelemetryDeck.Config(appID: "7F2B7846-1CB5-4FE6-8ABC-56F217B06A86")
+        let runtimeTelemetry = TelemetryRuntimeConfiguration.current()
+        let telemetryConfig = TelemetryDeck.Config(appID: runtimeTelemetry.appID)
+        telemetryConfig.analyticsDisabled = !runtimeTelemetry.isEnabled
+        telemetryConfig.defaultParameters = { runtimeTelemetry.defaultParameters }
         TelemetryDeck.initialize(config: telemetryConfig)
-        TelemetryDeck.signal("app.launched")
+        if runtimeTelemetry.isEnabled {
+            TelemetryDeck.signal("app.launched")
+        }
 
         do {
             let runtime = try RuntimePaths.resolve()
