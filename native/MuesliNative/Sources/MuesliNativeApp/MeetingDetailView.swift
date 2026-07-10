@@ -1107,7 +1107,7 @@ struct MeetingDetailView: View {
     }
 
     /// Breadcrumb strip shown when this meeting is part of a follow-up thread:
-    /// a link to the direct predecessor, "Part N of M", and direct follow-ups
+    /// a link to the direct predecessor, total thread size, and direct follow-ups
     /// in chronological order. Root meetings show no predecessor link.
     @ViewBuilder
     private var threadBreadcrumb: some View {
@@ -1120,7 +1120,7 @@ struct MeetingDetailView: View {
                         targetID: predecessor.id
                     )
                 }
-                Text("Part \(threadContext.position) of \(threadContext.count)")
+                Text("Thread \u{00B7} \(threadContext.count) meetings")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(MuesliTheme.textTertiary)
                 switch threadContext.successors.count {

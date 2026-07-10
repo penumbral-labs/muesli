@@ -4454,8 +4454,8 @@ final class MuesliController: NSObject {
         )
     }
 
-    /// Thread parent, direct child follow-ups, and chronological position for
-    /// the detail-view breadcrumb/list.
+    /// Thread parent, direct child follow-ups, and total size for the
+    /// detail-view breadcrumb/list.
     /// Returns nil for meetings that are not part of a follow-up thread.
     func meetingThreadContext(for meetingID: Int64) -> MeetingThreadContext? {
         do {
@@ -4463,7 +4463,6 @@ final class MuesliController: NSObject {
             return MeetingThreadContext(
                 predecessor: navigation.predecessorID.flatMap { meeting(id: $0) },
                 successors: navigation.successorIDs.compactMap { meeting(id: $0) },
-                position: navigation.position,
                 count: navigation.count
             )
         } catch {
@@ -4496,6 +4495,9 @@ final class MuesliController: NSObject {
             return
         }
         pendingResumePriorTranscript[meetingID] = priorTranscript
+        let previousMeetingNotes = meeting.followUpToID
+            .flatMap { self.meeting(id: $0) }
+            .flatMap { MeetingFollowUpPolicy.carriedContext(from: $0) }
 
         // REUSE the existing row — do NOT call createLiveMeeting.
         activeMeetingID = meetingID
@@ -4530,7 +4532,8 @@ final class MuesliController: NSObject {
                     meetingID: meetingID,
                     backend: meetingBackend,
                     templateSnapshot: self.meetingTemplateSnapshot(for: meeting),
-                    endDate: nil
+                    endDate: nil,
+                    previousMeetingNotes: previousMeetingNotes
                 )
             } catch is CancellationError {
                 if self.meetingStartMeetingID == meetingID {

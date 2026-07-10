@@ -18,7 +18,6 @@ public enum DictationStoreError: Error, LocalizedError {
 public struct MeetingThreadNavigation: Equatable, Sendable {
     public let predecessorID: Int64?
     public let successorIDs: [Int64]
-    public let position: Int
     public let count: Int
 }
 
@@ -809,11 +808,10 @@ public final class DictationStore {
         defer { sqlite3_close(db) }
 
         let thread = try meetingThreadIDs(containing: id, db: db)
-        guard thread.count > 1, let index = thread.firstIndex(of: id) else { return nil }
+        guard thread.count > 1, thread.contains(id) else { return nil }
         return MeetingThreadNavigation(
             predecessorID: try meetingPredecessorID(of: id, db: db),
             successorIDs: try meetingSuccessorIDs(of: id, db: db),
-            position: index + 1,
             count: thread.count
         )
     }

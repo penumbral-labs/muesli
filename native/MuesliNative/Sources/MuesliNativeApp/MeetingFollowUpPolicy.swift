@@ -1,12 +1,10 @@
 import Foundation
 import MuesliCore
 
-/// Parent, direct children, and chronological position for the detail-view
-/// follow-up context.
+/// Parent, direct children, and total size for the detail-view follow-up context.
 struct MeetingThreadContext {
     let predecessor: MeetingRecord?
     let successors: [MeetingRecord]
-    let position: Int
     let count: Int
 }
 

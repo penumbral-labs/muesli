@@ -345,13 +345,11 @@ struct MeetingFollowUpThreadTests {
         let rootNavigation = try #require(try store.meetingThreadNavigation(containing: root))
         #expect(rootNavigation.predecessorID == nil)
         #expect(rootNavigation.successorIDs == [early, late])
-        #expect(rootNavigation.position == 1)
         #expect(rootNavigation.count == 4)
 
         let earlyNavigation = try #require(try store.meetingThreadNavigation(containing: early))
         #expect(earlyNavigation.predecessorID == root)
         #expect(earlyNavigation.successorIDs == [nested])
-        #expect(earlyNavigation.position == 2)
         #expect(earlyNavigation.count == 4)
 
         let standalone = try makeMeeting(store, title: "Standalone", startTime: start.addingTimeInterval(240))
