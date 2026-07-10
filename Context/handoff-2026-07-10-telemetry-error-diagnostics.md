@@ -28,6 +28,7 @@ Stable, preprod, dev, and canary builds select their app ID and `muesli.channel`
 - App/build/OS/device analytics use TelemetryDeck SDK fields rather than duplicate diagnostic parameters.
 - The incident UUID is included in the generated GitHub issue; TelemetryDeck user/session identifiers are not.
 - Historical schema v1 events are unchanged. No backfill, deletion, query utility, export, report artifact, or iOS telemetry change was added.
+- `CONTRIBUTING.md` documents that local app testing must use the Dev telemetry route, direct unconfigured builds keep telemetry disabled, app IDs remain centralized, and new event values must preserve the privacy allowlist.
 
 ## Validation
 
