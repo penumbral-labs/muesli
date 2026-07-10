@@ -4304,7 +4304,10 @@ final class MuesliController: NSObject {
         openDocument: Bool = false,
         endDate: Date? = nil,
         autoStopSource: MeetingAutoStopSource? = nil,
-        startOrigin: MeetingRecordingStartOrigin = .manual
+        startOrigin: MeetingRecordingStartOrigin = .manual,
+        followUpToID: Int64? = nil,
+        inheritedFolderID: Int64? = nil,
+        previousMeetingNotes: String? = nil
     ) -> Bool {
         guard !isMeetingRecording(), !isStartingMeetingRecording else { return false }
         guard let meetingBackend = normalizeMeetingTranscriptionSelectionForAvailability() else {
@@ -4324,7 +4327,9 @@ final class MuesliController: NSObject {
                 selectedTemplateID: templateSnapshot.id,
                 selectedTemplateName: templateSnapshot.name,
                 selectedTemplateKind: templateSnapshot.kind,
-                selectedTemplatePrompt: templateSnapshot.prompt
+                selectedTemplatePrompt: templateSnapshot.prompt,
+                folderID: inheritedFolderID,
+                followUpToID: followUpToID
             )
             activeMeetingID = meetingID
             activeMeetingAudioWarning = nil
@@ -4373,7 +4378,8 @@ final class MuesliController: NSObject {
                     meetingID: meetingID,
                     backend: meetingBackend,
                     templateSnapshot: templateSnapshot,
-                    endDate: endDate
+                    endDate: endDate,
+                    previousMeetingNotes: previousMeetingNotes
                 )
             } catch is CancellationError {
                 if self.meetingStartMeetingID == meetingID {
@@ -4425,6 +4431,46 @@ final class MuesliController: NSObject {
         MeetingResumePolicy.canResume(status: meeting.status)
     }
 
+    /// Whether `meeting` can spawn a follow-up meeting right now (also gates the UI control).
+    func canStartFollowUpMeeting(_ meeting: MeetingRecord) -> Bool {
+        MeetingFollowUpPolicy.canStartFollowUp(status: meeting.status)
+    }
+
+    /// Starts a *new* meeting linked into `meetingID`'s thread (vs. resume, which
+    /// reopens the same row). Follow-ups attach to the selected meeting, so a
+    /// meeting can have more than one follow-up. The new meeting inherits the
+    /// predecessor's folder and carries its notes into the summary prompt so
+    /// open action items follow the thread.
+    func startFollowUpMeeting(fromMeetingID meetingID: Int64) {
+        guard !isMeetingRecording(), !isStartingMeetingRecording else { return }
+        guard let predecessor = meeting(id: meetingID),
+              canStartFollowUpMeeting(predecessor) else { return }
+        startMeetingRecording(
+            title: MeetingFollowUpPolicy.followUpTitle(from: predecessor.title),
+            openDocument: true,
+            followUpToID: predecessor.id,
+            inheritedFolderID: predecessor.folderID,
+            previousMeetingNotes: MeetingFollowUpPolicy.carriedContext(from: predecessor)
+        )
+    }
+
+    /// Thread parent, direct child follow-ups, and total size for the
+    /// detail-view breadcrumb/list.
+    /// Returns nil for meetings that are not part of a follow-up thread.
+    func meetingThreadContext(for meetingID: Int64) -> MeetingThreadContext? {
+        do {
+            guard let navigation = try dictationStore.meetingThreadNavigation(containing: meetingID) else { return nil }
+            return MeetingThreadContext(
+                predecessor: navigation.predecessorID.flatMap { meeting(id: $0) },
+                successors: navigation.successorIDs.compactMap { meeting(id: $0) },
+                count: navigation.count
+            )
+        } catch {
+            fputs("[muesli-native] failed to resolve meeting thread for \(meetingID): \(error)\n", stderr)
+            return nil
+        }
+    }
+
     /// Reopens a finished meeting and appends more recording onto the *same* row
     /// (vs. `startMeetingRecording`, which creates a new row). Mirrors the start
     /// scaffolding but skips `createLiveMeeting` and reuses the existing meeting id.
@@ -4449,6 +4495,9 @@ final class MuesliController: NSObject {
             return
         }
         pendingResumePriorTranscript[meetingID] = priorTranscript
+        let previousMeetingNotes = meeting.followUpToID
+            .flatMap { self.meeting(id: $0) }
+            .flatMap { MeetingFollowUpPolicy.carriedContext(from: $0) }
 
         // REUSE the existing row — do NOT call createLiveMeeting.
         activeMeetingID = meetingID
@@ -4483,7 +4532,8 @@ final class MuesliController: NSObject {
                     meetingID: meetingID,
                     backend: meetingBackend,
                     templateSnapshot: self.meetingTemplateSnapshot(for: meeting),
-                    endDate: nil
+                    endDate: nil,
+                    previousMeetingNotes: previousMeetingNotes
                 )
             } catch is CancellationError {
                 if self.meetingStartMeetingID == meetingID {
@@ -4749,7 +4799,8 @@ final class MuesliController: NSObject {
         meetingID: Int64,
         backend: BackendOption,
         templateSnapshot: MeetingTemplateSnapshot,
-        endDate: Date?
+        endDate: Date?,
+        previousMeetingNotes: String? = nil
     ) async throws {
         var shouldRetryAfterPermissionRequest = config.useCoreAudioTap
         statusBarController?.setStatus("Meeting transcription will start shortly.")
@@ -4781,6 +4832,7 @@ final class MuesliController: NSObject {
                 transcriptionCoordinator: transcriptionCoordinator,
                 meetingMicRecorder: meetingMicRecorder
             )
+            meetingSession.previousMeetingNotes = previousMeetingNotes
 
             do {
                 meetingSession.manualNotesProvider = { [weak self] in

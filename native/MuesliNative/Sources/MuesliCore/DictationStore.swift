@@ -15,6 +15,12 @@ public enum DictationStoreError: Error, LocalizedError {
     }
 }
 
+public struct MeetingThreadNavigation: Equatable, Sendable {
+    public let predecessorID: Int64?
+    public let successorIDs: [Int64]
+    public let count: Int
+}
+
 public final class DictationStore {
     public static let defaultTombstoneRetentionInterval: TimeInterval = 30 * 24 * 60 * 60
 
@@ -27,7 +33,7 @@ public final class DictationStore {
     t.id, t.final_status, t.final_message, t.trace_json, t.created_at
     """
     private static let meetingColumns = """
-    id, title, start_time, duration_seconds, raw_transcript, formatted_notes, word_count, folder_id, calendar_event_id, mic_audio_path, system_audio_path, saved_recording_path, meeting_status, manual_notes, selected_template_id, selected_template_name, selected_template_kind, selected_template_prompt, source
+    id, title, start_time, duration_seconds, raw_transcript, formatted_notes, word_count, folder_id, calendar_event_id, mic_audio_path, system_audio_path, saved_recording_path, meeting_status, manual_notes, selected_template_id, selected_template_name, selected_template_kind, selected_template_prompt, source, follow_up_to_id, follow_up_to_record_name
     """
 
     public init() {
@@ -108,6 +114,8 @@ public final class DictationStore {
             cloud_transcript_record_name TEXT,
             last_synced_at REAL,
             sync_dirty INTEGER NOT NULL DEFAULT 1,
+            follow_up_to_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+            follow_up_to_record_name TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_meetings_start_time ON meetings(start_time DESC);
@@ -206,6 +214,21 @@ public final class DictationStore {
         }
         let _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_meeting_folders_parent ON meeting_folders(parent_id)", nil, nil, nil)
         let _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_meetings_folder ON meetings(folder_id)", nil, nil, nil)
+        if sqlite3_exec(db, "ALTER TABLE meetings ADD COLUMN follow_up_to_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL", nil, nil, nil) != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(db))
+            if !msg.localizedCaseInsensitiveContains("duplicate column") {
+                throw lastError(db)
+            }
+        }
+        if sqlite3_exec(db, "ALTER TABLE meetings ADD COLUMN follow_up_to_record_name TEXT", nil, nil, nil) != SQLITE_OK {
+            let msg = String(cString: sqlite3_errmsg(db))
+            if !msg.localizedCaseInsensitiveContains("duplicate column") {
+                throw lastError(db)
+            }
+        }
+        let _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_meetings_follow_up ON meetings(follow_up_to_id)", nil, nil, nil)
+        let _ = sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_meetings_follow_up_record_name ON meetings(follow_up_to_record_name)", nil, nil, nil)
+        let _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_meetings_live_follow_up_unique", nil, nil, nil)
         let _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_dictations_cloud_record_name", nil, nil, nil)
         let _ = sqlite3_exec(db, "DROP INDEX IF EXISTS idx_meetings_cloud_record_name", nil, nil, nil)
         let _ = sqlite3_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS idx_dictations_cloud_record_name ON dictations(cloud_record_name)", nil, nil, nil)
@@ -659,15 +682,18 @@ public final class DictationStore {
         selectedTemplateID: String? = nil,
         selectedTemplateName: String? = nil,
         selectedTemplateKind: MeetingTemplateKind? = nil,
-        selectedTemplatePrompt: String? = nil
+        selectedTemplatePrompt: String? = nil,
+        folderID: Int64? = nil,
+        followUpToID: Int64? = nil
     ) throws -> Int64 {
         let db = try openDatabase()
         defer { sqlite3_close(db) }
+        let followUpRecordName = try followUpToID.flatMap { try meetingCloudRecordName(id: $0, db: db) }
 
         let sql = """
         INSERT INTO meetings
-        (title, calendar_event_id, start_time, end_time, duration_seconds, raw_transcript, formatted_notes, mic_audio_path, system_audio_path, saved_recording_path, meeting_status, manual_notes, word_count, selected_template_id, selected_template_name, selected_template_kind, selected_template_prompt, source, updated_at, sync_dirty)
-        VALUES (?, ?, ?, NULL, 0, '', '', NULL, NULL, NULL, ?, '', 0, ?, ?, ?, ?, 'meeting', ?, 1)
+        (title, calendar_event_id, start_time, end_time, duration_seconds, raw_transcript, formatted_notes, mic_audio_path, system_audio_path, saved_recording_path, meeting_status, manual_notes, word_count, selected_template_id, selected_template_name, selected_template_kind, selected_template_prompt, source, updated_at, sync_dirty, folder_id, follow_up_to_id, follow_up_to_record_name)
+        VALUES (?, ?, ?, NULL, 0, '', '', NULL, NULL, NULL, ?, '', 0, ?, ?, ?, ?, 'meeting', ?, 1, ?, ?, ?)
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -685,11 +711,168 @@ public final class DictationStore {
         bindOptionalText(selectedTemplateKind?.rawValue, at: 7, statement: statement)
         bindOptionalText(selectedTemplatePrompt, at: 8, statement: statement)
         sqlite3_bind_double(statement, 9, Date().timeIntervalSince1970)
+        if let folderID {
+            sqlite3_bind_int64(statement, 10, folderID)
+        } else {
+            sqlite3_bind_null(statement, 10)
+        }
+        if let followUpToID {
+            sqlite3_bind_int64(statement, 11, followUpToID)
+        } else {
+            sqlite3_bind_null(statement, 11)
+        }
+        bindOptionalText(followUpRecordName, at: 12, statement: statement)
 
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw lastError(db)
         }
         return sqlite3_last_insert_rowid(db)
+    }
+
+    /// The meeting that `id` points to as its follow-up predecessor, if any.
+    public func meetingPredecessorID(of id: Int64) throws -> Int64? {
+        let db = try openDatabase()
+        defer { sqlite3_close(db) }
+        return try meetingPredecessorID(of: id, db: db)
+    }
+
+    private func meetingPredecessorID(of id: Int64, db: OpaquePointer?) throws -> Int64? {
+        var statement: OpaquePointer?
+        let sql = """
+        SELECT predecessor.id
+        FROM meetings AS child
+        JOIN meetings AS predecessor
+          ON predecessor.id = child.follow_up_to_id
+         AND predecessor.deleted_at IS NULL
+        WHERE child.id = ?
+          AND child.deleted_at IS NULL
+        LIMIT 1
+        """
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, id)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(statement, 0)
+    }
+
+    /// The earliest meeting recorded as a follow-up to `id`, if any.
+    /// A predecessor may have multiple follow-ups; callers that need the whole
+    /// set should use `meetingThreadIDs(containing:)`.
+    public func meetingSuccessorID(of id: Int64) throws -> Int64? {
+        let db = try openDatabase()
+        defer { sqlite3_close(db) }
+        return try meetingSuccessorID(of: id, db: db)
+    }
+
+    private func meetingSuccessorID(of id: Int64, db: OpaquePointer?) throws -> Int64? {
+        try meetingSuccessorIDs(of: id, db: db).first
+    }
+
+    private func meetingSuccessorIDs(of id: Int64, db: OpaquePointer?) throws -> [Int64] {
+        var statement: OpaquePointer?
+        let sql = """
+        SELECT child.id
+        FROM meetings AS predecessor
+        JOIN meetings AS child
+          ON child.follow_up_to_id = predecessor.id
+         AND child.deleted_at IS NULL
+        WHERE predecessor.id = ?
+          AND predecessor.deleted_at IS NULL
+        ORDER BY child.start_time ASC, child.id ASC
+        """
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, id)
+
+        var ids: [Int64] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            ids.append(sqlite3_column_int64(statement, 0))
+        }
+        return ids
+    }
+
+    /// Returns the latest chronological meeting in the follow-up tree that
+    /// contains `id`. A predecessor can have multiple follow-ups.
+    public func latestMeetingIDInThread(of id: Int64) throws -> Int64 {
+        try meetingThreadIDs(containing: id).last ?? id
+    }
+
+    /// Parent, direct child follow-ups, and chronological position for `id`.
+    /// Returns nil for meetings that are not part of a follow-up thread.
+    public func meetingThreadNavigation(containing id: Int64) throws -> MeetingThreadNavigation? {
+        let db = try openDatabase()
+        defer { sqlite3_close(db) }
+
+        let thread = try meetingThreadIDs(containing: id, db: db)
+        guard thread.count > 1, thread.contains(id) else { return nil }
+        return MeetingThreadNavigation(
+            predecessorID: try meetingPredecessorID(of: id, db: db),
+            successorIDs: try meetingSuccessorIDs(of: id, db: db),
+            count: thread.count
+        )
+    }
+
+    /// The follow-up tree containing `id`, ordered chronologically. A meeting
+    /// with no links returns just itself.
+    public func meetingThreadIDs(containing id: Int64) throws -> [Int64] {
+        let db = try openDatabase()
+        defer { sqlite3_close(db) }
+        return try meetingThreadIDs(containing: id, db: db)
+    }
+
+    private func meetingThreadIDs(containing id: Int64, db: OpaquePointer?) throws -> [Int64] {
+        // Walk back to the root.
+        var root = id
+        var visited: Set<Int64> = [id]
+        while let predecessor = try meetingPredecessorID(of: root, db: db) {
+            guard visited.insert(predecessor).inserted else { break }
+            root = predecessor
+        }
+
+        let sql = """
+        WITH RECURSIVE thread(id, start_time, path) AS (
+            SELECT id, start_time, ',' || id || ','
+            FROM meetings
+            WHERE id = ?
+              AND deleted_at IS NULL
+            UNION ALL
+            SELECT child.id, child.start_time, thread.path || child.id || ','
+            FROM meetings AS child
+            JOIN thread ON child.follow_up_to_id = thread.id
+            WHERE child.deleted_at IS NULL
+              AND instr(thread.path, ',' || child.id || ',') = 0
+        )
+        SELECT id
+        FROM thread
+        ORDER BY start_time ASC, id ASC
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, root)
+
+        var thread: [Int64] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            thread.append(sqlite3_column_int64(statement, 0))
+        }
+        return thread
+    }
+
+    private func meetingCloudRecordName(id: Int64, db: OpaquePointer?) throws -> String? {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT cloud_record_name FROM meetings WHERE id = ? LIMIT 1", -1, &statement, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, id)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return optionalStringColumn(statement, index: 0)
     }
 
     public func dictationStats() throws -> DictationStats {
@@ -795,38 +978,49 @@ public final class DictationStore {
     public func deleteMeeting(id: Int64) throws {
         let db = try openDatabase()
         defer { sqlite3_close(db) }
-        try deleteResumeSnapshot(meetingID: id, db: db)
-        try deleteLiveTranscriptCheckpoints(meetingID: id, db: db)
-        let sql = """
-        UPDATE meetings
-        SET title = 'Deleted Meeting',
-            raw_transcript = '',
-            formatted_notes = NULL,
-            manual_notes = '',
-            mic_audio_path = NULL,
-            system_audio_path = NULL,
-            saved_recording_path = NULL,
-            word_count = 0,
-            duration_seconds = 0,
-            deleted_at = ?,
-            updated_at = ?,
-            sync_dirty = 1
-        WHERE id = ? AND deleted_at IS NULL
-        """
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
-            throw lastError(db)
-        }
-        defer { sqlite3_finalize(statement) }
-        let now = Date().timeIntervalSince1970
-        sqlite3_bind_double(statement, 1, now)
-        sqlite3_bind_double(statement, 2, now)
-        sqlite3_bind_int64(statement, 3, id)
-        guard sqlite3_step(statement) == SQLITE_DONE else {
-            throw lastError(db)
-        }
-        guard sqlite3_changes(db) > 0 else {
-            throw DictationStoreError.meetingNotFound(id: id)
+        try exec("BEGIN IMMEDIATE", db: db)
+
+        do {
+            try deleteResumeSnapshot(meetingID: id, db: db)
+            try deleteLiveTranscriptCheckpoints(meetingID: id, db: db)
+            let sql = """
+            UPDATE meetings
+            SET title = 'Deleted Meeting',
+                raw_transcript = '',
+                formatted_notes = NULL,
+                manual_notes = '',
+                mic_audio_path = NULL,
+                system_audio_path = NULL,
+                saved_recording_path = NULL,
+                follow_up_to_id = NULL,
+                follow_up_to_record_name = NULL,
+                word_count = 0,
+                duration_seconds = 0,
+                deleted_at = ?,
+                updated_at = ?,
+                sync_dirty = 1
+            WHERE id = ? AND deleted_at IS NULL
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw lastError(db)
+            }
+            defer { sqlite3_finalize(statement) }
+            let now = Date().timeIntervalSince1970
+            sqlite3_bind_double(statement, 1, now)
+            sqlite3_bind_double(statement, 2, now)
+            sqlite3_bind_int64(statement, 3, id)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw lastError(db)
+            }
+            guard sqlite3_changes(db) > 0 else {
+                throw DictationStoreError.meetingNotFound(id: id)
+            }
+            try detachFollowUpSuccessors(of: id, db: db)
+            try exec("COMMIT", db: db)
+        } catch {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            throw error
         }
     }
 
@@ -2011,13 +2205,15 @@ public final class DictationStore {
         guard limit > 0 else { return [] }
         var records: [SyncTextRecord] = []
         let meetingSQL = """
-        SELECT cloud_record_name, title, raw_transcript, formatted_notes, manual_notes,
-               start_time, duration_seconds, word_count, source, meeting_status,
-               updated_at, deleted_at, cloud_change_tag
-        FROM meetings
-        WHERE sync_dirty = 1 AND cloud_record_name IS NOT NULL
-          AND meeting_status NOT IN (?, ?)
-        ORDER BY updated_at DESC, id DESC
+        SELECT m.cloud_record_name, m.title, m.raw_transcript, m.formatted_notes, m.manual_notes,
+               m.start_time, m.duration_seconds, m.word_count, m.source, m.meeting_status,
+               m.updated_at, m.deleted_at, m.cloud_change_tag,
+               COALESCE(m.follow_up_to_record_name, predecessor.cloud_record_name)
+        FROM meetings AS m
+        LEFT JOIN meetings AS predecessor ON predecessor.id = m.follow_up_to_id
+        WHERE m.sync_dirty = 1 AND m.cloud_record_name IS NOT NULL
+          AND m.meeting_status NOT IN (?, ?)
+        ORDER BY m.updated_at DESC, m.id DESC
         LIMIT ?
         OFFSET ?
         """
@@ -2112,12 +2308,14 @@ public final class DictationStore {
     ) throws -> [SyncTextRecord] {
         var records: [SyncTextRecord] = []
         let meetingSQL = """
-        SELECT cloud_record_name, title, raw_transcript, formatted_notes, manual_notes,
-               start_time, duration_seconds, word_count, source, meeting_status,
-               updated_at, deleted_at, cloud_change_tag
-        FROM meetings
-        WHERE cloud_record_name IS NOT NULL
-        ORDER BY updated_at DESC, id DESC
+        SELECT m.cloud_record_name, m.title, m.raw_transcript, m.formatted_notes, m.manual_notes,
+               m.start_time, m.duration_seconds, m.word_count, m.source, m.meeting_status,
+               m.updated_at, m.deleted_at, m.cloud_change_tag,
+               COALESCE(m.follow_up_to_record_name, predecessor.cloud_record_name)
+        FROM meetings AS m
+        LEFT JOIN meetings AS predecessor ON predecessor.id = m.follow_up_to_id
+        WHERE m.cloud_record_name IS NOT NULL
+        ORDER BY m.updated_at DESC, m.id DESC
         LIMIT ?
         OFFSET ?
         """
@@ -2171,14 +2369,42 @@ public final class DictationStore {
 
     @discardableResult
     public func upsertSyncedTextRecord(_ record: SyncTextRecord) throws -> Bool {
+        let applied = try upsertSyncedTextRecords([record])
+        return !applied.isEmpty
+    }
+
+    @discardableResult
+    public func upsertSyncedTextRecords(_ records: [SyncTextRecord]) throws -> [SyncTextRecord] {
+        guard !records.isEmpty else { return [] }
+
         let db = try openDatabase()
         defer { sqlite3_close(db) }
 
-        switch record.kind {
-        case .dictation:
-            return try upsertSyncedDictation(record, db: db)
-        case .meeting:
-            return try upsertSyncedMeeting(record, db: db)
+        try exec("BEGIN IMMEDIATE TRANSACTION", db: db)
+        do {
+            var applied: [SyncTextRecord] = []
+            var sawMeeting = false
+            for record in records {
+                let changed: Bool
+                switch record.kind {
+                case .dictation:
+                    changed = try upsertSyncedDictation(record, db: db)
+                case .meeting:
+                    sawMeeting = true
+                    changed = try upsertSyncedMeeting(record, db: db)
+                }
+                if changed {
+                    applied.append(record)
+                }
+            }
+            if sawMeeting {
+                try reconcileFollowUpLinks(db: db)
+            }
+            try exec("COMMIT", db: db)
+            return applied
+        } catch {
+            _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            throw error
         }
     }
 
@@ -2236,9 +2462,93 @@ public final class DictationStore {
         db: OpaquePointer?
     ) throws -> (dictations: Int, meetings: Int) {
         let cutoff = now.addingTimeInterval(-max(retentionInterval, 0)).timeIntervalSince1970
-        let dictations = try purgeSoftDeletedRows(table: "dictations", deletedBefore: cutoff, db: db)
-        let meetings = try purgeSoftDeletedRows(table: "meetings", deletedBefore: cutoff, db: db)
-        return (dictations, meetings)
+        try exec("BEGIN IMMEDIATE", db: db)
+        do {
+            let dictations = try purgeSoftDeletedRows(table: "dictations", deletedBefore: cutoff, db: db)
+            try detachFollowUpSuccessorsOfPurgeableMeetings(deletedBefore: cutoff, db: db)
+            let meetings = try purgeSoftDeletedRows(table: "meetings", deletedBefore: cutoff, db: db)
+            try exec("COMMIT", db: db)
+            return (dictations, meetings)
+        } catch {
+            _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            throw error
+        }
+    }
+
+    private func detachFollowUpSuccessors(of predecessorID: Int64, db: OpaquePointer?) throws {
+        let sql = """
+        UPDATE meetings
+        SET follow_up_to_id = NULL,
+            follow_up_to_record_name = NULL,
+            updated_at = ?,
+            sync_dirty = 1
+        WHERE (
+            follow_up_to_id = ?
+            OR follow_up_to_record_name = (
+                SELECT cloud_record_name
+                FROM meetings
+                WHERE id = ?
+                  AND cloud_record_name IS NOT NULL
+                  AND cloud_record_name != ''
+                LIMIT 1
+            )
+        )
+          AND deleted_at IS NULL
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, Date().timeIntervalSince1970)
+        sqlite3_bind_int64(statement, 2, predecessorID)
+        sqlite3_bind_int64(statement, 3, predecessorID)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw lastError(db)
+        }
+    }
+
+    private func detachFollowUpSuccessorsOfPurgeableMeetings(
+        deletedBefore cutoff: TimeInterval,
+        db: OpaquePointer?
+    ) throws {
+        let sql = """
+        UPDATE meetings
+        SET follow_up_to_id = NULL,
+            follow_up_to_record_name = NULL,
+            updated_at = ?,
+            sync_dirty = 1
+        WHERE deleted_at IS NULL
+          AND (
+              follow_up_to_id IN (
+                  SELECT id
+                  FROM meetings
+                  WHERE deleted_at IS NOT NULL
+                    AND deleted_at <= ?
+                    AND (sync_dirty = 0 OR cloud_record_name IS NULL OR cloud_record_name = '')
+              )
+              OR follow_up_to_record_name IN (
+                  SELECT cloud_record_name
+                  FROM meetings
+                  WHERE deleted_at IS NOT NULL
+                    AND deleted_at <= ?
+                    AND cloud_record_name IS NOT NULL
+                    AND cloud_record_name != ''
+                    AND sync_dirty = 0
+              )
+          )
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, Date().timeIntervalSince1970)
+        sqlite3_bind_double(statement, 2, cutoff)
+        sqlite3_bind_double(statement, 3, cutoff)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw lastError(db)
+        }
     }
 
     private func purgeSoftDeletedRows(
@@ -2267,6 +2577,7 @@ public final class DictationStore {
     private func ensureCloudRecordNames(db: OpaquePointer?) throws {
         try ensureCloudRecordNames(table: "dictations", prefix: "dictation", db: db)
         try ensureCloudRecordNames(table: "meetings", prefix: "meeting", db: db)
+        try reconcileFollowUpLinks(db: db)
     }
 
     private func ensureCloudRecordNames(table: String, prefix: String, db: OpaquePointer?) throws {
@@ -2307,6 +2618,79 @@ public final class DictationStore {
             guard sqlite3_step(update) == SQLITE_DONE else {
                 throw lastError(db)
             }
+        }
+    }
+
+    private func reconcileFollowUpLinks(db: OpaquePointer?) throws {
+        let now = Date().timeIntervalSince1970
+        let fillRecordNameSQL = """
+        UPDATE meetings AS child
+        SET follow_up_to_record_name = (
+                SELECT predecessor.cloud_record_name
+                FROM meetings AS predecessor
+                WHERE predecessor.id = child.follow_up_to_id
+                LIMIT 1
+            ),
+            updated_at = ?,
+            sync_dirty = 1
+        WHERE child.deleted_at IS NULL
+          AND child.follow_up_to_id IS NOT NULL
+          AND (child.follow_up_to_record_name IS NULL OR child.follow_up_to_record_name = '')
+          AND EXISTS (
+              SELECT 1
+              FROM meetings AS predecessor
+              WHERE predecessor.id = child.follow_up_to_id
+                AND predecessor.cloud_record_name IS NOT NULL
+                AND predecessor.cloud_record_name != ''
+          )
+        """
+        var fillRecordName: OpaquePointer?
+        guard sqlite3_prepare_v2(db, fillRecordNameSQL, -1, &fillRecordName, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(fillRecordName) }
+        sqlite3_bind_double(fillRecordName, 1, now)
+        guard sqlite3_step(fillRecordName) == SQLITE_DONE else {
+            throw lastError(db)
+        }
+
+        let fillLocalIDSQL = """
+        UPDATE meetings AS child
+        SET follow_up_to_id = (
+                SELECT predecessor.id
+                FROM meetings AS predecessor
+                WHERE predecessor.cloud_record_name = child.follow_up_to_record_name
+                  AND predecessor.deleted_at IS NULL
+                  AND predecessor.id != child.id
+                LIMIT 1
+            )
+        WHERE child.deleted_at IS NULL
+          AND child.follow_up_to_record_name IS NOT NULL
+          AND child.follow_up_to_record_name != ''
+          AND (
+              child.follow_up_to_id IS NULL
+              OR NOT EXISTS (
+                  SELECT 1
+                  FROM meetings AS current_predecessor
+                  WHERE current_predecessor.id = child.follow_up_to_id
+                    AND current_predecessor.deleted_at IS NULL
+              )
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM meetings AS predecessor
+              WHERE predecessor.cloud_record_name = child.follow_up_to_record_name
+                AND predecessor.deleted_at IS NULL
+                AND predecessor.id != child.id
+          )
+        """
+        var fillLocalID: OpaquePointer?
+        guard sqlite3_prepare_v2(db, fillLocalIDSQL, -1, &fillLocalID, nil) == SQLITE_OK else {
+            throw lastError(db)
+        }
+        defer { sqlite3_finalize(fillLocalID) }
+        guard sqlite3_step(fillLocalID) == SQLITE_DONE else {
+            throw lastError(db)
         }
     }
 
@@ -2363,7 +2747,8 @@ public final class DictationStore {
             durationSeconds: duration,
             wordCount: Int(sqlite3_column_int(statement, 7)),
             isDeleted: sqlite3_column_type(statement, 11) != SQLITE_NULL,
-            cloudChangeTag: optionalStringColumn(statement, index: 12)
+            cloudChangeTag: optionalStringColumn(statement, index: 12),
+            followUpToRecordName: optionalStringColumn(statement, index: 13)
         )
     }
 
@@ -2544,15 +2929,18 @@ public final class DictationStore {
 
         let start = record.startedAt ?? record.createdAt
         let end = record.endedAt ?? start.addingTimeInterval(record.durationSeconds)
+        let followUpRecordName = normalizedFollowUpRecordName(record.followUpToRecordName, recordName: record.id)
         let sql = """
         INSERT INTO meetings (
             title, calendar_event_id, start_time, end_time, duration_seconds,
             raw_transcript, formatted_notes, mic_audio_path, system_audio_path,
             saved_recording_path, meeting_status, manual_notes, word_count, source,
-            updated_at, deleted_at, cloud_record_name, cloud_change_tag,
+            follow_up_to_id, follow_up_to_record_name, updated_at, deleted_at, cloud_record_name, cloud_change_tag,
             last_synced_at, sync_dirty
         )
-        VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?,
+                (SELECT id FROM meetings WHERE cloud_record_name = ? AND deleted_at IS NULL LIMIT 1),
+                ?, ?, ?, ?, ?, ?, 0)
         ON CONFLICT(cloud_record_name) DO UPDATE SET
             title = excluded.title,
             start_time = excluded.start_time,
@@ -2564,6 +2952,8 @@ public final class DictationStore {
             manual_notes = excluded.manual_notes,
             word_count = excluded.word_count,
             source = excluded.source,
+            follow_up_to_id = excluded.follow_up_to_id,
+            follow_up_to_record_name = excluded.follow_up_to_record_name,
             updated_at = excluded.updated_at,
             deleted_at = excluded.deleted_at,
             cloud_change_tag = excluded.cloud_change_tag,
@@ -2590,15 +2980,23 @@ public final class DictationStore {
         sqlite3_bind_text(statement, 8, ((record.manualNotes ?? "") as NSString).utf8String, -1, nil)
         sqlite3_bind_int(statement, 9, Int32(record.wordCount))
         sqlite3_bind_text(statement, 10, (syncImportSource(for: record, fallback: MeetingSource.meeting.rawValue) as NSString).utf8String, -1, nil)
-        sqlite3_bind_double(statement, 11, record.updatedAt.timeIntervalSince1970)
-        bindOptionalDouble(record.isDeleted ? record.updatedAt.timeIntervalSince1970 : nil, at: 12, statement: statement)
-        sqlite3_bind_text(statement, 13, (record.id as NSString).utf8String, -1, nil)
-        bindOptionalText(record.cloudChangeTag, at: 14, statement: statement)
-        sqlite3_bind_double(statement, 15, Date().timeIntervalSince1970)
+        bindOptionalText(followUpRecordName, at: 11, statement: statement)
+        bindOptionalText(followUpRecordName, at: 12, statement: statement)
+        sqlite3_bind_double(statement, 13, record.updatedAt.timeIntervalSince1970)
+        bindOptionalDouble(record.isDeleted ? record.updatedAt.timeIntervalSince1970 : nil, at: 14, statement: statement)
+        sqlite3_bind_text(statement, 15, (record.id as NSString).utf8String, -1, nil)
+        bindOptionalText(record.cloudChangeTag, at: 16, statement: statement)
+        sqlite3_bind_double(statement, 17, Date().timeIntervalSince1970)
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw lastError(db)
         }
         return sqlite3_changes(db) > 0
+    }
+
+    private func normalizedFollowUpRecordName(_ followUpRecordName: String?, recordName: String) -> String? {
+        let trimmed = followUpRecordName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty, trimmed != recordName else { return nil }
+        return trimmed
     }
 
     private func localUpdatedAt(table: String, recordName: String, db: OpaquePointer?) throws -> Double? {
@@ -2660,6 +3058,8 @@ public final class DictationStore {
             : MeetingTemplateKind(rawValue: stringColumn(statement, index: 16))
         let selectedTemplatePrompt: String? = sqlite3_column_type(statement, 17) == SQLITE_NULL ? nil : stringColumn(statement, index: 17)
         let source = MeetingSource(rawValue: stringColumn(statement, index: 18)) ?? .meeting
+        let followUpToID: Int64? = sqlite3_column_type(statement, 19) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, 19)
+        let followUpToRecordName = optionalStringColumn(statement, index: 20)
         return MeetingRecord(
             id: sqlite3_column_int64(statement, 0),
             title: stringColumn(statement, index: 1),
@@ -2679,7 +3079,9 @@ public final class DictationStore {
             selectedTemplateName: selectedTemplateName,
             selectedTemplateKind: selectedTemplateKind,
             selectedTemplatePrompt: selectedTemplatePrompt,
-            source: source
+            source: source,
+            followUpToID: followUpToID,
+            followUpToRecordName: followUpToRecordName
         )
     }
 

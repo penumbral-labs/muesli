@@ -28,6 +28,11 @@ enum MeetingBrowserSort: Hashable {
     }
 }
 
+struct MeetingBrowserPresentation {
+    let meetings: [MeetingRecord]
+    let meetingIDsWithFollowUps: Set<Int64>
+}
+
 enum MeetingBrowserLogic {
     static func availableFilters(
         for meetings: [MeetingRecord],
@@ -56,10 +61,36 @@ enum MeetingBrowserLogic {
         now: Date = Date(),
         calendar: Calendar = .current
     ) -> [MeetingRecord] {
-        let threshold = threshold(for: filter, now: now, calendar: calendar)
-        let filtered = meetings.filter { isAfterThreshold($0, threshold: threshold) }
+        presentation(
+            from: meetings,
+            filter: filter,
+            sort: sort,
+            now: now,
+            calendar: calendar
+        ).meetings
+    }
 
-        return filtered.sorted { lhs, rhs in
+    static func presentation(
+        from meetings: [MeetingRecord],
+        filter: MeetingBrowserFilter,
+        sort: MeetingBrowserSort,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> MeetingBrowserPresentation {
+        let threshold = threshold(for: filter, now: now, calendar: calendar)
+        var meetingIDsWithFollowUps = Set<Int64>()
+        var filtered: [MeetingRecord] = []
+
+        for meeting in meetings {
+            if let followUpToID = meeting.followUpToID {
+                meetingIDsWithFollowUps.insert(followUpToID)
+            }
+            if isAfterThreshold(meeting, threshold: threshold) {
+                filtered.append(meeting)
+            }
+        }
+
+        let sorted = filtered.sorted { lhs, rhs in
             let lhsDate = parseDate(lhs.startTime) ?? .distantPast
             let rhsDate = parseDate(rhs.startTime) ?? .distantPast
             switch sort {
@@ -69,6 +100,11 @@ enum MeetingBrowserLogic {
                 return lhsDate < rhsDate
             }
         }
+
+        return MeetingBrowserPresentation(
+            meetings: sorted,
+            meetingIDsWithFollowUps: meetingIDsWithFollowUps
+        )
     }
 
     private static func threshold(
@@ -164,8 +200,8 @@ struct MeetingsView: View {
         appState.meetingRows
     }
 
-    private var filteredMeetings: [MeetingRecord] {
-        MeetingBrowserLogic.filteredMeetings(
+    private var browserPresentation: MeetingBrowserPresentation {
+        MeetingBrowserLogic.presentation(
             from: scopedMeetings,
             filter: selectedFilter,
             sort: selectedSort
@@ -222,6 +258,7 @@ struct MeetingsView: View {
     @ViewBuilder
     private var browserView: some View {
         ScrollView {
+            let presentation = browserPresentation
             VStack(alignment: .leading, spacing: MuesliTheme.spacing24) {
                 if !appState.upcomingCalendarEvents.isEmpty {
                     comingUpSection
@@ -238,16 +275,17 @@ struct MeetingsView: View {
                     activeMeetingBanner(activeLiveMeeting)
                 }
 
-                browserHeader
+                browserHeader(meetingCount: presentation.meetings.count)
 
-                if filteredMeetings.isEmpty {
+                if presentation.meetings.isEmpty {
                     emptyState
                 } else {
                     LazyVStack(spacing: MuesliTheme.spacing12) {
-                        ForEach(filteredMeetings) { meeting in
+                        ForEach(presentation.meetings) { meeting in
                             MeetingListItemView(
                                 record: meeting,
                                 isSelected: appState.selectedMeetingID == meeting.id,
+                                hasFollowUps: presentation.meetingIDsWithFollowUps.contains(meeting.id),
                                 folders: appState.folders,
                                 onSelect: { controller.showMeetingDocument(id: meeting.id) },
                                 onMove: { folderID in
@@ -512,7 +550,7 @@ struct MeetingsView: View {
     }
 
     @ViewBuilder
-    private var browserHeader: some View {
+    private func browserHeader(meetingCount: Int) -> some View {
         VStack(alignment: .leading, spacing: MuesliTheme.spacing8) {
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .top, spacing: MuesliTheme.spacing16) {
@@ -530,7 +568,7 @@ struct MeetingsView: View {
                 }
             }
 
-            browserHeaderMeta
+            browserHeaderMeta(meetingCount: meetingCount)
         }
     }
 
@@ -543,9 +581,9 @@ struct MeetingsView: View {
     }
 
     @ViewBuilder
-    private var browserHeaderMeta: some View {
+    private func browserHeaderMeta(meetingCount: Int) -> some View {
         HStack(spacing: MuesliTheme.spacing8) {
-            Text("\(filteredMeetings.count) meeting\(filteredMeetings.count == 1 ? "" : "s")")
+            Text("\(meetingCount) meeting\(meetingCount == 1 ? "" : "s")")
                 .font(MuesliTheme.callout())
                 .foregroundStyle(MuesliTheme.textSecondary)
                 .fixedSize()

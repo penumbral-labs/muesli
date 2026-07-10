@@ -157,7 +157,8 @@ enum MeetingSummaryClient {
         template: MeetingTemplateSnapshot = MeetingTemplates.auto.snapshot,
         existingNotes: String? = nil,
         manualNotesToRetain: String? = nil,
-        visualContext: String? = nil
+        visualContext: String? = nil,
+        previousMeetingNotes: String? = nil
     ) async throws -> String {
         try await withSummaryRetries(maxRetries: config.meetingSummaryRetryCount) {
             try await summarizeOnce(
@@ -167,7 +168,8 @@ enum MeetingSummaryClient {
                 template: template,
                 existingNotes: existingNotes,
                 manualNotesToRetain: manualNotesToRetain,
-                visualContext: visualContext
+                visualContext: visualContext,
+                previousMeetingNotes: previousMeetingNotes
             )
         }
     }
@@ -206,7 +208,8 @@ enum MeetingSummaryClient {
         template: MeetingTemplateSnapshot,
         existingNotes: String?,
         manualNotesToRetain: String?,
-        visualContext: String?
+        visualContext: String?,
+        previousMeetingNotes: String?
     ) async throws -> String {
         let backend = (config.meetingSummaryBackend.isEmpty ? MeetingSummaryBackendOption.chatGPT.backend : config.meetingSummaryBackend).lowercased()
         let generatedNotes: String
@@ -218,7 +221,8 @@ enum MeetingSummaryClient {
                 manualNotes: manualNotesToRetain,
                 config: config,
                 template: template,
-                visualContext: visualContext
+                visualContext: visualContext,
+                previousMeetingNotes: previousMeetingNotes
             )
             return notesByRetainingManualNotes(generatedNotes: generatedNotes, manualNotes: manualNotesToRetain)
         }
@@ -230,7 +234,8 @@ enum MeetingSummaryClient {
                 manualNotes: manualNotesToRetain,
                 config: config,
                 template: template,
-                visualContext: visualContext
+                visualContext: visualContext,
+                previousMeetingNotes: previousMeetingNotes
             )
             return notesByRetainingManualNotes(generatedNotes: generatedNotes, manualNotes: manualNotesToRetain)
         }
@@ -242,7 +247,8 @@ enum MeetingSummaryClient {
                 manualNotes: manualNotesToRetain,
                 config: config,
                 template: template,
-                visualContext: visualContext
+                visualContext: visualContext,
+                previousMeetingNotes: previousMeetingNotes
             )
             return notesByRetainingManualNotes(generatedNotes: generatedNotes, manualNotes: manualNotesToRetain)
         }
@@ -254,7 +260,8 @@ enum MeetingSummaryClient {
                 manualNotes: manualNotesToRetain,
                 config: config,
                 template: template,
-                visualContext: visualContext
+                visualContext: visualContext,
+                previousMeetingNotes: previousMeetingNotes
             )
             return notesByRetainingManualNotes(generatedNotes: generatedNotes, manualNotes: manualNotesToRetain)
         }
@@ -266,7 +273,8 @@ enum MeetingSummaryClient {
                 manualNotes: manualNotesToRetain,
                 config: config,
                 template: template,
-                visualContext: visualContext
+                visualContext: visualContext,
+                previousMeetingNotes: previousMeetingNotes
             )
             return notesByRetainingManualNotes(generatedNotes: generatedNotes, manualNotes: manualNotesToRetain)
         }
@@ -277,7 +285,8 @@ enum MeetingSummaryClient {
             manualNotes: manualNotesToRetain,
             config: config,
             template: template,
-            visualContext: visualContext
+            visualContext: visualContext,
+            previousMeetingNotes: previousMeetingNotes
         )
         return notesByRetainingManualNotes(generatedNotes: generatedNotes, manualNotes: manualNotesToRetain)
     }
@@ -297,7 +306,7 @@ enum MeetingSummaryClient {
         return sections.joined(separator: "\n\n")
     }
 
-    static func summaryInstructions(for template: MeetingTemplateSnapshot, existingNotes: String? = nil, manualNotes: String? = nil) -> String {
+    static func summaryInstructions(for template: MeetingTemplateSnapshot, existingNotes: String? = nil, manualNotes: String? = nil, previousMeetingNotes: String? = nil) -> String {
         let notePreservationInstructions: String
         let hasManualNotes = !(manualNotes?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         if let existingNotes,
@@ -309,10 +318,15 @@ enum MeetingSummaryClient {
         let manualNoteInstructions = hasManualNotes
             ? "\n\nProtected written notes may also be provided. These are notes the user typed by hand during the meeting. Use them as high-priority context. Place each written note near the most relevant section of the summary, preserving the user's wording verbatim when possible. Do not rewrite, polish, summarize away, or omit concrete user-written notes. Avoid creating a large standalone Manual Notes appendix unless there is no relevant section for a note."
             : ""
+        let hasPreviousNotes = !(previousMeetingNotes?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let followUpInstructions = hasPreviousNotes
+            ? "\n\nThis meeting is a follow-up to an earlier meeting whose notes are provided as read-only context. Use them to resolve references to earlier decisions, and carry forward action items from the previous meeting that are still open after this meeting's discussion, marking them as carried over. Do not otherwise restate the previous meeting's content."
+            : ""
 
         return baseSummaryInstructions
             + notePreservationInstructions
             + manualNoteInstructions
+            + followUpInstructions
             + "\n\nFollow this note template exactly:\n\n"
             + template.prompt
     }
@@ -322,7 +336,8 @@ enum MeetingSummaryClient {
         meetingTitle: String,
         existingNotes: String? = nil,
         manualNotes: String? = nil,
-        visualContext: String? = nil
+        visualContext: String? = nil,
+        previousMeetingNotes: String? = nil
     ) -> String {
         var prompt = "Meeting title: \(meetingTitle)\n\n"
         let visualContextCharCount = visualContext?.trimmingCharacters(in: .whitespacesAndNewlines).count ?? 0
@@ -331,6 +346,11 @@ enum MeetingSummaryClient {
 
         if let visualContext, !visualContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             prompt += "Meeting context captured during the meeting:\n\(visualContext)\n---\n\n"
+        }
+
+        let trimmedPreviousNotes = previousMeetingNotes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedPreviousNotes.isEmpty {
+            prompt += "Notes from the previous meeting in this thread (this meeting is its follow-up). Read-only context — resolve references to earlier decisions and carry forward still-open action items:\n\(trimmedPreviousNotes)\n---\n\n"
         }
 
         let trimmedNotes = existingNotes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -448,20 +468,22 @@ enum MeetingSummaryClient {
         manualNotes: String?,
         config: AppConfig,
         template: MeetingTemplateSnapshot,
-        visualContext: String? = nil
+        visualContext: String? = nil,
+        previousMeetingNotes: String? = nil
     ) async throws -> String {
         let apiKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? config.openAIAPIKey
         guard !apiKey.isEmpty else {
             return rawTranscriptFallback(transcript: transcript, meetingTitle: meetingTitle)
         }
 
-        let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes)
+        let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes, previousMeetingNotes: previousMeetingNotes)
         let userPrompt = summaryUserPrompt(
             transcript: transcript,
             meetingTitle: meetingTitle,
             existingNotes: existingNotes,
             manualNotes: manualNotes,
-            visualContext: visualContext
+            visualContext: visualContext,
+            previousMeetingNotes: previousMeetingNotes
         )
         let body: [String: Any] = [
             "model": config.openAIModel.isEmpty ? defaultOpenAIModel : config.openAIModel,
@@ -506,7 +528,8 @@ enum MeetingSummaryClient {
         manualNotes: String?,
         config: AppConfig,
         template: MeetingTemplateSnapshot,
-        visualContext: String? = nil
+        visualContext: String? = nil,
+        previousMeetingNotes: String? = nil
     ) async throws -> String {
         let apiKey = ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"] ?? config.openRouterAPIKey
         guard !apiKey.isEmpty else {
@@ -515,13 +538,14 @@ enum MeetingSummaryClient {
 
         let configuredModel = config.openRouterModel.trimmingCharacters(in: .whitespacesAndNewlines)
         let model = configuredModel.isEmpty ? defaultOpenRouterModel : configuredModel
-        let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes)
+        let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes, previousMeetingNotes: previousMeetingNotes)
         let userPrompt = summaryUserPrompt(
             transcript: transcript,
             meetingTitle: meetingTitle,
             existingNotes: existingNotes,
             manualNotes: manualNotes,
-            visualContext: visualContext
+            visualContext: visualContext,
+            previousMeetingNotes: previousMeetingNotes
         )
         let body: [String: Any] = [
             "model": model,
@@ -565,10 +589,11 @@ enum MeetingSummaryClient {
         manualNotes: String?,
         config: AppConfig,
         template: MeetingTemplateSnapshot,
-        visualContext: String? = nil
+        visualContext: String? = nil,
+        previousMeetingNotes: String? = nil
     ) async throws -> String {
         do {
-            let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes)
+            let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes, previousMeetingNotes: previousMeetingNotes)
             let text = try await ChatGPTResponsesClient.respond(
                 systemPrompt: instructions,
                 userPrompt: summaryUserPrompt(
@@ -576,7 +601,8 @@ enum MeetingSummaryClient {
                     meetingTitle: meetingTitle,
                     existingNotes: existingNotes,
                     manualNotes: manualNotes,
-                    visualContext: visualContext
+                    visualContext: visualContext,
+                    previousMeetingNotes: previousMeetingNotes
                 ),
                 model: config.chatGPTModel.isEmpty ? defaultChatGPTModel : config.chatGPTModel,
                 logCategory: "summary"
@@ -598,7 +624,8 @@ enum MeetingSummaryClient {
         manualNotes: String?,
         config: AppConfig,
         template: MeetingTemplateSnapshot,
-        visualContext: String? = nil
+        visualContext: String? = nil,
+        previousMeetingNotes: String? = nil
     ) async throws -> String {
         let baseURLString = config.ollamaURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let baseURL: URL
@@ -614,13 +641,14 @@ enum MeetingSummaryClient {
 
         let configuredModel = config.ollamaModel.trimmingCharacters(in: .whitespacesAndNewlines)
         let model = configuredModel.isEmpty ? defaultOllamaModel : configuredModel
-        let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes)
+        let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes, previousMeetingNotes: previousMeetingNotes)
         let userPrompt = summaryUserPrompt(
             transcript: transcript,
             meetingTitle: meetingTitle,
             existingNotes: existingNotes,
             manualNotes: manualNotes,
-            visualContext: visualContext
+            visualContext: visualContext,
+            previousMeetingNotes: previousMeetingNotes
         )
         let body: [String: Any] = [
             "model": model,
@@ -665,7 +693,8 @@ enum MeetingSummaryClient {
         manualNotes: String?,
         config: AppConfig,
         template: MeetingTemplateSnapshot,
-        visualContext: String? = nil
+        visualContext: String? = nil,
+        previousMeetingNotes: String? = nil
     ) async throws -> String {
         guard let requestURL = resolveLMStudioURL(config: config) else {
             throw MeetingSummaryError.backendFailed(backend: "LM Studio", statusCode: nil, message: "Invalid LM Studio URL: \(config.lmStudioURL)")
@@ -690,6 +719,7 @@ enum MeetingSummaryClient {
             config: config,
             template: template,
             visualContext: visualContext,
+            previousMeetingNotes: previousMeetingNotes,
             timeout: lmStudioSummaryTimeout
         )
     }
@@ -701,7 +731,8 @@ enum MeetingSummaryClient {
         manualNotes: String?,
         config: AppConfig,
         template: MeetingTemplateSnapshot,
-        visualContext: String? = nil
+        visualContext: String? = nil,
+        previousMeetingNotes: String? = nil
     ) async throws -> String {
         let format = CustomLLMFormat(rawValue: config.customLLMFormat) ?? .openAI
         guard let requestURL = resolveCustomLLMURL(config: config, format: format) else {
@@ -738,6 +769,7 @@ enum MeetingSummaryClient {
                 config: config,
                 template: template,
                 visualContext: visualContext,
+                previousMeetingNotes: previousMeetingNotes,
                 timeout: customLLMSummaryTimeout
             )
         case .anthropic:
@@ -753,6 +785,7 @@ enum MeetingSummaryClient {
                 config: config,
                 template: template,
                 visualContext: visualContext,
+                previousMeetingNotes: previousMeetingNotes,
                 timeout: customLLMSummaryTimeout
             )
         }
@@ -784,15 +817,17 @@ enum MeetingSummaryClient {
         config: AppConfig,
         template: MeetingTemplateSnapshot,
         visualContext: String?,
+        previousMeetingNotes: String?,
         timeout: TimeInterval
     ) async throws -> String {
-        let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes)
+        let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes, previousMeetingNotes: previousMeetingNotes)
         let userPrompt = summaryUserPrompt(
             transcript: transcript,
             meetingTitle: meetingTitle,
             existingNotes: existingNotes,
             manualNotes: manualNotes,
-            visualContext: visualContext
+            visualContext: visualContext,
+            previousMeetingNotes: previousMeetingNotes
         )
         let isOpenAI = requestURL.host?.contains("openai.com") == true
         var body: [String: Any] = [
@@ -844,15 +879,17 @@ enum MeetingSummaryClient {
         config: AppConfig,
         template: MeetingTemplateSnapshot,
         visualContext: String?,
+        previousMeetingNotes: String?,
         timeout: TimeInterval
     ) async throws -> String {
-        let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes)
+        let instructions = summaryInstructions(for: template, existingNotes: existingNotes, manualNotes: manualNotes, previousMeetingNotes: previousMeetingNotes)
         let userPrompt = summaryUserPrompt(
             transcript: transcript,
             meetingTitle: meetingTitle,
             existingNotes: existingNotes,
             manualNotes: manualNotes,
-            visualContext: visualContext
+            visualContext: visualContext,
+            previousMeetingNotes: previousMeetingNotes
         )
         let body: [String: Any] = [
             "model": model,
