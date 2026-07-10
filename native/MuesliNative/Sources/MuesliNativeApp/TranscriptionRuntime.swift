@@ -854,7 +854,7 @@ actor TranscriptionCoordinator {
                 segments: text.isEmpty ? [] : [SpeechSegment(start: 0, end: 0, text: text)]
             )
         } else {
-            throw NSError(domain: "Muesli", code: 1, userInfo: [
+            throw NSError(domain: "MuesliTranscriptionRuntime", code: 7, userInfo: [
                 NSLocalizedDescriptionKey: "Gemma 4 E2B requires macOS 15 or later.",
             ])
         }
