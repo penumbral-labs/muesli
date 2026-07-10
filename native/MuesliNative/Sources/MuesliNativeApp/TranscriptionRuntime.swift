@@ -130,13 +130,15 @@ actor TranscriptionCoordinator {
         postProcessorSystemPrompt = systemPrompt
         postProcessorConfig = config
 
-        if let option {
+        if backend == .gemma4LiteRT {
+            postProcessorModelId = Gemma4LiteRTModelStore.repoID
+        } else if let option {
             postProcessorModelURL = option.modelURL
             postProcessorModelId = option.id
             if #available(macOS 15, *), let existing = _qwen3PostProcessor as? Qwen3PostProcessor {
                 await existing.reconfigure(modelURL: option.modelURL, systemPrompt: systemPrompt)
             }
-        } else if !backend.isLocal {
+        } else if backend.llmBackend != nil {
             postProcessorModelId = TranscriptCleanupClient.configuredModel(for: backend, config: config)
         }
     }
@@ -319,15 +321,30 @@ actor TranscriptionCoordinator {
             ])
         }
 
-        await preloadPostProcessorIfNeeded(enabled: enablePostProcessor)
+        await preloadPostProcessorIfNeeded(enabled: enablePostProcessor, transcriptionBackend: backend)
     }
 
-    func preloadPostProcessorIfNeeded(enabled: Bool) async {
-        if enabled, postProcessorBackend == .local, #available(macOS 15, *) {
-            do {
+    func preloadPostProcessorIfNeeded(
+        enabled: Bool,
+        transcriptionBackend: BackendOption? = nil
+    ) async {
+        guard enabled,
+              transcriptionBackend.map({ postProcessorBackend.isCompatible(with: $0) }) ?? true,
+              #available(macOS 15, *) else { return }
+        do {
+            switch postProcessorBackend {
+            case .local:
                 try await qwen3PostProcessor.prepare()
-            } catch {
+            case .gemma4LiteRT:
+                try await gemma4LiteRTTranscriber.prepare()
+            default:
+                return
+            }
+        } catch {
+            if postProcessorBackend == .local {
                 Qwen3PostProcessorLogging.logVerbose("Qwen3 post-processor preload failed: \(error)")
+            } else {
+                Gemma4LiteRTLogging.log("Gemma cleanup preload failed: \(error)")
             }
         }
     }
@@ -504,7 +521,19 @@ actor TranscriptionCoordinator {
             Qwen3PostProcessorLogging.logVerbose("Post-processor skipped: empty transcript")
             return nil
         }
-        if !postProcessorSnapshot.backend.isLocal {
+        guard postProcessorSnapshot.backend.isCompatible(with: backend) else {
+            Gemma4LiteRTLogging.log("Gemma cleanup skipped because Gemma is the transcription backend")
+            return nil
+        }
+        if postProcessorSnapshot.backend.isGemma4LiteRT {
+            return await postProcessDictationWithGemma4(
+                result,
+                backend: backend,
+                postProcessorSnapshot: postProcessorSnapshot,
+                appContext: appContext
+            )
+        }
+        if postProcessorSnapshot.backend.llmBackend != nil {
             return await postProcessDictationWithHostedBackend(
                 result,
                 backend: backend,
@@ -561,6 +590,66 @@ actor TranscriptionCoordinator {
             )
         } catch {
             Qwen3PostProcessorLogging.logVerbose("Qwen3 post-processor failed, falling back: \(error)")
+            TranscriptCleanupDebugLogger.append(
+                status: "fallback_error",
+                cleanupBackend: postProcessorSnapshot.backend,
+                cleanupModel: postProcessorSnapshot.modelId,
+                asrBackend: backend.backend,
+                appContextText: appContext,
+                rawASRText: result.text,
+                errorDescription: String(describing: error)
+            )
+            return nil
+        }
+    }
+
+    private func postProcessDictationWithGemma4(
+        _ result: SpeechTranscriptionResult,
+        backend: BackendOption,
+        postProcessorSnapshot: PostProcessorSnapshot,
+        appContext: String?
+    ) async -> SpeechTranscriptionResult? {
+        guard #available(macOS 15, *) else {
+            Gemma4LiteRTLogging.log("Gemma cleanup skipped: requires macOS 15+")
+            return nil
+        }
+        do {
+            let transcriber = gemma4LiteRTTranscriber
+            try await transcriber.prepare()
+            let cleanup = try await transcriber.cleanTranscript(
+                result.text,
+                systemPrompt: postProcessorSnapshot.systemPrompt,
+                appContext: appContext
+            )
+            let elapsedMs = cleanup.processingTime * 1000
+            let trimmed = cleanup.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            Qwen3PostProcessorLogging.logVerbose(
+                "Gemma 4 post-processor applied to \(backend.label) in \(String(format: "%.1f", elapsedMs))ms " +
+                    "(chars=\(trimmed.count))"
+            )
+            logPostProcPair(
+                raw: result.text,
+                processed: trimmed,
+                model: postProcessorSnapshot.modelId,
+                asr: backend.backend
+            )
+            TranscriptCleanupDebugLogger.append(
+                status: "applied",
+                cleanupBackend: postProcessorSnapshot.backend,
+                cleanupModel: postProcessorSnapshot.modelId,
+                asrBackend: backend.backend,
+                appContextText: appContext,
+                rawASRText: result.text,
+                rawCleanupOutputText: cleanup.rawOutput,
+                cleanupOutputText: trimmed,
+                elapsedMs: elapsedMs
+            )
+            return SpeechTranscriptionResult(
+                text: trimmed,
+                segments: Qwen3PostProcessorLogging.isVerboseEnabled && !trimmed.isEmpty ? result.segments : []
+            )
+        } catch {
+            Gemma4LiteRTLogging.log("Gemma cleanup failed, falling back: \(error)")
             TranscriptCleanupDebugLogger.append(
                 status: "fallback_error",
                 cleanupBackend: postProcessorSnapshot.backend,

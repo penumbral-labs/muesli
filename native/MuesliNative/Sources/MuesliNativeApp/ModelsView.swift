@@ -970,6 +970,10 @@ struct ModelsView: View {
     }
 
     private func deleteModel(_ option: BackendOption) {
+        if option.backend == BackendOption.gemma4E2BLiteRT.backend,
+           appState.selectedPostProcessorBackend == .gemma4LiteRT {
+            controller.selectPostProcessorBackend(.local)
+        }
         if appState.selectedBackend == option {
             let fallback = downloadedModels
                 .compactMap { model in BackendOption.all.first(where: { $0.model == model && $0 != option }) }
