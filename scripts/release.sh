@@ -35,6 +35,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 source "$ROOT/scripts/muesli_spm_cache.sh"
+source "$ROOT/scripts/muesli_telemetry_channels.sh"
 PACKAGE_DIR="$ROOT/native/MuesliNative"
 SWIFTPM_SCRATCH_PATH=""
 SWIFT_TEST_ARGS=(--package-path "$PACKAGE_DIR")
@@ -181,6 +182,8 @@ RELEASE_BUILD_ENV=(
   MUESLI_INSTALL_DIR="$INSTALL_DIR"
   MUESLI_PROVISIONING_PROFILE="$PROVISIONING_PROFILE"
   MUESLI_SIGN_IDENTITY="$SIGN_IDENTITY"
+  MUESLI_TELEMETRYDECK_APP_ID="$MUESLI_TELEMETRYDECK_PRODUCTION_APP_ID"
+  MUESLI_TELEMETRY_CHANNEL="production"
   "${BUILD_ENV[@]}"
 )
 echo "  Bundle ID: com.muesli.app"
