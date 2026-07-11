@@ -19,7 +19,7 @@ struct DiagnosticIncidentReportView: View {
                     Text(isManualReport ? "Report a Problem" : "Diagnostic Failure Detected")
                         .font(MuesliTheme.title3())
                         .foregroundStyle(MuesliTheme.textPrimary)
-                    Text(isManualReport ? "\(AppIdentity.displayName) can prepare an anonymized GitHub issue for you to review before opening it." : "\(AppIdentity.displayName) detected a hard failure in \(incident.stage). You can review the anonymized report before opening a GitHub issue.")
+                    Text(isManualReport ? "\(AppIdentity.displayName) can prepare an anonymized GitHub issue for you to review before opening it." : "\(AppIdentity.displayName) detected a hard failure in \(incident.stage.rawValue). You can review the anonymized report before opening a GitHub issue.")
                         .font(MuesliTheme.callout())
                         .foregroundStyle(MuesliTheme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -29,10 +29,10 @@ struct DiagnosticIncidentReportView: View {
             if !isManualReport {
                 VStack(alignment: .leading, spacing: MuesliTheme.spacing8) {
                     diagnosticSummaryRow("Failure", value: incident.kind.title)
-                    diagnosticSummaryRow("Stage", value: incident.stage)
+                    diagnosticSummaryRow("Stage", value: incident.stage.rawValue)
                     diagnosticSummaryRow("Model", value: incident.model)
-                    diagnosticSummaryRow("Error", value: "\(incident.errorDomain) \(incident.errorCode)")
-                    diagnosticSummaryRow("Meaning", value: incident.errorMeaning?.summary ?? "Unknown; use domain/code for lookup")
+                    diagnosticSummaryRow("Error", value: incident.errorDisplayIdentifier)
+                    diagnosticSummaryRow("Meaning", value: incident.errorFingerprint.summary)
                 }
                 .padding(MuesliTheme.spacing12)
                 .background(Color.orange.opacity(0.10))
@@ -43,7 +43,7 @@ struct DiagnosticIncidentReportView: View {
                 )
             }
 
-            Text("No transcript, audio, meeting title, calendar title, clipboard contents, screen text, API keys, auth tokens, local file paths, raw logs, or database contents are included.")
+            Text("Only allowlisted diagnostic categories and a random incident ID are included. No transcript, audio, meeting title, calendar title, clipboard contents, screen text, API keys, auth tokens, local file paths, raw error messages, raw logs, or database contents are included.")
                 .font(MuesliTheme.caption())
                 .foregroundStyle(MuesliTheme.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)

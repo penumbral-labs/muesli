@@ -15,6 +15,8 @@ APP_BUNDLE_NAME="${MUESLI_APP_BUNDLE_NAME:-$APP_NAME.app}"
 APP_EXECUTABLE_NAME="${MUESLI_EXECUTABLE_NAME:-Muesli}"
 APP_SUPPORT_DIR_NAME="${MUESLI_SUPPORT_DIR_NAME:-$APP_DISPLAY_NAME}"
 BUNDLE_ID="${MUESLI_BUNDLE_ID:-com.muesli.app}"
+TELEMETRYDECK_APP_ID="${MUESLI_TELEMETRYDECK_APP_ID:-}"
+TELEMETRY_CHANNEL="${MUESLI_TELEMETRY_CHANNEL:-unconfigured}"
 DEFAULT_APP_VERSION="0.7.1"
 APP_VERSION="${MUESLI_BUILD_VERSION:-$DEFAULT_APP_VERSION}"
 APP_BUNDLE_VERSION="${MUESLI_BUNDLE_VERSION:-$APP_VERSION}"
@@ -30,6 +32,26 @@ PROVISIONING_PROFILE="${MUESLI_PROVISIONING_PROFILE:-}"
 CODESIGN_TIMESTAMP="${MUESLI_CODESIGN_TIMESTAMP:---timestamp}"
 if [[ "$CODESIGN_TIMESTAMP" == "none" ]]; then
   CODESIGN_TIMESTAMP="--timestamp=none"
+fi
+
+if [[ -n "$TELEMETRYDECK_APP_ID" && ! "$TELEMETRYDECK_APP_ID" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+  echo "Invalid MUESLI_TELEMETRYDECK_APP_ID: expected a UUID." >&2
+  exit 2
+fi
+case "$TELEMETRY_CHANNEL" in
+  production|preprod|dev|canary|unconfigured) ;;
+  *)
+    echo "Invalid MUESLI_TELEMETRY_CHANNEL: $TELEMETRY_CHANNEL" >&2
+    exit 2
+    ;;
+esac
+if [[ -n "$TELEMETRYDECK_APP_ID" && "$TELEMETRY_CHANNEL" == "unconfigured" ]]; then
+  echo "MUESLI_TELEMETRY_CHANNEL is required when telemetry is enabled." >&2
+  exit 2
+fi
+if [[ -z "$TELEMETRYDECK_APP_ID" && "$TELEMETRY_CHANNEL" != "unconfigured" ]]; then
+  echo "MUESLI_TELEMETRYDECK_APP_ID is required for channel $TELEMETRY_CHANNEL." >&2
+  exit 2
 fi
 
 SWIFT_BUILD_ARGS=(--package-path "$PACKAGE_DIR" -c "$BUILD_CONFIG")
@@ -147,6 +169,10 @@ cat > "$STAGED_APP_DIR/Contents/Info.plist" <<PLIST
   <string>muesli.icns</string>
   <key>MuesliSupportDirectoryName</key>
   <string>$APP_SUPPORT_DIR_NAME</string>
+  <key>MuesliTelemetryDeckAppID</key>
+  <string>$TELEMETRYDECK_APP_ID</string>
+  <key>MuesliTelemetryChannel</key>
+  <string>$TELEMETRY_CHANNEL</string>
   <key>LSUIElement</key>
   <true/>
   <key>LSMinimumSystemVersion</key>
@@ -179,6 +205,10 @@ fi
 mkdir -p "$INSTALL_DIR"
 rm -rf "$APP_DIR"
 ditto "$STAGED_APP_DIR" "$APP_DIR"
+
+# Checkouts under cloud-synced folders (OneDrive/Dropbox) tag files with Finder
+# metadata that codesign rejects as detritus; strip it before signing.
+xattr -cr "$APP_DIR" 2>/dev/null || true
 
 if [[ "$SKIP_SIGN" != "1" ]]; then
   if ! security find-identity -v -p codesigning | grep -Fq "$SIGN_IDENTITY"; then

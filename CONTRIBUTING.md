@@ -63,6 +63,27 @@ to Apple Development/CloudKit signing may need to regrant macOS privacy
 permissions once because macOS tracks permissions against the app's signing
 requirement.
 
+## Telemetry in Development
+
+Use `scripts/dev-test.sh` for local app testing. It routes anonymous telemetry
+to the dedicated `MuesliDev` TelemetryDeck app and labels every signal with
+`muesli.channel=dev`; named lanes A, B, and C use the same dev destination with
+their own bundle IDs. This keeps contributor and maintainer test traffic out of
+the production and preprod TelemetryDeck apps.
+
+Direct SwiftPM or otherwise unconfigured source builds leave telemetry
+disabled. Do not enable production or preprod telemetry for local testing, and
+do not hardcode TelemetryDeck app IDs in application code or new scripts. Build
+scripts that need telemetry routing must use the centralized public identifiers
+in `scripts/muesli_telemetry_channels.sh` and select the appropriate non-production
+channel explicitly.
+
+New telemetry events must remain anonymous and must not include audio,
+transcripts, meeting or calendar titles, clipboard or screen contents, API
+keys, auth tokens, local file paths, raw logs, database content, raw localized
+error messages, or other user-provided text. Prefer finite, allowlisted values
+that can be reviewed and tested.
+
 ## Release Signing
 
 Official preprod and stable release scripts require maintainer-only Developer
