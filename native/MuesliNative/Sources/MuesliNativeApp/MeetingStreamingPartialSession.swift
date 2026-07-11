@@ -220,8 +220,8 @@ private actor Nemotron35MeetingPartialEngine: MeetingStreamingPartialEngine {
 /// The session receives the same 16 kHz samples as the existing meeting VAD and
 /// chunk recorders. Parakeet EOU supplies a low-latency cumulative transcript,
 /// while VAD rotation and durable chunk transcription remain authoritative:
-/// `markSegmentBoundary()` freezes the provisional prefix and
-/// `commitSegment()` removes it only after the existing chunk retires.
+/// `markSegmentBoundary(id:)` freezes the provisional prefix and
+/// `commitSegment(id:)` removes it only after that chunk retires.
 final class MeetingStreamingPartialSession: @unchecked Sendable {
     /// Called with the current provisional tail text on a background thread.
     /// An empty string clears the tail.
@@ -236,13 +236,19 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
     private let engine: MeetingStreamingPartialEngine
     private let label: String
 
+    private struct PendingSegment {
+        let id: UUID
+        let prefixLength: Int
+        var isCommitted = false
+    }
+
     private struct State {
         var sampleBuffer: [Float] = []
         var chunkQueue: [[Float]] = []
         var isDraining = false
         var engineText = ""
         var committedPrefixLength = 0
-        var pendingCommitPrefixLengths: [Int] = []
+        var pendingSegments: [PendingSegment] = []
         var isStopped = false
         var isSuspended = false
         var didFail = false
@@ -288,18 +294,22 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
         }
     }
 
-    func markSegmentBoundary() {
+    func markSegmentBoundary(id: UUID) {
         state.withLock { s in
-            s.pendingCommitPrefixLengths.append(s.engineText.count)
+            s.pendingSegments.append(PendingSegment(id: id, prefixLength: s.engineText.count))
         }
     }
 
-    func pendingSegmentText() -> String? {
+    func pendingSegmentText(id: UUID) -> String? {
         state.withLock { s in
             guard !s.isStopped, !s.didFail,
-                  let prefixLength = s.pendingCommitPrefixLengths.first else { return nil }
-            let startOffset = min(s.committedPrefixLength, s.engineText.count)
-            let endOffset = min(max(prefixLength, startOffset), s.engineText.count)
+                  let segmentIndex = s.pendingSegments.firstIndex(where: { $0.id == id }) else { return nil }
+            let segment = s.pendingSegments[segmentIndex]
+            let previousPrefixLength = segmentIndex > 0
+                ? s.pendingSegments[segmentIndex - 1].prefixLength
+                : s.committedPrefixLength
+            let startOffset = min(previousPrefixLength, s.engineText.count)
+            let endOffset = min(max(segment.prefixLength, startOffset), s.engineText.count)
             guard endOffset > startOffset else { return nil }
             let start = s.engineText.index(s.engineText.startIndex, offsetBy: startOffset)
             let end = s.engineText.index(s.engineText.startIndex, offsetBy: endOffset)
@@ -309,15 +319,21 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
         }
     }
 
-    func commitSegment() {
+    func commitSegment(id: UUID) {
         let tail: String? = state.withLock { s in
             guard !s.isStopped, !s.didFail else { return nil }
-            guard !s.pendingCommitPrefixLengths.isEmpty else { return nil }
-            let prefixLength = s.pendingCommitPrefixLengths.removeFirst()
-            s.committedPrefixLength = max(
-                s.committedPrefixLength,
-                min(prefixLength, s.engineText.count)
-            )
+            guard let segmentIndex = s.pendingSegments.firstIndex(where: { $0.id == id }) else { return nil }
+            s.pendingSegments[segmentIndex].isCommitted = true
+            var didAdvance = false
+            while let first = s.pendingSegments.first, first.isCommitted {
+                s.committedPrefixLength = max(
+                    s.committedPrefixLength,
+                    min(first.prefixLength, s.engineText.count)
+                )
+                s.pendingSegments.removeFirst()
+                didAdvance = true
+            }
+            guard didAdvance else { return nil }
             return visibleTail(for: s)
         }
         if let tail {
@@ -334,6 +350,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             s.sampleBuffer.removeAll(keepingCapacity: true)
             s.chunkQueue.removeAll(keepingCapacity: true)
             s.committedPrefixLength = s.engineText.count
+            s.pendingSegments.removeAll(keepingCapacity: true)
         }
         publishImmediately("")
     }
@@ -383,9 +400,10 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             s.chunkQueue.removeAll()
             s.engineText = ""
             s.committedPrefixLength = 0
-            s.pendingCommitPrefixLengths.removeAll()
+            s.pendingSegments.removeAll()
             s.pendingPublicationTail = nil
         }
+        publishImmediately("")
         Task { await engine.shutdown() }
     }
 
@@ -415,7 +433,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             guard !s.isStopped, !s.isSuspended, !s.didFail else { return nil }
             if filteredText.count < s.committedPrefixLength {
                 s.committedPrefixLength = 0
-                s.pendingCommitPrefixLengths.removeAll()
+                s.pendingSegments.removeAll()
             }
             s.engineText = filteredText
             return visibleTail(for: s)
@@ -433,7 +451,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             s.chunkQueue.removeAll()
             s.engineText = ""
             s.committedPrefixLength = 0
-            s.pendingCommitPrefixLengths.removeAll()
+            s.pendingSegments.removeAll()
         }
         fputs("[meeting-partials] \(label) session dormant after error: \(error)\n", stderr)
         publishImmediately("")

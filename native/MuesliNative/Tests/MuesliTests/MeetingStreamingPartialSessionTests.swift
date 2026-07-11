@@ -96,11 +96,12 @@ struct MeetingStreamingPartialSessionTests {
         session.enqueue(samples(chunkCount: 1))
         #expect(await waitUntil { collector.latest == "one two" })
 
-        session.markSegmentBoundary()
+        let segmentID = UUID()
+        session.markSegmentBoundary(id: segmentID)
         session.enqueue(samples(chunkCount: 1))
         #expect(await waitUntil { collector.latest == "one two three" })
 
-        session.commitSegment()
+        session.commitSegment(id: segmentID)
         #expect(await waitUntil { collector.latest == " three" })
     }
 
@@ -114,12 +115,13 @@ struct MeetingStreamingPartialSessionTests {
 
         session.enqueue(samples(chunkCount: 1))
         #expect(await waitUntil { collector.latest == "नमस्ते दुनिया" })
-        session.markSegmentBoundary()
-        #expect(session.pendingSegmentText() == "नमस्ते दुनिया")
+        let segmentID = UUID()
+        session.markSegmentBoundary(id: segmentID)
+        #expect(session.pendingSegmentText(id: segmentID) == "नमस्ते दुनिया")
 
         session.enqueue(samples(chunkCount: 1))
         #expect(await waitUntil { collector.latest == "नमस्ते दुनिया फिर" })
-        session.commitSegment()
+        session.commitSegment(id: segmentID)
         #expect(await waitUntil { collector.latest == " फिर" })
     }
 
@@ -133,18 +135,49 @@ struct MeetingStreamingPartialSessionTests {
 
         session.enqueue(samples(chunkCount: 1))
         #expect(await waitUntil { collector.latest == "one" })
-        session.markSegmentBoundary()
+        let firstSegmentID = UUID()
+        session.markSegmentBoundary(id: firstSegmentID)
 
         session.enqueue(samples(chunkCount: 1))
         #expect(await waitUntil { collector.latest == "one two" })
-        session.markSegmentBoundary()
+        let secondSegmentID = UUID()
+        session.markSegmentBoundary(id: secondSegmentID)
 
         session.enqueue(samples(chunkCount: 1))
         #expect(await waitUntil { collector.latest == "one two three" })
 
-        session.commitSegment()
+        session.commitSegment(id: firstSegmentID)
         #expect(await waitUntil { collector.latest == " two three" })
-        session.commitSegment()
+        session.commitSegment(id: secondSegmentID)
+        #expect(await waitUntil { collector.latest == " three" })
+    }
+
+    @Test("out-of-order chunk completion resolves the matching VAD boundary")
+    func outOfOrderCommitUsesSegmentID() async throws {
+        let engine = ScriptedPartialEngine(script: ["one", "one two", "one two three"])
+        let session = MeetingStreamingPartialSession(engine: engine, label: "You")
+        let collector = PartialCollector()
+        session.onPartialUpdate = { collector.record($0) }
+        await session.connect()
+
+        session.enqueue(samples(chunkCount: 1))
+        #expect(await waitUntil { collector.latest == "one" })
+        let firstSegmentID = UUID()
+        session.markSegmentBoundary(id: firstSegmentID)
+
+        session.enqueue(samples(chunkCount: 1))
+        #expect(await waitUntil { collector.latest == "one two" })
+        let secondSegmentID = UUID()
+        session.markSegmentBoundary(id: secondSegmentID)
+
+        session.enqueue(samples(chunkCount: 1))
+        #expect(await waitUntil { collector.latest == "one two three" })
+        #expect(session.pendingSegmentText(id: firstSegmentID) == "one")
+        #expect(session.pendingSegmentText(id: secondSegmentID) == "two")
+
+        session.commitSegment(id: secondSegmentID)
+        #expect(await remainsTrue { collector.latest == "one two three" })
+        session.commitSegment(id: firstSegmentID)
         #expect(await waitUntil { collector.latest == " three" })
     }
 
@@ -160,7 +193,7 @@ struct MeetingStreamingPartialSessionTests {
         #expect(await waitUntil { collector.latest == "one" })
         let updatesBefore = collector.all.count
 
-        session.commitSegment()
+        session.commitSegment(id: UUID())
         #expect(await remainsTrue { collector.all.count == updatesBefore })
     }
 

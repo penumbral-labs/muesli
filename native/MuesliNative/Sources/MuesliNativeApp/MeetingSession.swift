@@ -383,32 +383,33 @@ final class MeetingSession {
         systemPartialSession()?.enqueue(samples)
     }
 
-    private func markMicPartialBoundary() {
-        micPartialSession()?.markSegmentBoundary()
+    private func markMicPartialBoundary(id: UUID) {
+        micPartialSession()?.markSegmentBoundary(id: id)
     }
 
-    private func markSystemPartialBoundary() {
-        systemPartialSession()?.markSegmentBoundary()
+    private func markSystemPartialBoundary(id: UUID) {
+        systemPartialSession()?.markSegmentBoundary(id: id)
     }
 
-    private func commitMicPartialSegment() {
-        micPartialSession()?.commitSegment()
+    private func commitMicPartialSegment(id: UUID) {
+        micPartialSession()?.commitSegment(id: id)
     }
 
-    private func commitSystemPartialSegment() {
-        systemPartialSession()?.commitSegment()
+    private func commitSystemPartialSegment(id: UUID) {
+        systemPartialSession()?.commitSegment(id: id)
     }
 
     private func segmentsUsingStreamingTranscript(
         _ segments: [SpeechSegment],
         partialSession: MeetingStreamingPartialSession?,
+        segmentID: UUID,
         start: TimeInterval,
         end: TimeInterval
     ) -> [SpeechSegment] {
         let prefersStreamingTranscript = config.enableLiveStreamingPartials
             && config.resolvedMeetingLiveCaptionBackend == .nemotron35
         guard (segments.isEmpty || prefersStreamingTranscript),
-              let text = partialSession?.pendingSegmentText() else { return segments }
+              let text = partialSession?.pendingSegmentText(id: segmentID) else { return segments }
         return [SpeechSegment(start: start, end: max(end, start + 0.1), text: text)]
     }
 
@@ -432,6 +433,10 @@ final class MeetingSession {
         }
         sessions.0?.stop()
         sessions.1?.stop()
+    }
+
+    func stopStreamingPartials() {
+        stopPartialSessions()
     }
 
     func pause() {
@@ -808,10 +813,6 @@ final class MeetingSession {
         let chunkOffset = chunkTiming.startTimeSeconds
 
         fputs("[meeting] rotating raw mic chunk at offset=\(String(format: "%.0f", chunkOffset))s\n", stderr)
-        // Freeze the partial tail accumulated for this chunk; it stays visible
-        // until the chunk's committed caption lands.
-        markMicPartialBoundary()
-
         let task = Task { [weak self] () -> [SpeechSegment] in
             guard let self else { return [] }
             if Task.isCancelled {
@@ -827,17 +828,21 @@ final class MeetingSession {
         }
         let (registered, retireID) = micChunkCollector.add(task)
         if registered {
+            // Bind this frozen prefix to the collector ID because chunk tasks
+            // may finish out of submission order.
+            markMicPartialBoundary(id: retireID)
             Task { [weak self] in
                 let segments = await task.value
                 guard let self else { return }
                 let resolvedSegments = self.segmentsUsingStreamingTranscript(
                     segments,
                     partialSession: self.micPartialSession(),
+                    segmentID: retireID,
                     start: chunkOffset,
                     end: chunkOffset + max(chunkTiming.durationSeconds, 0.1)
                 )
                 guard self.micChunkCollector.retire(id: retireID, segments: resolvedSegments) else { return }
-                self.commitMicPartialSegment()
+                self.commitMicPartialSegment(id: retireID)
                 guard !resolvedSegments.isEmpty else { return }
                 self.onChunkTranscribed?(resolvedSegments, "You")
             }
@@ -863,8 +868,6 @@ final class MeetingSession {
         let chunkOffset = chunkTiming.startTimeSeconds
         let chunkDuration = chunkTiming.durationSeconds
         fputs("[meeting] rotating system chunk at offset=\(String(format: "%.0f", chunkOffset))s\n", stderr)
-        markSystemPartialBoundary()
-
         let task = Task { [weak self] () -> [SpeechSegment] in
             defer {
                 try? FileManager.default.removeItem(at: chunkURL)
@@ -904,17 +907,19 @@ final class MeetingSession {
         }
         let (registered, retireID) = systemChunkCollector.add(task)
         if registered {
+            markSystemPartialBoundary(id: retireID)
             Task { [weak self] in
                 let segments = await task.value
                 guard let self else { return }
                 let resolvedSegments = self.segmentsUsingStreamingTranscript(
                     segments,
                     partialSession: self.systemPartialSession(),
+                    segmentID: retireID,
                     start: chunkOffset,
                     end: chunkOffset + max(chunkDuration, 0.1)
                 )
                 guard self.systemChunkCollector.retire(id: retireID, segments: resolvedSegments) else { return }
-                self.commitSystemPartialSegment()
+                self.commitSystemPartialSegment(id: retireID)
                 guard !resolvedSegments.isEmpty else { return }
                 self.onChunkTranscribed?(resolvedSegments, "Others")
             }

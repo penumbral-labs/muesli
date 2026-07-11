@@ -239,7 +239,10 @@ struct TranscriptionEngineArtifactsFilterTests {
     @Test("strips foreign-language placeholders without removing ordinary sentences")
     func foreignLanguagePlaceholder() {
         #expect(TranscriptionEngineArtifactsFilter.apply("[SPEAKING IN FOREIGN LANGUAGE]") == "")
-        #expect(TranscriptionEngineArtifactsFilter.apply("Speaking in a foreign language.") == "")
+        #expect(
+            TranscriptionEngineArtifactsFilter.apply("Speaking in a foreign language.") ==
+                "Speaking in a foreign language."
+        )
         #expect(TranscriptionEngineArtifactsFilter.apply("Hello [speaking in foreign language] world") == "Hello world")
         #expect(TranscriptionEngineArtifactsFilter.apply("[screaming]") == "")
         #expect(

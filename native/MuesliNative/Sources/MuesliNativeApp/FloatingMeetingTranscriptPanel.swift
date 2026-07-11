@@ -67,6 +67,18 @@ final class FloatingMeetingTranscriptModel {
         )
     }
 
+    func copyToPasteboard() {
+        let text = LiveTranscriptCopyContent.text(
+            transcript: presentation.transcript,
+            partialYou: presentation.partialYou,
+            partialOthers: presentation.partialOthers
+        )
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        showCopyConfirmation()
+    }
+
     func reset() {
         presentation.reset()
         isPaused = false
@@ -188,15 +200,7 @@ final class FloatingMeetingTranscriptPanelController {
     }
 
     private func copyTranscript() {
-        let text = LiveTranscriptCopyContent.text(
-            transcript: model.presentation.transcript,
-            partialYou: model.presentation.partialYou,
-            partialOthers: model.presentation.partialOthers
-        )
-        guard !text.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        model.showCopyConfirmation()
+        model.copyToPasteboard()
     }
 
     private func makeHostingView() -> FirstMouseHostingView<FloatingMeetingTranscriptPanelView> {
@@ -313,10 +317,7 @@ private struct FloatingMeetingTranscriptPanelView: View {
     }
 
     private func copyTranscript() {
-        guard !copyText.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(copyText, forType: .string)
-        model.showCopyConfirmation()
+        model.copyToPasteboard()
     }
 
 }

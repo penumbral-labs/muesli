@@ -275,7 +275,7 @@ enum TranscriptReconciler {
     private static func normalizedText(_ text: String) -> String {
         let lowercase = text.lowercased()
         let replaced = lowercase.replacingOccurrences(
-            of: #"[^\p{L}\p{N}\s]"#,
+            of: #"[^\p{L}\p{M}\p{N}\s]"#,
             with: " ",
             options: .regularExpression
         )

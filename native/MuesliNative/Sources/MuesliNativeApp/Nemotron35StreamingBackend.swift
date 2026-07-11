@@ -172,6 +172,7 @@ actor Nemotron35StreamingTranscriber: NemotronStreamingTranscribing {
         // shared-model inference while each caller retains its own stream state.
         try await inferenceGate.acquire()
         do {
+            try Task.checkCancellation()
             let newTokens = try await nemotronTranscribeChunk(
                 preprocessor: preprocessor, encoder: encoder, decoder: decoder, joint: joint,
                 config: config, samples: samples, state: &state)

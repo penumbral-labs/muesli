@@ -142,6 +142,7 @@ struct SettingsView: View {
     private var usesUnifiedMeetingTranscript: Bool {
         appState.config.enableLiveStreamingPartials
             && appState.config.resolvedMeetingLiveCaptionBackend == .nemotron35
+            && downloadedMeetingLiveCaptionBackends.contains(.nemotron35)
     }
 
     private var selectedMeetingBackendLabel: String {

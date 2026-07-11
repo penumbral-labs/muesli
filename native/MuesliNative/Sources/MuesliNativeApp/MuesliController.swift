@@ -301,7 +301,9 @@ final class MuesliController: NSObject {
     private(set) var selectedMeetingSummaryBackend: MeetingSummaryBackendOption
     private(set) var selectedPostProcessorBackend: TranscriptCleanupBackendOption
     private var activeMeetingSession: MeetingSession?
+    private weak var preparingMeetingSession: MeetingSession?
     private var activeMeetingID: Int64?
+    private var liveMeetingTranscriptGeneration: UUID?
     private var activeMeetingAudioWarning: ActiveMeetingAudioWarning?
     private var liveMeetingTitleCache: [Int64: String] = [:]
     private var liveManualNotesCache: [Int64: String] = [:]
@@ -1011,7 +1013,13 @@ final class MuesliController: NSObject {
         let previousComputerUseHotkeyTriggerThresholdMS = config.computerUseHotkeyTriggerThresholdMS
         let previousMeetingRecordingHotkeyTriggerThresholdMS = config.meetingRecordingHotkeyTriggerThresholdMS
         let previousEnableDictionaryCorrectionPrompts = config.enableDictionaryCorrectionPrompts
+        let previousEnableLiveStreamingPartials = config.enableLiveStreamingPartials
         mutate(&config)
+        if previousEnableLiveStreamingPartials, !config.enableLiveStreamingPartials {
+            preparingMeetingSession?.stopStreamingPartials()
+            activeMeetingSession?.stopStreamingPartials()
+            clearLiveMeetingPartialTails()
+        }
         if previousEnableDictionaryCorrectionPrompts, !config.enableDictionaryCorrectionPrompts {
             dictationCorrectionMonitor.cancel()
             queuedDictionarySuggestionPromptKeys.removeAll()
@@ -1094,6 +1102,27 @@ final class MuesliController: NSObject {
         } else if wasICloudSyncEnabled && !config.iCloudSyncEnabled {
             disableICloudSyncRuntimeState()
         }
+    }
+
+    private func clearLiveMeetingPartialTails() {
+        appState.liveMeetingPartialYou = ""
+        appState.liveMeetingPartialOthers = ""
+        indicator.updateMeetingTranscript(
+            transcript: appState.liveMeetingTranscript,
+            partialYou: "",
+            partialOthers: ""
+        )
+    }
+
+    private func clearLiveMeetingTranscript(ownerID: Int64? = nil, generation: UUID? = nil) {
+        if let ownerID, appState.liveMeetingTranscriptOwnerID != ownerID { return }
+        if let generation, liveMeetingTranscriptGeneration != generation { return }
+        appState.liveMeetingTranscript = ""
+        appState.liveMeetingPartialYou = ""
+        appState.liveMeetingPartialOthers = ""
+        appState.liveMeetingTranscriptOwnerID = nil
+        liveMeetingTranscriptGeneration = nil
+        indicator.updateMeetingTranscript(transcript: "", partialYou: "", partialOthers: "")
     }
 
     private func refreshContributionMilestonePrompt(totalWords: Int, totalMeetings: Int) {
@@ -4257,6 +4286,9 @@ final class MuesliController: NSObject {
     private func discardMeetingStateForTermination() {
         activeMeetingSession?.discard()
         activeMeetingSession = nil
+        preparingMeetingSession?.discard()
+        preparingMeetingSession = nil
+        clearLiveMeetingTranscript()
         disarmMeetingAutoStop()
         if let meetingStartMeetingID {
             canceledMeetingStartIDs.insert(meetingStartMeetingID)
@@ -4806,6 +4838,8 @@ final class MuesliController: NSObject {
             // Live meeting start cancellation
             canceledMeetingStartIDs.insert(meetingID)
             meetingStartTask?.cancel()
+            preparingMeetingSession?.stopStreamingPartials()
+            clearLiveMeetingTranscript(ownerID: meetingID)
             resolveLiveMeetingAfterStartFailure(id: meetingID)
             cancelMeetingRecordingHotkeyToggleAfterFailedStart(meetingID: meetingID)
             meetingMonitor.resumeAfterCooldown()
@@ -4895,9 +4929,16 @@ final class MuesliController: NSObject {
                 transcriptionCoordinator: transcriptionCoordinator,
                 meetingMicRecorder: meetingMicRecorder
             )
+            let transcriptGeneration = UUID()
             meetingSession.previousMeetingNotes = previousMeetingNotes
 
             do {
+                preparingMeetingSession = meetingSession
+                defer {
+                    if preparingMeetingSession === meetingSession {
+                        preparingMeetingSession = nil
+                    }
+                }
                 meetingSession.manualNotesProvider = { [weak self] in
                     await MainActor.run {
                         guard let self else { return nil }
@@ -4913,7 +4954,8 @@ final class MuesliController: NSObject {
                 meetingSession.onChunkTranscribed = { [weak self, weak meetingSession] segments, speaker in
                     Task { @MainActor [weak self, weak meetingSession] in
                         guard let self else { return }
-                        guard self.appState.liveMeetingTranscriptOwnerID == meetingID else { return }
+                        guard self.appState.liveMeetingTranscriptOwnerID == meetingID,
+                              self.liveMeetingTranscriptGeneration == transcriptGeneration else { return }
                         let liveTranscriptStart = meetingSession?.startTime ?? Date()
                         let liveTranscriptCalendar = Calendar(identifier: .gregorian)
                         let entries = segments.compactMap { segment -> LiveTranscriptCheckpointEntry? in
@@ -4955,7 +4997,8 @@ final class MuesliController: NSObject {
                 meetingSession.onPartialTranscript = { [weak self] speaker, tail in
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        guard self.appState.liveMeetingTranscriptOwnerID == meetingID else { return }
+                        guard self.appState.liveMeetingTranscriptOwnerID == meetingID,
+                              self.liveMeetingTranscriptGeneration == transcriptGeneration else { return }
                         if speaker == "You" {
                             guard self.appState.liveMeetingPartialYou != tail else { return }
                             self.appState.liveMeetingPartialYou = tail
@@ -4971,6 +5014,7 @@ final class MuesliController: NSObject {
                     }
                 }
                 appState.liveMeetingTranscriptOwnerID = meetingID
+                liveMeetingTranscriptGeneration = transcriptGeneration
                 appState.liveMeetingTranscript = ""
                 appState.liveMeetingPartialYou = ""
                 appState.liveMeetingPartialOthers = ""
@@ -4996,7 +5040,6 @@ final class MuesliController: NSObject {
                 }
                 try await meetingSession.start()
                 if Task.isCancelled || canceledMeetingStartIDs.contains(meetingID) {
-                    meetingSession.discard()
                     throw CancellationError()
                 }
                 activeMeetingSession = meetingSession
@@ -5014,13 +5057,14 @@ final class MuesliController: NSObject {
                 scheduleMeetingEndNotification(endDate: endDate, title: title)
                 return
             } catch {
+                clearLiveMeetingTranscript(ownerID: meetingID, generation: transcriptGeneration)
+                meetingSession.discard()
                 guard shouldRetryAfterPermissionRequest,
                       case .tapCreationFailed = error as? CoreAudioSystemRecorder.RecorderError else {
                     throw error
                 }
 
                 shouldRetryAfterPermissionRequest = false
-                meetingSession.discard()
                 try Task.checkCancellation()
                 try checkMeetingStartStillCurrent(meetingID)
                 updateMeetingStartStatus("Requesting system audio permission...")
@@ -5210,6 +5254,7 @@ final class MuesliController: NSObject {
 
     private func discardMeetingRecording(resolution: MeetingDiscardResolution = .discardRecording) {
         meetingRecordingHotkeyMonitor.cancelToggleMode()
+        clearLiveMeetingTranscript()
         guard let sessionToDiscard = activeMeetingSession else {
             // Fallback recovery: reset indicator if session is nil
             guard !isStartingMeetingRecording else { return }
@@ -5589,12 +5634,7 @@ final class MuesliController: NSObject {
                 self.endMeetingActivity()
                 self.historyWindowController?.reload()
                 self.syncAppState()
-                if self.appState.liveMeetingTranscriptOwnerID == liveMeetingID {
-                    self.appState.liveMeetingTranscript = ""
-                    self.appState.liveMeetingPartialYou = ""
-                    self.appState.liveMeetingPartialOthers = ""
-                    self.appState.liveMeetingTranscriptOwnerID = nil
-                }
+                self.clearLiveMeetingTranscript(ownerID: liveMeetingID)
                 if let meetingResult {
                     self.cleanupTemporaryMeetingAudioFiles(for: meetingResult)
                 }
