@@ -59,4 +59,12 @@ struct MeetingSessionRecoveryPolicyTests {
             hasSystemSegments: true
         ))
     }
+
+    @Test("batch meeting paths recover when no system segments exist")
+    func batchPathRecoversEmptySystemTranscript() {
+        #expect(MeetingSession.shouldAttemptSystemRecovery(
+            usesUnifiedNemotronTranscript: false,
+            hasSystemSegments: false
+        ))
+    }
 }
