@@ -388,13 +388,15 @@ final class MeetingSession {
         systemPartialSession()?.commitSegment()
     }
 
-    private func segmentsUsingStreamingFallback(
+    private func segmentsUsingStreamingTranscript(
         _ segments: [SpeechSegment],
         partialSession: MeetingStreamingPartialSession?,
         start: TimeInterval,
         end: TimeInterval
     ) -> [SpeechSegment] {
-        guard segments.isEmpty,
+        let prefersStreamingTranscript = config.enableLiveStreamingPartials
+            && config.resolvedMeetingLiveCaptionBackend == .nemotron35
+        guard (segments.isEmpty || prefersStreamingTranscript),
               let text = partialSession?.pendingSegmentText() else { return segments }
         return [SpeechSegment(start: start, end: max(end, start + 0.1), text: text)]
     }
@@ -782,7 +784,7 @@ final class MeetingSession {
             Task { [weak self] in
                 let segments = await task.value
                 guard let self else { return }
-                let resolvedSegments = self.segmentsUsingStreamingFallback(
+                let resolvedSegments = self.segmentsUsingStreamingTranscript(
                     segments,
                     partialSession: self.micPartialSession(),
                     start: chunkOffset,
@@ -859,7 +861,7 @@ final class MeetingSession {
             Task { [weak self] in
                 let segments = await task.value
                 guard let self else { return }
-                let resolvedSegments = self.segmentsUsingStreamingFallback(
+                let resolvedSegments = self.segmentsUsingStreamingTranscript(
                     segments,
                     partialSession: self.systemPartialSession(),
                     start: chunkOffset,

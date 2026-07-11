@@ -32,15 +32,8 @@ enum FloatingMeetingTranscriptPlacement {
 }
 
 enum FloatingMeetingTranscriptContent {
-    static let maximumCommittedMessages = 8
-
-    static func recentMessages(from transcript: String) -> [TranscriptChatMessage] {
-        let lines = transcript
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .suffix(maximumCommittedMessages)
-            .joined(separator: "\n")
-        return TranscriptChatMessage.messages(from: lines)
+    static func messages(from transcript: String) -> [TranscriptChatMessage] {
+        TranscriptChatMessage.messages(from: transcript)
     }
 
 }
@@ -51,6 +44,7 @@ final class FloatingMeetingTranscriptModel {
     var transcript = ""
     var partialYou = ""
     var partialOthers = ""
+    var committedMessages: [TranscriptChatMessage] = []
     var isPaused = false
     var isPresented = false
     var revision = 0
@@ -59,7 +53,15 @@ final class FloatingMeetingTranscriptModel {
         guard self.transcript != transcript ||
                 self.partialYou != partialYou ||
                 self.partialOthers != partialOthers else { return }
-        self.transcript = transcript
+        if transcript != self.transcript {
+            if transcript.hasPrefix(self.transcript) {
+                let appended = String(transcript.dropFirst(self.transcript.count))
+                committedMessages.append(contentsOf: FloatingMeetingTranscriptContent.messages(from: appended))
+            } else {
+                committedMessages = FloatingMeetingTranscriptContent.messages(from: transcript)
+            }
+            self.transcript = transcript
+        }
         self.partialYou = partialYou
         self.partialOthers = partialOthers
         revision &+= 1
@@ -69,6 +71,7 @@ final class FloatingMeetingTranscriptModel {
         transcript = ""
         partialYou = ""
         partialOthers = ""
+        committedMessages = []
         isPaused = false
         isPresented = false
         revision &+= 1
@@ -173,7 +176,7 @@ private struct FloatingMeetingTranscriptPanelView: View {
     }
 
     private var messages: [TranscriptChatMessage] {
-        FloatingMeetingTranscriptContent.recentMessages(from: model.transcript)
+        model.committedMessages
     }
 
     private var copyText: String {
@@ -243,55 +246,51 @@ private struct FloatingMeetingTranscriptPanelView: View {
     }
 
     private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    if messages.isEmpty && partialYou.isEmpty && partialOthers.isEmpty {
-                        Text("Waiting for speech…")
-                            .font(MuesliTheme.body())
-                            .foregroundStyle(MuesliTheme.textTertiary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, MuesliTheme.spacing8)
-                    } else {
-                        ForEach(messages) { message in
-                            LiveTranscriptBubble(
-                                speaker: message.speaker,
-                                timestamp: message.timestamp,
-                                lines: [message.text],
-                                isUser: message.isUser,
-                                isPartial: false,
-                                onOpen: onOpenNotes
-                            )
-                        }
-                        if !partialOthers.isEmpty {
-                            LiveTranscriptBubble(
-                                speaker: "Others",
-                                timestamp: nil,
-                                lines: [partialOthers],
-                                isUser: false,
-                                isPartial: true,
-                                onOpen: onOpenNotes
-                            )
-                        }
-                        if !partialYou.isEmpty {
-                            LiveTranscriptBubble(
-                                speaker: "You",
-                                timestamp: nil,
-                                lines: [partialYou],
-                                isUser: true,
-                                isPartial: true,
-                                onOpen: onOpenNotes
-                            )
-                        }
-                        Color.clear.frame(height: 1).id("floatingTranscriptBottom")
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 6) {
+                if messages.isEmpty && partialYou.isEmpty && partialOthers.isEmpty {
+                    Text("Waiting for speech…")
+                        .font(MuesliTheme.body())
+                        .foregroundStyle(MuesliTheme.textTertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, MuesliTheme.spacing8)
+                } else {
+                    ForEach(messages) { message in
+                        LiveTranscriptBubble(
+                            speaker: message.speaker,
+                            timestamp: message.timestamp,
+                            lines: [message.text],
+                            isUser: message.isUser,
+                            isPartial: false,
+                            onOpen: onOpenNotes
+                        )
+                    }
+                    if !partialOthers.isEmpty {
+                        LiveTranscriptBubble(
+                            speaker: "Others",
+                            timestamp: nil,
+                            lines: [partialOthers],
+                            isUser: false,
+                            isPartial: true,
+                            onOpen: onOpenNotes
+                        )
+                    }
+                    if !partialYou.isEmpty {
+                        LiveTranscriptBubble(
+                            speaker: "You",
+                            timestamp: nil,
+                            lines: [partialYou],
+                            isUser: true,
+                            isPartial: true,
+                            onOpen: onOpenNotes
+                        )
                     }
                 }
-                .padding(.horizontal, MuesliTheme.spacing12)
-                .padding(.vertical, MuesliTheme.spacing8)
             }
-            .onAppear { scrollToBottom(proxy) }
-            .onChange(of: model.revision) { _, _ in scrollToBottom(proxy) }
+            .padding(.horizontal, MuesliTheme.spacing12)
+            .padding(.vertical, MuesliTheme.spacing8)
         }
+        .defaultScrollAnchor(.bottom)
     }
 
     private func copyTranscript() {
@@ -304,9 +303,4 @@ private struct FloatingMeetingTranscriptPanelView: View {
         }
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        DispatchQueue.main.async {
-            proxy.scrollTo("floatingTranscriptBottom", anchor: .bottom)
-        }
-    }
 }

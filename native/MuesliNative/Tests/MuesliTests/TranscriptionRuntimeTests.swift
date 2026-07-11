@@ -241,6 +241,7 @@ struct TranscriptionEngineArtifactsFilterTests {
         #expect(TranscriptionEngineArtifactsFilter.apply("[SPEAKING IN FOREIGN LANGUAGE]") == "")
         #expect(TranscriptionEngineArtifactsFilter.apply("Speaking in a foreign language.") == "")
         #expect(TranscriptionEngineArtifactsFilter.apply("Hello [speaking in foreign language] world") == "Hello world")
+        #expect(TranscriptionEngineArtifactsFilter.apply("[screaming]") == "")
         #expect(
             TranscriptionEngineArtifactsFilter.apply("We discussed speaking in foreign language classes.") ==
                 "We discussed speaking in foreign language classes."

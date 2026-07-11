@@ -260,16 +260,16 @@ struct FloatingMeetingTranscriptTests {
         #expect(text == "[10:00:00] You: committed\nOthers: current reply\nYou: speaking now")
     }
 
-    @Test("panel keeps only the most recent committed messages")
-    func recentTranscriptBound() {
+    @Test("panel retains the complete committed transcript")
+    func completeTranscriptHistory() {
         let transcript = (0..<12)
             .map { "[10:00:\(String(format: "%02d", $0))] You: line \($0)" }
             .joined(separator: "\n")
 
-        let messages = FloatingMeetingTranscriptContent.recentMessages(from: transcript)
+        let messages = FloatingMeetingTranscriptContent.messages(from: transcript)
 
-        #expect(messages.count == FloatingMeetingTranscriptContent.maximumCommittedMessages)
-        #expect(messages.first?.text == "line 4")
+        #expect(messages.count == 12)
+        #expect(messages.first?.text == "line 0")
         #expect(messages.last?.text == "line 11")
     }
 }

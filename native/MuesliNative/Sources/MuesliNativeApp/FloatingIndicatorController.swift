@@ -105,6 +105,7 @@ final class FloatingIndicatorController: NSObject {
     private let configStore: ConfigStore
     private var isMeetingRecording = false
     private var isMeetingRecordingPaused = false
+    private var isMeetingTranscriptManuallyDismissed = false
     private lazy var meetingTranscriptPanel = FloatingMeetingTranscriptPanelController(
         onHoverChanged: { [weak self] hovered in
             self?.setMeetingTranscriptPanelHovered(hovered)
@@ -113,7 +114,7 @@ final class FloatingIndicatorController: NSObject {
             self?.openMeetingNotesFromTranscript()
         },
         onDismiss: { [weak self] in
-            self?.hideMeetingTranscript()
+            self?.dismissMeetingTranscript()
         }
     )
     private var glassView: NSVisualEffectView?
@@ -801,9 +802,11 @@ final class FloatingIndicatorController: NSObject {
     func setHovered(_ hovered: Bool) {
         if state == .recording, isMeetingRecording, !isShowingLoading, !isDragging {
             guard hovered else {
+                isMeetingTranscriptManuallyDismissed = false
                 hideMeetingTranscript()
                 return
             }
+            guard !isMeetingTranscriptManuallyDismissed else { return }
             let config = configStore.load()
             guard config.showMeetingTranscriptOnIndicatorHover, panel != nil else { return }
             hoverExitWorkItem?.cancel()
@@ -859,6 +862,16 @@ final class FloatingIndicatorController: NSObject {
             hoverExitWorkItem?.cancel()
         } else {
             scheduleMeetingTranscriptHoverExit()
+        }
+    }
+
+    private func dismissMeetingTranscript() {
+        isMeetingTranscriptManuallyDismissed = true
+        hoverExitWorkItem?.cancel()
+        hideMeetingTranscript()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, !self.pointerIsInsidePanel() else { return }
+            self.isMeetingTranscriptManuallyDismissed = false
         }
     }
 
