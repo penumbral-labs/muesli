@@ -215,7 +215,7 @@ struct IndicatorFrameSizeTests {
 
 @Suite("Floating meeting transcript")
 struct FloatingMeetingTranscriptTests {
-    @Test("overlay click regions route dismiss, copy, open, and outside clicks")
+    @Test("overlay routes header controls and leaves transcript body to SwiftUI")
     func overlayClickRouting() {
         let frame = NSRect(x: 100, y: 100, width: 360, height: 320)
 
@@ -227,7 +227,7 @@ struct FloatingMeetingTranscriptTests {
         ) == .copy)
         #expect(FloatingMeetingTranscriptInteraction.action(
             at: NSPoint(x: 250, y: 250), in: frame
-        ) == .openMeeting)
+        ) == nil)
         #expect(FloatingMeetingTranscriptInteraction.action(
             at: NSPoint(x: 90, y: 250), in: frame
         ) == nil)
@@ -290,6 +290,7 @@ struct FloatingMeetingTranscriptTests {
         controller.show(in: container, frame: container.bounds)
 
         #expect(controller.isVisible)
+        #expect(!controller.handleClick(atWindowPoint: NSPoint(x: 180, y: 160)))
         #expect(controller.handleClick(atWindowPoint: NSPoint(x: 290, y: 300)))
         #expect(dismissCount == 1)
     }

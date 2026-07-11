@@ -39,7 +39,7 @@ enum FloatingMeetingTranscriptInteraction: Equatable {
     static func action(at point: NSPoint, in panelFrame: NSRect) -> Self? {
         guard panelFrame.contains(point) else { return nil }
         let headerMinY = panelFrame.maxY - 42
-        guard point.y >= headerMinY else { return .openMeeting }
+        guard point.y >= headerMinY else { return nil }
 
         if point.x >= panelFrame.maxX - 48 {
             return .copy
@@ -57,6 +57,7 @@ final class FloatingMeetingTranscriptModel {
     let presentation = LiveTranscriptPresentationModel()
     var isPaused = false
     var isPresented = false
+    var didCopy = false
 
     func update(transcript: String, partialYou: String, partialOthers: String) {
         presentation.update(
@@ -70,6 +71,14 @@ final class FloatingMeetingTranscriptModel {
         presentation.reset()
         isPaused = false
         isPresented = false
+        didCopy = false
+    }
+
+    func showCopyConfirmation() {
+        didCopy = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            self?.didCopy = false
+        }
     }
 }
 
@@ -187,6 +196,7 @@ final class FloatingMeetingTranscriptPanelController {
         guard !text.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+        model.showCopyConfirmation()
     }
 
     private func makeHostingView() -> FirstMouseHostingView<FloatingMeetingTranscriptPanelView> {
@@ -208,7 +218,6 @@ private struct FloatingMeetingTranscriptPanelView: View {
     let onHoverChanged: (Bool) -> Void
     let onOpenNotes: () -> Void
     let onDismiss: () -> Void
-    @State private var didCopy = false
 
     private var partialYou: String {
         model.presentation.partialYou.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -274,9 +283,9 @@ private struct FloatingMeetingTranscriptPanelView: View {
             .buttonStyle(.plain)
             .help("Hide live transcript")
             Button(action: copyTranscript) {
-                Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                Image(systemName: model.didCopy ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(didCopy ? MuesliTheme.success : MuesliTheme.textSecondary)
+                    .foregroundStyle(model.didCopy ? MuesliTheme.success : MuesliTheme.textSecondary)
                     .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
             }
@@ -307,10 +316,7 @@ private struct FloatingMeetingTranscriptPanelView: View {
         guard !copyText.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(copyText, forType: .string)
-        didCopy = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            didCopy = false
-        }
+        model.showCopyConfirmation()
     }
 
 }

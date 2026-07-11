@@ -331,7 +331,9 @@ struct ModelsView: View {
         do {
             try MeetingLiveCaptionModelStore.delete()
             isLiveCaptionModelDownloaded = false
-            controller.updateConfig { $0.enableLiveStreamingPartials = false }
+            if appState.config.resolvedMeetingLiveCaptionBackend == .parakeetRealtimeEOU {
+                controller.updateConfig { $0.enableLiveStreamingPartials = false }
+            }
         } catch {
             fputs("[muesli-native] live caption model delete failed: \(error)\n", stderr)
         }
