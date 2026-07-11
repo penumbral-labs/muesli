@@ -352,6 +352,7 @@ final class FloatingIndicatorController: NSObject {
               let containerView,
               let contentView,
               let indicatorFrame = indicatorScreenFrame else { return }
+        panel.ignoresMouseEvents = false
         let screen = NSScreen.screens.first(where: { $0.frame.intersects(indicatorFrame) }) ?? NSScreen.main
         guard let visibleFrame = screen?.visibleFrame else { return }
         let transcriptFrame = FloatingMeetingTranscriptPlacement.frame(
@@ -1239,7 +1240,7 @@ final class FloatingIndicatorController: NSObject {
         panel.hidesOnDeactivate = false
         panel.ignoresMouseEvents = false
         panel.isMovableByWindowBackground = false
-        panel.becomesKeyOnlyIfNeeded = true
+        panel.becomesKeyOnlyIfNeeded = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.leftMouseDownHandler = { [weak self] screenPoint in
             self?.meetingTranscriptPanel.handleClick(at: screenPoint) ?? false

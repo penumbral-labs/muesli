@@ -264,6 +264,7 @@ struct FloatingMeetingTranscriptTests {
 
         #expect(panel.canBecomeKey)
         #expect(!panel.canBecomeMain)
+        #expect(!panel.becomesKeyOnlyIfNeeded)
         #expect(!panel.styleMask.contains(.nonactivatingPanel))
         #expect(receivedMouseDown)
     }
