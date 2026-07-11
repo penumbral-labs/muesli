@@ -232,6 +232,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
     static let feedSamples = StreamingChunkSize.ms320.shiftSamples
     static let maxQueuedChunks = 3
     static let publicationIntervalNanoseconds: UInt64 = 250_000_000
+    static let finishDrainTimeoutNanoseconds: UInt64 = 30_000_000_000
 
     private let engine: MeetingStreamingPartialEngine
     private let label: String
@@ -364,7 +365,9 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
         }
     }
 
-    func finish() async -> String? {
+    func finish(
+        drainTimeoutNanoseconds: UInt64 = MeetingStreamingPartialSession.finishDrainTimeoutNanoseconds
+    ) async -> String? {
         let shouldDrain = state.withLock { s -> Bool in
             guard !s.isStopped, !s.isSuspended, !s.didFail else { return false }
             if !s.sampleBuffer.isEmpty {
@@ -377,11 +380,21 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             return true
         }
         if shouldDrain {
-            await drain()
-        } else {
-            while state.withLock({ $0.isDraining || !$0.chunkQueue.isEmpty }) {
-                try? await Task.sleep(nanoseconds: 10_000_000)
+            Task.detached(priority: .utility) { [weak self] in
+                await self?.drain()
             }
+        }
+        let drainDeadline = DispatchTime.now().uptimeNanoseconds &+ drainTimeoutNanoseconds
+        while state.withLock({ $0.isDraining || !$0.chunkQueue.isEmpty }) {
+            guard DispatchTime.now().uptimeNanoseconds < drainDeadline else {
+                goDormant(error: NSError(
+                    domain: "MeetingStreamingPartialSession",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Timed out finalizing live transcript audio."]
+                ))
+                return nil
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
         }
         guard !state.withLock({ $0.didFail || $0.isStopped }) else { return nil }
         let finishRevision = state.withLock { s -> UInt64 in

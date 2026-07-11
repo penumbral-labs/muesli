@@ -304,6 +304,21 @@ struct MeetingStreamingPartialSessionTests {
         #expect(tail == "partial final")
     }
 
+    @Test("finish abandons a hung streaming inference so meeting stop can recover")
+    func finishTimesOutHungInference() async throws {
+        let engine = BlockingPartialEngine(text: "late")
+        let session = MeetingStreamingPartialSession(engine: engine, label: "You")
+        await session.connect()
+
+        session.enqueue(samples(chunkCount: 1))
+        #expect(await waitUntil { engine.isWaiting })
+
+        let tail = await session.finish(drainTimeoutNanoseconds: 20_000_000)
+
+        #expect(tail == nil)
+        #expect(await waitUntil { !engine.isWaiting })
+    }
+
     @Test("backpressure keeps only the freshest EOU feed intervals")
     func backpressureDropsOldestChunks() async throws {
         let engine = EchoPartialEngine()
