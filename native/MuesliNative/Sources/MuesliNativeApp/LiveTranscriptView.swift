@@ -2,6 +2,7 @@
 // Created: 2026-05-22
 
 import AppKit
+import Observation
 import SwiftUI
 
 enum LiveTranscriptCopyContent {
@@ -21,17 +22,6 @@ enum LiveTranscriptCopyContent {
         }
         return sections.joined(separator: "\n")
     }
-}
-
-private struct LiveTranscriptGroup: Identifiable {
-    // Stable ID: sequential index of the group in arrival order.
-    // Using a deterministic Int instead of UUID prevents SwiftUI from treating
-    // every group as removed+reinserted on each transcript update.
-    let id: Int
-    let speaker: String?
-    let isUser: Bool
-    let lines: [String]
-    let timestamp: String?
 }
 
 struct LiveTranscriptBubble: View {
@@ -120,18 +110,119 @@ struct LiveTranscriptBubble: View {
     }
 }
 
+@MainActor
+@Observable
+final class LiveTranscriptPresentationModel {
+    var transcript = ""
+    var partialYou = ""
+    var partialOthers = ""
+    var messages: [TranscriptChatMessage] = []
+
+    func update(transcript: String, partialYou: String, partialOthers: String) {
+        guard self.transcript != transcript ||
+                self.partialYou != partialYou ||
+                self.partialOthers != partialOthers else { return }
+
+        if transcript != self.transcript {
+            if transcript.hasPrefix(self.transcript) {
+                let appended = String(transcript.dropFirst(self.transcript.count))
+                messages.append(contentsOf: TranscriptChatMessage.messages(
+                    from: appended,
+                    startingAt: messages.count
+                ))
+            } else {
+                messages = TranscriptChatMessage.messages(from: transcript)
+            }
+            self.transcript = transcript
+        }
+        self.partialYou = partialYou
+        self.partialOthers = partialOthers
+    }
+
+    func reset() {
+        transcript = ""
+        partialYou = ""
+        partialOthers = ""
+        messages = []
+    }
+}
+
+struct LiveTranscriptFeedView: View {
+    static let bottomAnchorID = "liveTranscriptBottom"
+
+    let messages: [TranscriptChatMessage]
+    let partialYou: String
+    let partialOthers: String
+    var horizontalPadding: CGFloat
+    var topPadding: CGFloat
+    var bottomPadding: CGFloat
+    var onOpen: (() -> Void)? = nil
+
+    private var trimmedPartialYou: String {
+        partialYou.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedPartialOthers: String {
+        partialOthers.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        LazyVStack(alignment: .leading, spacing: 6) {
+            if messages.isEmpty && trimmedPartialYou.isEmpty && trimmedPartialOthers.isEmpty {
+                Text("Waiting for speech…")
+                    .font(MuesliTheme.body())
+                    .foregroundStyle(MuesliTheme.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, MuesliTheme.spacing8)
+            } else {
+                ForEach(messages) { message in
+                    LiveTranscriptBubble(
+                        speaker: message.speaker,
+                        timestamp: message.timestamp,
+                        lines: [message.text],
+                        isUser: message.isUser,
+                        isPartial: false,
+                        onOpen: onOpen
+                    )
+                }
+                if !trimmedPartialOthers.isEmpty {
+                    LiveTranscriptBubble(
+                        speaker: "Others",
+                        timestamp: nil,
+                        lines: [trimmedPartialOthers],
+                        isUser: false,
+                        isPartial: true,
+                        onOpen: onOpen
+                    )
+                }
+                if !trimmedPartialYou.isEmpty {
+                    LiveTranscriptBubble(
+                        speaker: "You",
+                        timestamp: nil,
+                        lines: [trimmedPartialYou],
+                        isUser: true,
+                        isPartial: true,
+                        onOpen: onOpen
+                    )
+                }
+                Color.clear
+                    .frame(height: 1)
+                    .id(Self.bottomAnchorID)
+            }
+        }
+        .padding(.horizontal, horizontalPadding)
+        .padding(.top, topPadding)
+        .padding(.bottom, bottomPadding)
+    }
+}
+
 struct LiveTranscriptView: View {
     let transcript: String
-    /// Provisional streaming tails (issue #99): rendered as dimmed bubbles after
-    /// the committed captions, outside the incremental-parse invariant — they
-    /// never enter `transcript`, so `parsedLength` stays valid.
+    /// Provisional streaming tails render after committed captions and remain
+    /// outside the durable transcript until their chunk is committed.
     var partialYou: String = ""
     var partialOthers: String = ""
-    @State private var groups: [LiveTranscriptGroup] = []
-    // Tracks how many characters of transcript have been parsed into groups.
-    // On each onChange we only parse the new suffix, keeping updates O(k)
-    // where k = lines in the new chunk rather than O(n) for the full history.
-    @State private var parsedLength: Int = 0
+    @State private var presentation = LiveTranscriptPresentationModel()
     @State private var didCopy = false
 
     private var copyText: String {
@@ -146,37 +237,25 @@ struct LiveTranscriptView: View {
         ZStack(alignment: .topTrailing) {
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 6) {
-                        if groups.isEmpty && trimmedPartialYou.isEmpty && trimmedPartialOthers.isEmpty {
-                            Text("Waiting for speech…")
-                                .font(MuesliTheme.body())
-                                .foregroundStyle(MuesliTheme.textTertiary)
-                                .padding(MuesliTheme.spacing16)
-                        } else {
-                            ForEach(groups) { group in
-                                liveBubble(for: group)
-                            }
-                            if !trimmedPartialOthers.isEmpty {
-                                partialBubble(text: trimmedPartialOthers, speaker: "Others", isUser: false)
-                            }
-                            if !trimmedPartialYou.isEmpty {
-                                partialBubble(text: trimmedPartialYou, speaker: "You", isUser: true)
-                            }
-                            Color.clear
-                                .frame(height: 1)
-                                .id("liveTranscriptBottom")
-                        }
-                    }
+                    LiveTranscriptFeedView(
+                        messages: presentation.messages,
+                        partialYou: presentation.partialYou,
+                        partialOthers: presentation.partialOthers,
+                        horizontalPadding: MuesliTheme.spacing16,
+                        topPadding: 44,
+                        bottomPadding: MuesliTheme.spacing8
+                    )
                     .textSelection(.enabled)
-                    .padding(.horizontal, MuesliTheme.spacing16)
-                    .padding(.top, 44)
-                    .padding(.bottom, MuesliTheme.spacing8)
                 }
                 .onChange(of: transcript) { _, newTranscript in
-                    mergeNewContent(from: newTranscript)
+                    presentation.update(
+                        transcript: newTranscript,
+                        partialYou: partialYou,
+                        partialOthers: partialOthers
+                    )
                     DispatchQueue.main.async {
                         withAnimation(.easeOut(duration: 0.15)) {
-                            proxy.scrollTo("liveTranscriptBottom", anchor: .bottom)
+                            proxy.scrollTo(LiveTranscriptFeedView.bottomAnchorID, anchor: .bottom)
                         }
                     }
                 }
@@ -185,23 +264,35 @@ struct LiveTranscriptView: View {
                 // seconds. Scroll only when a tail appears (empty → non-empty);
                 // committed captions keep their existing scroll behavior.
                 .onChange(of: partialYou) { old, new in
+                    presentation.update(
+                        transcript: transcript,
+                        partialYou: new,
+                        partialOthers: partialOthers
+                    )
                     if old.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                        !new.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         scrollToBottom(proxy)
                     }
                 }
                 .onChange(of: partialOthers) { old, new in
+                    presentation.update(
+                        transcript: transcript,
+                        partialYou: partialYou,
+                        partialOthers: new
+                    )
                     if old.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                        !new.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         scrollToBottom(proxy)
                     }
                 }
                 .onAppear {
-                    // @State is freshly initialized on each tab switch, so this
-                    // catches up with any chunks that arrived on another tab.
-                    mergeNewContent(from: transcript)
+                    presentation.update(
+                        transcript: transcript,
+                        partialYou: partialYou,
+                        partialOthers: partialOthers
+                    )
                     DispatchQueue.main.async {
-                        proxy.scrollTo("liveTranscriptBottom", anchor: .bottom)
+                        proxy.scrollTo(LiveTranscriptFeedView.bottomAnchorID, anchor: .bottom)
                     }
                 }
             }
@@ -240,77 +331,11 @@ struct LiveTranscriptView: View {
         }
     }
 
-    private var trimmedPartialYou: String {
-        partialYou.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var trimmedPartialOthers: String {
-        partialOthers.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
         DispatchQueue.main.async {
             withAnimation(.easeOut(duration: 0.15)) {
-                proxy.scrollTo("liveTranscriptBottom", anchor: .bottom)
+                proxy.scrollTo(LiveTranscriptFeedView.bottomAnchorID, anchor: .bottom)
             }
         }
-    }
-
-    private func mergeNewContent(from newTranscript: String) {
-        if newTranscript.count < parsedLength {
-            groups = []
-            parsedLength = 0
-        }
-        guard newTranscript.count > parsedLength else {
-            return
-        }
-        let startIndex = newTranscript.index(newTranscript.startIndex, offsetBy: parsedLength)
-        parsedLength = newTranscript.count
-
-        let newMessages = TranscriptChatMessage.messages(from: String(newTranscript[startIndex...]))
-        for msg in newMessages {
-            if let last = groups.last, last.speaker == msg.speaker {
-                groups[groups.count - 1] = LiveTranscriptGroup(
-                    id: last.id,
-                    speaker: last.speaker,
-                    isUser: last.isUser,
-                    lines: last.lines + [msg.text],
-                    timestamp: last.timestamp
-                )
-            } else {
-                groups.append(LiveTranscriptGroup(
-                    id: groups.count,
-                    speaker: msg.speaker,
-                    isUser: msg.isUser,
-                    lines: [msg.text],
-                    timestamp: msg.timestamp
-                ))
-            }
-        }
-    }
-
-    /// Provisional streaming tail: dimmed italic text with a dashed border so
-    /// it visibly reads as "still being spoken" until the committed caption
-    /// replaces it.
-    @ViewBuilder
-    private func partialBubble(text: String, speaker: String, isUser: Bool) -> some View {
-        LiveTranscriptBubble(
-            speaker: speaker,
-            timestamp: nil,
-            lines: [text],
-            isUser: isUser,
-            isPartial: true
-        )
-    }
-
-    @ViewBuilder
-    private func liveBubble(for group: LiveTranscriptGroup) -> some View {
-        LiveTranscriptBubble(
-            speaker: group.speaker,
-            timestamp: group.timestamp,
-            lines: group.lines,
-            isUser: group.isUser,
-            isPartial: false
-        )
     }
 }

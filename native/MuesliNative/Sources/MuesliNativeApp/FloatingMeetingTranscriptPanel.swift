@@ -31,83 +31,31 @@ enum FloatingMeetingTranscriptPlacement {
     }
 }
 
-enum FloatingMeetingTranscriptContent {
-    static func messages(from transcript: String, startingAt firstID: Int = 0) -> [TranscriptChatMessage] {
-        TranscriptChatMessage.messages(from: transcript, startingAt: firstID)
-    }
-
-}
-
 @MainActor
 @Observable
 final class FloatingMeetingTranscriptModel {
-    var transcript = ""
-    var partialYou = ""
-    var partialOthers = ""
-    var committedMessages: [TranscriptChatMessage] = []
+    let presentation = LiveTranscriptPresentationModel()
     var isPaused = false
     var isPresented = false
-    var revision = 0
 
     func update(transcript: String, partialYou: String, partialOthers: String) {
-        guard self.transcript != transcript ||
-                self.partialYou != partialYou ||
-                self.partialOthers != partialOthers else { return }
-        if transcript != self.transcript {
-            if transcript.hasPrefix(self.transcript) {
-                let appended = String(transcript.dropFirst(self.transcript.count))
-                committedMessages.append(contentsOf: FloatingMeetingTranscriptContent.messages(
-                    from: appended,
-                    startingAt: committedMessages.count
-                ))
-            } else {
-                committedMessages = FloatingMeetingTranscriptContent.messages(from: transcript)
-            }
-            self.transcript = transcript
-        }
-        self.partialYou = partialYou
-        self.partialOthers = partialOthers
-        revision &+= 1
+        presentation.update(
+            transcript: transcript,
+            partialYou: partialYou,
+            partialOthers: partialOthers
+        )
     }
 
     func reset() {
-        transcript = ""
-        partialYou = ""
-        partialOthers = ""
-        committedMessages = []
+        presentation.reset()
         isPaused = false
         isPresented = false
-        revision &+= 1
     }
 }
 
 private final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
-    var onDismiss: (() -> Void)?
-
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        dismissHitRegion.contains(point) ? self : super.hitTest(point)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        guard dismissHitRegion.contains(point) else {
-            super.mouseDown(with: event)
-            return
-        }
-        onDismiss?()
-    }
-
-    private var dismissHitRegion: NSRect {
-        NSRect(
-            x: max(0, bounds.maxX - 80),
-            y: max(0, bounds.maxY - 42),
-            width: 40,
-            height: 42
-        )
     }
 }
 
@@ -188,7 +136,6 @@ final class FloatingMeetingTranscriptPanelController {
                 onDismiss: onDismiss
             )
         )
-        hostingView.onDismiss = onDismiss
         hostingView.wantsLayer = true
         return hostingView
     }
@@ -202,22 +149,22 @@ private struct FloatingMeetingTranscriptPanelView: View {
     @State private var didCopy = false
 
     private var partialYou: String {
-        model.partialYou.trimmingCharacters(in: .whitespacesAndNewlines)
+        model.presentation.partialYou.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var partialOthers: String {
-        model.partialOthers.trimmingCharacters(in: .whitespacesAndNewlines)
+        model.presentation.partialOthers.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var messages: [TranscriptChatMessage] {
-        model.committedMessages
+        model.presentation.messages
     }
 
     private var copyText: String {
         LiveTranscriptCopyContent.text(
-            transcript: model.transcript,
-            partialYou: model.partialYou,
-            partialOthers: model.partialOthers
+            transcript: model.presentation.transcript,
+            partialYou: model.presentation.partialYou,
+            partialOthers: model.presentation.partialOthers
         )
     }
 
@@ -281,48 +228,15 @@ private struct FloatingMeetingTranscriptPanelView: View {
 
     private var transcript: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 6) {
-                if messages.isEmpty && partialYou.isEmpty && partialOthers.isEmpty {
-                    Text("Waiting for speech…")
-                        .font(MuesliTheme.body())
-                        .foregroundStyle(MuesliTheme.textTertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, MuesliTheme.spacing8)
-                } else {
-                    ForEach(messages) { message in
-                        LiveTranscriptBubble(
-                            speaker: message.speaker,
-                            timestamp: message.timestamp,
-                            lines: [message.text],
-                            isUser: message.isUser,
-                            isPartial: false,
-                            onOpen: onOpenNotes
-                        )
-                    }
-                    if !partialOthers.isEmpty {
-                        LiveTranscriptBubble(
-                            speaker: "Others",
-                            timestamp: nil,
-                            lines: [partialOthers],
-                            isUser: false,
-                            isPartial: true,
-                            onOpen: onOpenNotes
-                        )
-                    }
-                    if !partialYou.isEmpty {
-                        LiveTranscriptBubble(
-                            speaker: "You",
-                            timestamp: nil,
-                            lines: [partialYou],
-                            isUser: true,
-                            isPartial: true,
-                            onOpen: onOpenNotes
-                        )
-                    }
-                }
-            }
-            .padding(.horizontal, MuesliTheme.spacing12)
-            .padding(.vertical, MuesliTheme.spacing8)
+            LiveTranscriptFeedView(
+                messages: messages,
+                partialYou: partialYou,
+                partialOthers: partialOthers,
+                horizontalPadding: MuesliTheme.spacing12,
+                topPadding: MuesliTheme.spacing8,
+                bottomPadding: MuesliTheme.spacing8,
+                onOpen: onOpenNotes
+            )
         }
         .defaultScrollAnchor(.bottom)
     }

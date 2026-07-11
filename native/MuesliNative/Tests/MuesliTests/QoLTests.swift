@@ -214,6 +214,20 @@ struct IndicatorFrameSizeTests {
 
 @Suite("Floating meeting transcript")
 struct FloatingMeetingTranscriptTests {
+    @Test("floating panel can receive controls without becoming the main window")
+    @MainActor
+    func floatingPanelIsInteractive() {
+        let panel = InteractiveFloatingPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 320),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+
+        #expect(panel.canBecomeKey)
+        #expect(!panel.canBecomeMain)
+    }
+
     @Test("panel prefers the open side and remains inside the screen")
     func panelPlacement() {
         let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -266,7 +280,7 @@ struct FloatingMeetingTranscriptTests {
             .map { "[10:00:\(String(format: "%02d", $0))] You: line \($0)" }
             .joined(separator: "\n")
 
-        let messages = FloatingMeetingTranscriptContent.messages(from: transcript)
+        let messages = TranscriptChatMessage.messages(from: transcript)
 
         #expect(messages.count == 12)
         #expect(messages.first?.text == "line 0")
@@ -276,7 +290,7 @@ struct FloatingMeetingTranscriptTests {
     @Test("incremental panel updates retain unique message identities")
     @MainActor
     func incrementalUpdatesUseUniqueIDs() {
-        let model = FloatingMeetingTranscriptModel()
+        let model = LiveTranscriptPresentationModel()
 
         model.update(
             transcript: "[10:00:00] You: first\n",
@@ -289,8 +303,8 @@ struct FloatingMeetingTranscriptTests {
             partialOthers: ""
         )
 
-        #expect(model.committedMessages.map(\.id) == [0, 1])
-        #expect(model.committedMessages.map(\.text) == ["first", "second"])
+        #expect(model.messages.map(\.id) == [0, 1])
+        #expect(model.messages.map(\.text) == ["first", "second"])
     }
 }
 

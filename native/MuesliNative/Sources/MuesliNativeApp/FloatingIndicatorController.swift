@@ -11,6 +11,11 @@ enum FloatingIndicatorPointerIntent {
     }
 }
 
+final class InteractiveFloatingPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 @MainActor
 private final class HoverIndicatorView: NSView {
     weak var owner: FloatingIndicatorController?
@@ -1209,7 +1214,7 @@ final class FloatingIndicatorController: NSObject {
     }
 
     private func createPanel(config: AppConfig) {
-        let panel = NSPanel(
+        let panel = InteractiveFloatingPanel(
             contentRect: frameForState(.idle, config: config),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
