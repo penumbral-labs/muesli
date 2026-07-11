@@ -263,6 +263,21 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
         }
     }
 
+    func pendingSegmentText() -> String? {
+        state.withLock { s in
+            guard !s.isStopped, !s.didFail,
+                  let prefixLength = s.pendingCommitPrefixLengths.first else { return nil }
+            let startOffset = min(s.committedPrefixLength, s.engineText.count)
+            let endOffset = min(max(prefixLength, startOffset), s.engineText.count)
+            guard endOffset > startOffset else { return nil }
+            let start = s.engineText.index(s.engineText.startIndex, offsetBy: startOffset)
+            let end = s.engineText.index(s.engineText.startIndex, offsetBy: endOffset)
+            let text = String(s.engineText[start..<end])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        }
+    }
+
     func commitSegment() {
         let tail: String? = state.withLock { s in
             guard !s.isStopped, !s.didFail else { return nil }

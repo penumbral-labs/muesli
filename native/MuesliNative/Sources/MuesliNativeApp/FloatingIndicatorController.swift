@@ -111,6 +111,9 @@ final class FloatingIndicatorController: NSObject {
         },
         onOpenNotes: { [weak self] in
             self?.openMeetingNotesFromTranscript()
+        },
+        onDismiss: { [weak self] in
+            self?.hideMeetingTranscript()
         }
     )
     private var glassView: NSVisualEffectView?

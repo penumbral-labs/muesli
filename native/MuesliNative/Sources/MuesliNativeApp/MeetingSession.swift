@@ -388,6 +388,17 @@ final class MeetingSession {
         systemPartialSession()?.commitSegment()
     }
 
+    private func segmentsUsingStreamingFallback(
+        _ segments: [SpeechSegment],
+        partialSession: MeetingStreamingPartialSession?,
+        start: TimeInterval,
+        end: TimeInterval
+    ) -> [SpeechSegment] {
+        guard segments.isEmpty,
+              let text = partialSession?.pendingSegmentText() else { return segments }
+        return [SpeechSegment(start: start, end: max(end, start + 0.1), text: text)]
+    }
+
     private func suspendPartialSessions() {
         micPartialSession()?.suspend()
         systemPartialSession()?.suspend()
@@ -770,11 +781,17 @@ final class MeetingSession {
         if registered {
             Task { [weak self] in
                 let segments = await task.value
-                guard self?.micChunkCollector.retire(id: retireID, segments: segments) == true else { return }
-                // Committed (even when empty) — drop the frozen partial prefix.
-                self?.commitMicPartialSegment()
-                guard !segments.isEmpty else { return }
-                self?.onChunkTranscribed?(segments, "You")
+                guard let self else { return }
+                let resolvedSegments = self.segmentsUsingStreamingFallback(
+                    segments,
+                    partialSession: self.micPartialSession(),
+                    start: chunkOffset,
+                    end: chunkOffset + max(chunkTiming.durationSeconds, 0.1)
+                )
+                guard self.micChunkCollector.retire(id: retireID, segments: resolvedSegments) else { return }
+                self.commitMicPartialSegment()
+                guard !resolvedSegments.isEmpty else { return }
+                self.onChunkTranscribed?(resolvedSegments, "You")
             }
         } else {
             task.cancel()
@@ -841,10 +858,17 @@ final class MeetingSession {
         if registered {
             Task { [weak self] in
                 let segments = await task.value
-                guard self?.systemChunkCollector.retire(id: retireID, segments: segments) == true else { return }
-                self?.commitSystemPartialSegment()
-                guard !segments.isEmpty else { return }
-                self?.onChunkTranscribed?(segments, "Others")
+                guard let self else { return }
+                let resolvedSegments = self.segmentsUsingStreamingFallback(
+                    segments,
+                    partialSession: self.systemPartialSession(),
+                    start: chunkOffset,
+                    end: chunkOffset + max(chunkDuration, 0.1)
+                )
+                guard self.systemChunkCollector.retire(id: retireID, segments: resolvedSegments) else { return }
+                self.commitSystemPartialSegment()
+                guard !resolvedSegments.isEmpty else { return }
+                self.onChunkTranscribed?(resolvedSegments, "Others")
             }
         } else {
             task.cancel()

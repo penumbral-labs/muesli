@@ -104,6 +104,25 @@ struct MeetingStreamingPartialSessionTests {
         #expect(await waitUntil { collector.latest == " three" })
     }
 
+    @Test("frozen streaming text is available as a durable fallback")
+    func pendingSegmentFallback() async throws {
+        let engine = ScriptedPartialEngine(script: ["नमस्ते दुनिया", "नमस्ते दुनिया फिर"])
+        let session = MeetingStreamingPartialSession(engine: engine, label: "Others")
+        let collector = PartialCollector()
+        session.onPartialUpdate = { collector.record($0) }
+        await session.connect()
+
+        session.enqueue(samples(chunkCount: 1))
+        #expect(await waitUntil { collector.latest == "नमस्ते दुनिया" })
+        session.markSegmentBoundary()
+        #expect(session.pendingSegmentText() == "नमस्ते दुनिया")
+
+        session.enqueue(samples(chunkCount: 1))
+        #expect(await waitUntil { collector.latest == "नमस्ते दुनिया फिर" })
+        session.commitSegment()
+        #expect(await waitUntil { collector.latest == " फिर" })
+    }
+
     @Test("concurrent durable chunks retire their VAD boundaries in order")
     func queuedBoundariesCommitInOrder() async throws {
         let engine = ScriptedPartialEngine(script: ["one", "one two", "one two three"])

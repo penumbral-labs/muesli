@@ -80,14 +80,17 @@ final class FloatingMeetingTranscriptPanelController {
     private let model = FloatingMeetingTranscriptModel()
     private let onHoverChanged: (Bool) -> Void
     private let onOpenNotes: () -> Void
+    private let onDismiss: () -> Void
     private var hostingView: NSHostingView<FloatingMeetingTranscriptPanelView>?
 
     init(
         onHoverChanged: @escaping (Bool) -> Void,
-        onOpenNotes: @escaping () -> Void
+        onOpenNotes: @escaping () -> Void,
+        onDismiss: @escaping () -> Void
     ) {
         self.onHoverChanged = onHoverChanged
         self.onOpenNotes = onOpenNotes
+        self.onDismiss = onDismiss
     }
 
     var isVisible: Bool {
@@ -145,7 +148,8 @@ final class FloatingMeetingTranscriptPanelController {
             rootView: FloatingMeetingTranscriptPanelView(
                 model: model,
                 onHoverChanged: onHoverChanged,
-                onOpenNotes: onOpenNotes
+                onOpenNotes: onOpenNotes,
+                onDismiss: onDismiss
             )
         )
         hostingView.wantsLayer = true
@@ -157,6 +161,7 @@ private struct FloatingMeetingTranscriptPanelView: View {
     let model: FloatingMeetingTranscriptModel
     let onHoverChanged: (Bool) -> Void
     let onOpenNotes: () -> Void
+    let onDismiss: () -> Void
     @State private var didCopy = false
 
     private var partialYou: String {
@@ -213,6 +218,15 @@ private struct FloatingMeetingTranscriptPanelView: View {
             Text(model.isPaused ? "Paused" : "Live")
                 .font(MuesliTheme.caption())
                 .foregroundStyle(MuesliTheme.textSecondary)
+            Button(action: onDismiss) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(MuesliTheme.textSecondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Hide live transcript")
             Button(action: copyTranscript) {
                 Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 12, weight: .semibold))

@@ -6,6 +6,8 @@ struct TranscriptionEngineArtifactsFilter {
 
     private static let artifactPatterns: [String] = [
         #"(?i)\[\s*(?:blank[_\s-]*audio|no[_\s-]*speech|silence|inaudible|music|applause|laughter)\s*\]"#,
+        #"(?i)[\[(<]\s*(?:speaking\s+in\s+)?(?:a\s+)?foreign\s+language\s*[\])>]"#,
+        #"(?i)^\s*(?:speaking\s+in\s+)?(?:a\s+)?foreign\s+language\s*[.!]?\s*$"#,
         #"(?i)<\s*(?:eou|eob|unk|blank|pad)\s*>"#,
         #"(?i)<\|\s*(?:endoftext|nospeech|notimestamp|nodiarize|noitn|pnc|startofcontext|startoftranscript)\s*\|>"#,
     ]
