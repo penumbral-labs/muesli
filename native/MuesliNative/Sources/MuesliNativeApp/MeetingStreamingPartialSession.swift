@@ -256,6 +256,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
         var lastPublishedTail: String?
         var isPublicationScheduled = false
         var lifecycleRevision: UInt64 = 0
+        var activeInferenceRevision: UInt64?
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
 
@@ -383,11 +384,20 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             }
         }
         guard !state.withLock({ $0.didFail || $0.isStopped }) else { return nil }
+        let finishRevision = state.withLock { s -> UInt64 in
+            s.activeInferenceRevision = s.lifecycleRevision
+            return s.lifecycleRevision
+        }
         do {
             try await engine.finish()
         } catch {
             goDormant(error: error)
             return nil
+        }
+        state.withLock { s in
+            if s.activeInferenceRevision == finishRevision {
+                s.activeInferenceRevision = nil
+            }
         }
         return state.withLock { s in
             let text = visibleTail(for: s).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -405,6 +415,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             s.committedPrefixLength = 0
             s.pendingSegments.removeAll()
             s.pendingPublicationTail = nil
+            s.activeInferenceRevision = nil
         }
         publishImmediately("")
         Task { await engine.shutdown() }
@@ -412,17 +423,24 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
 
     private func drain() async {
         while true {
-            let chunk: [Float]? = state.withLock { s in
+            let work: (chunk: [Float], revision: UInt64)? = state.withLock { s in
                 guard !s.isStopped, !s.isSuspended, !s.didFail, !s.chunkQueue.isEmpty else {
                     s.isDraining = false
                     return nil
                 }
-                return s.chunkQueue.removeFirst()
+                let revision = s.lifecycleRevision
+                s.activeInferenceRevision = revision
+                return (s.chunkQueue.removeFirst(), revision)
             }
-            guard let chunk else { return }
+            guard let work else { return }
 
             do {
-                try await engine.process(samples: chunk)
+                try await engine.process(samples: work.chunk)
+                state.withLock { s in
+                    if s.activeInferenceRevision == work.revision {
+                        s.activeInferenceRevision = nil
+                    }
+                }
             } catch {
                 goDormant(error: error)
                 return
@@ -433,7 +451,8 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
     private func receiveEnginePartial(_ text: String) {
         let filteredText = TranscriptionEngineArtifactsFilter.apply(text)
         let tail: String? = state.withLock { s in
-            guard !s.isStopped, !s.isSuspended, !s.didFail else { return nil }
+            guard !s.isStopped, !s.isSuspended, !s.didFail,
+                  s.activeInferenceRevision == s.lifecycleRevision else { return nil }
             if filteredText.count < s.committedPrefixLength {
                 s.committedPrefixLength = 0
                 s.pendingSegments.removeAll()
@@ -456,6 +475,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             s.engineText = ""
             s.committedPrefixLength = 0
             s.pendingSegments.removeAll()
+            s.activeInferenceRevision = nil
         }
         fputs("[meeting-partials] \(label) session dormant after error: \(error)\n", stderr)
         publishImmediately("")

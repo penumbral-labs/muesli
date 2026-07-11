@@ -238,6 +238,24 @@ struct MeetingStreamingPartialSessionTests {
         #expect(await remainsTrue { collector.latest == "" })
     }
 
+    @Test("inference started before pause cannot publish after resume")
+    func prePauseInferenceCannotPublishAfterResume() async throws {
+        let engine = BlockingPartialEngine(text: "stale")
+        let session = MeetingStreamingPartialSession(engine: engine, label: "You")
+        let collector = PartialCollector()
+        session.onPartialUpdate = { collector.record($0) }
+        await session.connect()
+
+        session.enqueue(samples(chunkCount: 1))
+        #expect(await waitUntil { engine.isWaiting })
+
+        session.suspend()
+        session.resume()
+        engine.release()
+
+        #expect(await remainsTrue(for: 0.5) { collector.latest == "" })
+    }
+
     @Test("an EOU inference failure clears the tail and goes dormant")
     func failureGoesDormant() async throws {
         let engine = ThrowingPartialEngine()
@@ -370,6 +388,50 @@ private final class ThrowingPartialEngine: MeetingStreamingPartialEngine, @unche
     }
 
     func shutdown() async {}
+}
+
+private final class BlockingPartialEngine: MeetingStreamingPartialEngine, @unchecked Sendable {
+    private struct State {
+        var handler: (@Sendable (String) -> Void)?
+        var continuation: CheckedContinuation<Void, Never>?
+        var isWaiting = false
+    }
+    private let text: String
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    init(text: String) {
+        self.text = text
+    }
+
+    var isWaiting: Bool { state.withLock { $0.isWaiting } }
+
+    func setPartialHandler(_ handler: @escaping @Sendable (String) -> Void) async {
+        state.withLock { $0.handler = handler }
+    }
+
+    func process(samples: [Float]) async throws {
+        await withCheckedContinuation { continuation in
+            state.withLock { s in
+                s.isWaiting = true
+                s.continuation = continuation
+            }
+        }
+        state.withLock { $0.handler }?(text)
+    }
+
+    func release() {
+        let continuation = state.withLock { s -> CheckedContinuation<Void, Never>? in
+            let continuation = s.continuation
+            s.continuation = nil
+            s.isWaiting = false
+            return continuation
+        }
+        continuation?.resume()
+    }
+
+    func shutdown() async {
+        release()
+    }
 }
 
 private final class EchoPartialEngine: MeetingStreamingPartialEngine, @unchecked Sendable {
