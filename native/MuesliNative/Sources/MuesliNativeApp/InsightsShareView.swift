@@ -201,16 +201,10 @@ private struct InsightsShareCard: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("MY TIME WITH MUESLI")
-                            .font(.system(size: 18, weight: .bold))
-                            .tracking(3.1)
-                            .foregroundStyle(cyan)
-                        Text(rangeLabel.uppercased())
-                            .font(.system(size: 14, weight: .semibold))
-                            .tracking(1.9)
-                            .foregroundStyle(muted)
-                    }
+                    Text(rangeLabel.uppercased())
+                        .font(.system(size: 14, weight: .semibold))
+                        .tracking(1.9)
+                        .foregroundStyle(pale.opacity(0.82))
                     Spacer()
                     MuesliShareMark(color: pale)
                         .padding(.horizontal, 14)
