@@ -4,12 +4,20 @@ import MuesliCore
 
 enum DashboardTab: String, CaseIterable {
     case dictations
+    case insights
     case meetings
     case dictionary
     case models
     case shortcuts
     case settings
     case about
+}
+
+enum InsightsSection: String, CaseIterable, Sendable {
+    case streak
+    case words
+    case pace
+    case meetings
 }
 
 enum MeetingsNavigationState: Equatable {
@@ -151,6 +159,7 @@ final class AppState {
 
     // Navigation
     var selectedTab: DashboardTab = .dictations
+    var insightsInitialSection: InsightsSection = .words
 
     // Computed
     var selectedMeeting: MeetingRecord? {

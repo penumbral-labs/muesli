@@ -785,6 +785,23 @@ final class MuesliController: NSObject {
         (try? dictationStore.meetingStats()) ?? MeetingStats(totalWords: 0, totalMeetings: 0, averageWPM: 0)
     }
 
+    func openInsights(section: InsightsSection) {
+        appState.insightsInitialSection = section
+        appState.selectedTab = .insights
+    }
+
+    func closeInsights() {
+        appState.selectedTab = .dictations
+    }
+
+    func insightsSnapshot(range: InsightsRange) async throws -> InsightsSnapshot {
+        let databaseURL = dictationStore.resolvedDatabaseURL
+        return try await Task.detached(priority: .utility) {
+            try Task.checkCancellation()
+            return try DictationStore(databaseURL: databaseURL).insightsSnapshot(range: range)
+        }.value
+    }
+
     func truncate(_ text: String, limit: Int) -> String {
         let compact = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         guard compact.count > limit else { return compact }
