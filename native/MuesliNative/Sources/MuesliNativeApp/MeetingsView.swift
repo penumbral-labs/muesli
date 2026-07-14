@@ -57,7 +57,6 @@ enum MeetingBrowserLogic {
     static func filteredMeetings(
         from meetings: [MeetingRecord],
         filter: MeetingBrowserFilter,
-        origin: RecordOriginFilter = .all,
         sort: MeetingBrowserSort,
         now: Date = Date(),
         calendar: Calendar = .current
@@ -65,7 +64,6 @@ enum MeetingBrowserLogic {
         presentation(
             from: meetings,
             filter: filter,
-            origin: origin,
             sort: sort,
             now: now,
             calendar: calendar
@@ -75,7 +73,6 @@ enum MeetingBrowserLogic {
     static func presentation(
         from meetings: [MeetingRecord],
         filter: MeetingBrowserFilter,
-        origin: RecordOriginFilter = .all,
         sort: MeetingBrowserSort,
         now: Date = Date(),
         calendar: Calendar = .current
@@ -88,8 +85,7 @@ enum MeetingBrowserLogic {
             if let followUpToID = meeting.followUpToID {
                 meetingIDsWithFollowUps.insert(followUpToID)
             }
-            if origin.matches(meetingSource: meeting.source),
-               isAfterThreshold(meeting, threshold: threshold) {
+            if isAfterThreshold(meeting, threshold: threshold) {
                 filtered.append(meeting)
             }
         }
@@ -208,7 +204,6 @@ struct MeetingsView: View {
         MeetingBrowserLogic.presentation(
             from: scopedMeetings,
             filter: selectedFilter,
-            origin: appState.meetingOriginFilter,
             sort: selectedSort
         )
     }

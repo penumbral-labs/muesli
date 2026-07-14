@@ -415,13 +415,26 @@ public final class DictationStore {
         return makeDictationRecord(statement)
     }
 
-    public func meetingCounts() throws -> (total: Int, byFolder: [Int64: Int], directByFolder: [Int64: Int]) {
+    public func meetingCounts(
+        origin: RecordOriginFilter = .all
+    ) throws -> (total: Int, byFolder: [Int64: Int], directByFolder: [Int64: Int]) {
         let db = try openDatabase()
         defer { sqlite3_close(db) }
 
+        let originCondition: String
+        switch origin {
+        case .all:
+            originCondition = ""
+        case .thisMac:
+            originCondition = " AND LOWER(TRIM(COALESCE(source, ''))) <> 'ios'"
+        case .fromIPhone:
+            originCondition = " AND LOWER(TRIM(COALESCE(source, ''))) = 'ios'"
+        }
+
         var total = 0
         var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM meetings WHERE deleted_at IS NULL", -1, &stmt, nil) == SQLITE_OK {
+        let totalSQL = "SELECT COUNT(*) FROM meetings WHERE deleted_at IS NULL\(originCondition)"
+        if sqlite3_prepare_v2(db, totalSQL, -1, &stmt, nil) == SQLITE_OK {
             if sqlite3_step(stmt) == SQLITE_ROW { total = Int(sqlite3_column_int(stmt, 0)) }
             sqlite3_finalize(stmt)
         } else {
@@ -431,7 +444,8 @@ public final class DictationStore {
         // Direct counts per folder.
         var directByFolder: [Int64: Int] = [:]
         var stmt2: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT folder_id, COUNT(*) FROM meetings WHERE folder_id IS NOT NULL AND deleted_at IS NULL GROUP BY folder_id", -1, &stmt2, nil) == SQLITE_OK {
+        let folderSQL = "SELECT folder_id, COUNT(*) FROM meetings WHERE folder_id IS NOT NULL AND deleted_at IS NULL\(originCondition) GROUP BY folder_id"
+        if sqlite3_prepare_v2(db, folderSQL, -1, &stmt2, nil) == SQLITE_OK {
             while sqlite3_step(stmt2) == SQLITE_ROW {
                 directByFolder[sqlite3_column_int64(stmt2, 0)] = Int(sqlite3_column_int(stmt2, 1))
             }

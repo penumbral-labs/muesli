@@ -2523,6 +2523,49 @@ struct DictationStoreTests {
         #expect(counts.directByFolder[child] == 2)
     }
 
+    @Test("meetingCounts applies origin filter to totals and recursive folder badges")
+    func meetingCountsRespectOriginFilter() throws {
+        let store = try makeStore()
+        let now = Date()
+        let parent = try store.createFolder(name: "Parent")
+        let child = try store.createFolder(name: "Child", parentID: parent)
+
+        try store.insertMeeting(
+            title: "Mac Meeting", calendarEventID: nil, startTime: now,
+            endTime: now.addingTimeInterval(60), rawTranscript: "t", formattedNotes: "",
+            micAudioPath: nil, systemAudioPath: nil, source: .meeting
+        )
+        try store.moveMeeting(id: try store.recentMeetings(limit: 1).first!.id, toFolder: parent)
+
+        try store.insertMeeting(
+            title: "iPhone Meeting", calendarEventID: nil, startTime: now.addingTimeInterval(1),
+            endTime: now.addingTimeInterval(61), rawTranscript: "t", formattedNotes: "",
+            micAudioPath: nil, systemAudioPath: nil, source: .iOS
+        )
+        try store.moveMeeting(id: try store.recentMeetings(limit: 1).first!.id, toFolder: child)
+
+        try store.insertMeeting(
+            title: "Imported Meeting", calendarEventID: nil, startTime: now.addingTimeInterval(2),
+            endTime: now.addingTimeInterval(62), rawTranscript: "t", formattedNotes: "",
+            micAudioPath: nil, systemAudioPath: nil, source: .audioImport
+        )
+        try store.moveMeeting(id: try store.recentMeetings(limit: 1).first!.id, toFolder: child)
+
+        let iPhoneCounts = try store.meetingCounts(origin: .fromIPhone)
+        #expect(iPhoneCounts.total == 1)
+        #expect(iPhoneCounts.byFolder[parent] == 1)
+        #expect(iPhoneCounts.byFolder[child] == 1)
+        #expect(iPhoneCounts.directByFolder[parent] == nil)
+        #expect(iPhoneCounts.directByFolder[child] == 1)
+
+        let macCounts = try store.meetingCounts(origin: .thisMac)
+        #expect(macCounts.total == 2)
+        #expect(macCounts.byFolder[parent] == 2)
+        #expect(macCounts.byFolder[child] == 1)
+        #expect(macCounts.directByFolder[parent] == 1)
+        #expect(macCounts.directByFolder[child] == 1)
+    }
+
     @Test("meetingCounts gives stable totals for cyclic folder data")
     func meetingCountsCyclicFoldersAreStable() throws {
         let store = try makeStore()

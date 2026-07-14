@@ -276,17 +276,33 @@ private final class ICloudSyncCallbackGate<Value>: @unchecked Sendable {
     private var continuation: CheckedContinuation<Value, Error>?
     private var operation: CKOperation?
     private var timeoutWorkItem: DispatchWorkItem?
+    private var isFinished = false
+    private var isCancelled = false
 
-    init(continuation: CheckedContinuation<Value, Error>) {
+    func install(continuation: CheckedContinuation<Value, Error>) -> Bool {
+        lock.lock()
+        if isCancelled {
+            isFinished = true
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return false
+        }
+        guard !isFinished, self.continuation == nil else {
+            lock.unlock()
+            return false
+        }
         self.continuation = continuation
+        lock.unlock()
+        return true
     }
 
     func resolve(_ result: Result<Value, Error>) {
         lock.lock()
-        guard let continuation else {
+        guard !isFinished, let continuation else {
             lock.unlock()
             return
         }
+        isFinished = true
         self.continuation = nil
         operation = nil
         let timeoutWorkItem = self.timeoutWorkItem
@@ -303,8 +319,12 @@ private final class ICloudSyncCallbackGate<Value>: @unchecked Sendable {
         }
 
         lock.lock()
-        guard continuation != nil else {
+        guard !isFinished, continuation != nil else {
+            let shouldCancel = isCancelled
             lock.unlock()
+            if shouldCancel {
+                operation?.cancel()
+            }
             return
         }
         self.operation = operation
@@ -317,12 +337,36 @@ private final class ICloudSyncCallbackGate<Value>: @unchecked Sendable {
         )
     }
 
-    private func timeOut() {
+    func cancel() {
         lock.lock()
-        guard let continuation else {
+        guard !isFinished else {
             lock.unlock()
             return
         }
+        isCancelled = true
+        let continuation = self.continuation
+        let operation = self.operation
+        let timeoutWorkItem = self.timeoutWorkItem
+        self.continuation = nil
+        self.operation = nil
+        self.timeoutWorkItem = nil
+        if continuation != nil {
+            isFinished = true
+        }
+        lock.unlock()
+
+        timeoutWorkItem?.cancel()
+        operation?.cancel()
+        continuation?.resume(throwing: CancellationError())
+    }
+
+    private func timeOut() {
+        lock.lock()
+        guard !isFinished, let continuation else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
         self.continuation = nil
         let operation = self.operation
         self.operation = nil
@@ -341,12 +385,24 @@ enum ICloudSyncCallbackDeadline {
         timeout: TimeInterval = defaultTimeout,
         start: (@escaping (Result<Value, Error>) -> Void) -> CKOperation?
     ) async throws -> Value {
-        try await withCheckedThrowingContinuation { continuation in
-            let gate = ICloudSyncCallbackGate(continuation: continuation)
-            let operation = start { result in
-                gate.resolve(result)
+        let gate = ICloudSyncCallbackGate<Value>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard gate.install(continuation: continuation) else { return }
+                if Task.isCancelled {
+                    gate.cancel()
+                    return
+                }
+                let operation = start { result in
+                    gate.resolve(result)
+                }
+                gate.arm(operation: operation, timeout: timeout)
+                if Task.isCancelled {
+                    gate.cancel()
+                }
             }
-            gate.arm(operation: operation, timeout: timeout)
+        } onCancel: {
+            gate.cancel()
         }
     }
 }

@@ -3,6 +3,29 @@ import Foundation
 import Testing
 @testable import MuesliNativeApp
 
+private actor ICloudSyncTestSignal {
+    private var pendingSignals = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        if waiters.isEmpty {
+            pendingSignals += 1
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+
+    func wait() async {
+        if pendingSignals > 0 {
+            pendingSignals -= 1
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+}
+
 @Suite("iCloud sync callback deadline")
 struct ICloudSyncCallbackDeadlineTests {
     @Test("returns a callback result before the deadline")
@@ -26,6 +49,57 @@ struct ICloudSyncCallbackDeadlineTests {
             Issue.record("Expected the CloudKit callback deadline to expire")
         } catch let error as ICloudSyncDeadlineError {
             #expect(error == .operationTimedOut)
+            #expect(operation.isCancelled)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("task cancellation cancels an armed CloudKit operation")
+    func taskCancellationCancelsArmedOperation() async {
+        let operation = CKFetchRecordsOperation()
+        let started = ICloudSyncTestSignal()
+        let task = Task<Int, Error> {
+            try await ICloudSyncCallbackDeadline.wait(timeout: 10) { _ in
+                Task { await started.signal() }
+                return operation
+            }
+        }
+
+        await started.wait()
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected task cancellation")
+        } catch is CancellationError {
+            #expect(operation.isCancelled)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test("task cancellation before arm cancels the operation when start returns")
+    func taskCancellationBeforeArmCancelsReturnedOperation() async {
+        let operation = CKFetchRecordsOperation()
+        let startEntered = ICloudSyncTestSignal()
+        let allowStartToReturn = DispatchSemaphore(value: 0)
+        let task = Task<Int, Error> {
+            try await ICloudSyncCallbackDeadline.wait(timeout: 10) { _ in
+                Task { await startEntered.signal() }
+                allowStartToReturn.wait()
+                return operation
+            }
+        }
+
+        await startEntered.wait()
+        task.cancel()
+        allowStartToReturn.signal()
+
+        do {
+            _ = try await task.value
+            Issue.record("Expected task cancellation")
+        } catch is CancellationError {
             #expect(operation.isCancelled)
         } catch {
             Issue.record("Unexpected error: \(error)")

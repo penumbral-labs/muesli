@@ -1273,31 +1273,6 @@ struct MeetingBrowserLogicTests {
         #expect(filtered.map(\.id) == [12, 11, 10])
     }
 
-    @Test("origin filter separates iPhone meetings from local and imported meetings")
-    func originFilterSeparatesDevices() {
-        let meetings = [
-            makeMeeting(id: 20, daysAgo: 1, title: "Local", source: .meeting),
-            makeMeeting(id: 21, daysAgo: 2, title: "iPhone", source: .iOS),
-            makeMeeting(id: 22, daysAgo: 3, title: "Import", source: .audioImport)
-        ]
-
-        let fromIPhone = MeetingBrowserLogic.filteredMeetings(
-            from: meetings,
-            filter: .all,
-            origin: .fromIPhone,
-            sort: .newestFirst
-        )
-        let thisMac = MeetingBrowserLogic.filteredMeetings(
-            from: meetings,
-            filter: .all,
-            origin: .thisMac,
-            sort: .newestFirst
-        )
-
-        #expect(fromIPhone.map(\.id) == [21])
-        #expect(thisMac.map(\.id) == [20, 22])
-    }
-
     @Test("formatStartTime converts UTC ISO timestamps to the requested timezone")
     func formatStartTimeConvertsUTC() {
         let timeZone = TimeZone(identifier: "America/Los_Angeles")!
@@ -1333,28 +1308,17 @@ struct MeetingBrowserLogicTests {
         return formatter.string(from: date)
     }
 
-    private func makeMeeting(
-        id: Int64,
-        daysAgo: Int,
-        title: String,
-        source: MeetingSource = .meeting
-    ) -> MeetingRecord {
+    private func makeMeeting(id: Int64, daysAgo: Int, title: String) -> MeetingRecord {
         let now = Date(timeIntervalSince1970: 1_710_000_000)
         let calendar = Calendar(identifier: .gregorian)
         return makeMeeting(
             id: id,
             rawDate: Self.isoDate(daysAgo: daysAgo, now: now, calendar: calendar),
-            title: title,
-            source: source
+            title: title
         )
     }
 
-    private func makeMeeting(
-        id: Int64,
-        rawDate: String,
-        title: String,
-        source: MeetingSource = .meeting
-    ) -> MeetingRecord {
+    private func makeMeeting(id: Int64, rawDate: String, title: String) -> MeetingRecord {
         MeetingRecord(
             id: id,
             title: title,
@@ -1370,8 +1334,7 @@ struct MeetingBrowserLogicTests {
             selectedTemplateID: MeetingTemplates.autoID,
             selectedTemplateName: "Auto",
             selectedTemplateKind: .auto,
-            selectedTemplatePrompt: "",
-            source: source
+            selectedTemplatePrompt: ""
         )
     }
 }

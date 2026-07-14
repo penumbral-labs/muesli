@@ -1032,7 +1032,8 @@ final class MuesliController: NSObject {
             folderID: appState.selectedFolderID,
             origin: appState.meetingOriginFilter
         )) ?? []
-        let counts = (try? dictationStore.meetingCounts()) ?? (total: 0, byFolder: [:], directByFolder: [:])
+        let counts = (try? dictationStore.meetingCounts(origin: appState.meetingOriginFilter))
+            ?? (total: 0, byFolder: [:], directByFolder: [:])
         appState.totalMeetingCount = counts.total
         appState.meetingCountsByFolder = counts.byFolder
         appState.directMeetingCountsByFolder = counts.directByFolder

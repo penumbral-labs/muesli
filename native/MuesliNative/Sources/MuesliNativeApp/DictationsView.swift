@@ -46,7 +46,7 @@ struct DictationsView: View {
     @State private var bridgePromptSeen = false
     @State private var isBridgeQRCodePresented = false
 
-    private var groupedDictations: [(header: String, records: [DictationRecord])] {
+    private var groupedDictations: [(id: Date, header: String, records: [DictationRecord])] {
         let calendar = Calendar.current
         let now = Date()
         let today = calendar.startOfDay(for: now)
@@ -89,7 +89,7 @@ struct DictationsView: View {
             groups.append((key: key, header: currentHeader, records: currentRecords))
         }
 
-        return groups.map { (header: $0.header, records: $0.records) }
+        return groups.map { (id: $0.key, header: $0.header, records: $0.records) }
     }
 
     var body: some View {
@@ -136,7 +136,7 @@ struct DictationsView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: MuesliTheme.spacing20) {
-                        ForEach(groupedDictations, id: \.header) { group in
+                        ForEach(groupedDictations, id: \.id) { group in
                             VStack(alignment: .leading, spacing: MuesliTheme.spacing8) {
                                 HStack {
                                     Text(group.header)
