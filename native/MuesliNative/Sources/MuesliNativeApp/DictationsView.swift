@@ -19,6 +19,26 @@ enum DictationFilter: Hashable {
     }
 }
 
+enum ICloudBridgeWorkingCopy {
+    static func title(isActivationPending: Bool) -> String {
+        isActivationPending
+            ? "Setting up private iCloud sync"
+            : "Syncing with private iCloud"
+    }
+
+    static func subtitle(isActivationPending: Bool) -> String {
+        isActivationPending
+            ? "Creating the sync channel and pulling your latest text records."
+            : "Checking for new text and uploading local changes."
+    }
+
+    static func buttonHelp(isActivationPending: Bool) -> String {
+        isActivationPending
+            ? "Sync setup is in progress"
+            : "Text sync is in progress"
+    }
+}
+
 struct DictationsView: View {
     let appState: AppState
     let controller: MuesliController
@@ -341,8 +361,12 @@ struct DictationsView: View {
                 return "Synced with \(deviceName) · \(relativeSyncTime(lastSyncedAt))"
             }
             return "Synced with \(deviceName)"
-        case .checkingICloud, .syncing:
+        case .checkingICloud:
             return "Setting up private iCloud sync"
+        case .syncing:
+            return ICloudBridgeWorkingCopy.title(
+                isActivationPending: appState.isICloudBridgeActivationPending
+            )
         case .needsICloud:
             return "Sign in to iCloud to sync"
         case .error:
@@ -362,7 +386,9 @@ struct DictationsView: View {
         case .checkingICloud:
             return "Checking this Mac's iCloud account..."
         case .syncing:
-            return "Creating the sync channel and pulling your latest text records."
+            return ICloudBridgeWorkingCopy.subtitle(
+                isActivationPending: appState.isICloudBridgeActivationPending
+            )
         case .needsICloud, .error:
             return appState.iCloudBridgeMessage ?? "Open iCloud settings, then try again."
         case .notConfigured:
@@ -400,8 +426,12 @@ struct DictationsView: View {
         switch bridgeState {
         case .active:
             return "Sync text with iCloud"
-        case .checkingICloud, .syncing:
+        case .checkingICloud:
             return "Sync setup is in progress"
+        case .syncing:
+            return ICloudBridgeWorkingCopy.buttonHelp(
+                isActivationPending: appState.isICloudBridgeActivationPending
+            )
         default:
             return "Set up private iCloud text sync"
         }
