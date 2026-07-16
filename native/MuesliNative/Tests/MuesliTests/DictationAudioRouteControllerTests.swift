@@ -39,6 +39,31 @@ struct DictationAudioRouteControllerTests {
         #expect(controller.meetingInputRouteSnapshot().outputRouteKind == "headphone-like")
     }
 
+    @Test("meeting route snapshot never performs synchronous CoreAudio inspection")
+    func meetingRouteSnapshotUsesCacheOnly() {
+        let inspector = FakeCoreAudioDeviceInspector(
+            defaultOutputDeviceID: 10,
+            outputRouteKind: .headphoneLike,
+            defaultInputDeviceID: 82,
+            builtInInputDeviceID: 82
+        )
+        let routeQueue = DispatchQueue(label: "test.dictation-audio-route.meeting-cache-only")
+        let controller = DictationAudioRouteController(
+            inspector: inspector,
+            queue: routeQueue,
+            observesDefaultOutputChanges: false
+        )
+        // Drain the initialization refresh before measuring the synchronous call.
+        routeQueue.sync {}
+        let inspectionCountBeforeSnapshot = inspector.inspectionCallCount
+
+        let snapshot = controller.meetingInputRouteSnapshot()
+
+        #expect(snapshot.preferredInputDeviceID == 82)
+        #expect(snapshot.defaultInputDeviceID == 82)
+        #expect(inspector.inspectionCallCount == inspectionCountBeforeSnapshot)
+    }
+
     @Test("dictation preserves default input for speaker output")
     func dictationPreservesDefaultInputForSpeakerOutput() {
         let inspector = FakeCoreAudioDeviceInspector(
@@ -228,6 +253,7 @@ private final class FakeCoreAudioDeviceInspector: CoreAudioDeviceInspecting {
     var outputIsAmbiguousBluetoothValue: Bool
     var builtInInputDeviceIDValue: AudioObjectID?
     var inputDevices: [AudioInputDeviceInfo]
+    private(set) var inspectionCallCount = 0
 
     init(
         defaultOutputDeviceID: AudioObjectID?,
@@ -246,11 +272,13 @@ private final class FakeCoreAudioDeviceInspector: CoreAudioDeviceInspecting {
     }
 
     func defaultOutputDeviceID() -> AudioObjectID? {
-        defaultOutputDeviceIDValue
+        inspectionCallCount += 1
+        return defaultOutputDeviceIDValue
     }
 
     func defaultInputDeviceID() -> AudioObjectID? {
-        defaultInputDeviceIDValue
+        inspectionCallCount += 1
+        return defaultInputDeviceIDValue
     }
 
     func setDefaultInputDeviceID(_ deviceID: AudioObjectID) -> Bool {
@@ -258,10 +286,12 @@ private final class FakeCoreAudioDeviceInspector: CoreAudioDeviceInspecting {
     }
 
     func availableInputDevices() -> [AudioInputDeviceInfo] {
-        inputDevices.filter { !$0.uid.hasPrefix("CADefaultDeviceAggregate") }
+        inspectionCallCount += 1
+        return inputDevices.filter { !$0.uid.hasPrefix("CADefaultDeviceAggregate") }
     }
 
     func inputDeviceID(matchingUID uid: String) -> AudioObjectID? {
+        inspectionCallCount += 1
         guard !uid.hasPrefix("CADefaultDeviceAggregate") else { return nil }
         return inputDevices.first(where: { $0.uid == uid })?.deviceID
     }
@@ -275,13 +305,15 @@ private final class FakeCoreAudioDeviceInspector: CoreAudioDeviceInspecting {
     }
 
     func outputRouteClassification(for deviceID: AudioObjectID) -> AudioRouteClassifier.Classification {
-        AudioRouteClassifier.Classification(
+        inspectionCallCount += 1
+        return AudioRouteClassifier.Classification(
             kind: outputRouteKindValue,
             isAmbiguousBluetooth: outputIsAmbiguousBluetoothValue
         )
     }
 
     func builtInInputDeviceID() -> AudioObjectID? {
-        builtInInputDeviceIDValue
+        inspectionCallCount += 1
+        return builtInInputDeviceIDValue
     }
 }

@@ -266,12 +266,10 @@ final class DictationAudioRouteController: DictationAudioRouting {
     }
 
     func preferredInputDeviceIDForMeeting() -> AudioObjectID? {
-        syncOnRouteQueue {
-            let next = makeRouteSnapshot()
-            lock.withLock {
-                snapshot = next
-            }
-        }
+        // Meeting startup runs on the main actor. CoreAudio property reads can
+        // block indefinitely while the HAL is unhealthy, so never wait for a
+        // fresh route read here. Default-device listeners keep this snapshot
+        // warm on the dedicated route queue.
         return Self.preferredMeetingInputDeviceID(for: lock.withLock { snapshot })
     }
 
@@ -280,31 +278,22 @@ final class DictationAudioRouteController: DictationAudioRouting {
     }
 
     func meetingInputRouteSnapshot() -> MeetingMicRouteDiagnosticsSnapshot {
-        syncOnRouteQueue {
-            let next = makeRouteSnapshot()
-            lock.withLock {
-                snapshot = next
-            }
-        }
+        // This method is called from meeting startup on the main actor. Reading
+        // the lock-protected cache is intentionally the only work performed
+        // here: both queue.sync and inspector calls can wedge behind CoreAudio
+        // and freeze the prompt, status item, and recording controls.
         let current = lock.withLock { snapshot }
         let preferredInputDeviceID = Self.preferredMeetingInputDeviceID(for: current)
         let selectedInputDeviceUID = lock.withLock { selectedInputDeviceUIDStorage }
-        let devices = inspector.availableInputDevices()
-        let preferredDevice = preferredInputDeviceID.flatMap { id in
-            devices.first(where: { $0.deviceID == id })
-        }
-        let defaultInputDevice = current.defaultInputDeviceID.flatMap { id in
-            devices.first(where: { $0.deviceID == id })
-        }
         return MeetingMicRouteDiagnosticsSnapshot(
             outputRouteKind: current.outputRouteKind.description,
             outputIsAmbiguousBluetooth: current.outputIsAmbiguousBluetooth,
             selectedInputDeviceUID: selectedInputDeviceUID,
             selectedInputDeviceResolved: selectedInputDeviceUID == nil || current.selectedInputDeviceID != nil,
             preferredInputDeviceID: preferredInputDeviceID,
-            preferredInputDeviceName: preferredDevice?.name,
+            preferredInputDeviceName: nil,
             defaultInputDeviceID: current.defaultInputDeviceID,
-            defaultInputDeviceName: defaultInputDevice?.name,
+            defaultInputDeviceName: nil,
             builtInInputDeviceID: current.builtInInputDeviceID,
             systemDefaultInputIsBuiltIn: current.systemDefaultInputIsBuiltIn
         )
