@@ -118,7 +118,6 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SystemAudioCapturing,
         guard isRecording || outputFile != nil || outputURL != nil else { return nil }
         isRecording = false
         isPaused = false
-        onPCMSamples = nil
 
         if let stream {
             let semaphore = DispatchSemaphore(value: 0)
@@ -130,6 +129,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SystemAudioCapturing,
         }
         stream = nil
         drainSampleHandlerQueue()
+        onPCMSamples = nil
 
         // Finalize WAV
         if let outputFile {
@@ -323,8 +323,8 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SystemAudioCapturing,
         isRecording = false
         isPaused = false
         stream = nil
-        onPCMSamples = nil
         drainSampleHandlerQueue()
+        onPCMSamples = nil
 
         if let outputFile {
             outputFile.closeFile()

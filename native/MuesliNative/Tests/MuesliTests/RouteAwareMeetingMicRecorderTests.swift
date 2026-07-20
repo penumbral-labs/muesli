@@ -429,6 +429,50 @@ struct RouteAwareMeetingMicRecorderTests {
         #expect(deliveredSamples == [[8, 2]])
     }
 
+    @Test("exhausted fallback enters failed state and a new route can recover")
+    func exhaustedFallbackCanRecoverOnNewRoute() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.exhausted-fallback")
+        let explicit = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let fallbackSystem = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let recoveredExplicit = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        recoveredExplicit.samplesOnStart = [12, 3]
+        let failureReported = DispatchSemaphore(value: 0)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: fallbackSystem,
+            appScopedRecorder: explicit,
+            appScopedRecorderFactory: { recoveredExplicit },
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 0.02
+        )
+        recorder.preferredInputDeviceID = 71
+        var deliveredSamples: [[Int16]] = []
+        recorder.onCaptureEvent = { event in
+            if event.failure != nil {
+                failureReported.signal()
+            }
+        }
+        recorder.onRawPCMSamples = { deliveredSamples.append($0) }
+
+        try recorder.start()
+        #expect(failureReported.wait(timeout: .now() + 1) == .success)
+        #expect(failureReported.wait(timeout: .now() + 1) == .success)
+        drain(lifecycleQueue)
+
+        #expect(recorder.isTerminallyFailedForDebug())
+        #expect(explicit.stopCalls == 1)
+        #expect(fallbackSystem.stopCalls == 1)
+
+        recorder.requestInputRouteChange(makeMeetingInputSelection(
+            revision: 1,
+            preferredInputDeviceID: 92
+        ))
+        drain(lifecycleQueue)
+
+        #expect(!recorder.isTerminallyFailedForDebug())
+        #expect(recoveredExplicit.startCalls == 1)
+        #expect(deliveredSamples == [[12, 3]])
+    }
+
     @Test("route selection while paused is deferred until resume")
     func pausedRouteSelectionIsDeferredUntilResume() throws {
         let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.paused-selection")
@@ -461,6 +505,42 @@ struct RouteAwareMeetingMicRecorderTests {
 
         explicit.onRawPCMSamples?([8, 2])
         #expect(deliveryOrder == ["event", "samples"])
+    }
+
+    @Test("pause returns while an admitted callback finishes off the caller")
+    func pauseDoesNotBlockOnCallbackDelivery() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.nonblocking-pause")
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: FakeMeetingMicRecorder(kind: .appScopedAudioQueue),
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 5
+        )
+        let deliveryEntered = DispatchSemaphore(value: 0)
+        let allowDelivery = DispatchSemaphore(value: 0)
+        let pauseReturned = DispatchSemaphore(value: 0)
+        recorder.onRawPCMSamples = { _ in
+            deliveryEntered.signal()
+            _ = allowDelivery.wait(timeout: .now() + 1)
+        }
+
+        try recorder.start()
+        DispatchQueue.global().async {
+            system.onRawPCMSamples?([1, 2])
+        }
+        #expect(deliveryEntered.wait(timeout: .now() + 1) == .success)
+
+        DispatchQueue.global().async {
+            recorder.pause()
+            pauseReturned.signal()
+        }
+        let returnedWithoutDraining = pauseReturned.wait(timeout: .now() + 0.2) == .success
+        allowDelivery.signal()
+        drain(lifecycleQueue)
+
+        #expect(returnedWithoutDraining)
+        #expect(system.pauseCalls == 1)
     }
 
     @Test("new selection while paused supersedes an awaiting fallback")

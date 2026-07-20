@@ -27,12 +27,19 @@
 
 ## Validation
 
-- Full local suite: 1,531 tests in 145 suites passed.
+- Full local suite after Greploop round 1: 1,533 tests in 145 suites passed.
 - Focused route and fallback suite: 34 tests passed.
 - Broader route and configuration suite: 100 tests passed.
 - App configuration and migration suite: 58 tests passed.
 - `git diff --check` passed.
 - MuesliDevA built and launched successfully with the final settings copy.
+
+### Greploop round 1
+
+- Exhausting both the selected recorder and its fallback now enters an explicit failed state instead of claiming to be running without a recorder. A later route revision can recover capture.
+- Meeting pause drains admitted microphone callbacks on the lifecycle queue instead of blocking the main actor.
+- System-audio teardown drains its sample queue before releasing the PCM callback closure.
+- The focused route-aware recorder suite passed 21 tests, including terminal fallback recovery and a callback-blocked nonblocking-pause regression.
 
 ### AirPods reproduction
 

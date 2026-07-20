@@ -186,6 +186,7 @@ final class RouteAwareMeetingMicRecorder: MeetingMicRecording {
         case running
         case paused
         case awaitingFirstBuffer
+        case failed
         case stopping
     }
 
@@ -298,6 +299,10 @@ final class RouteAwareMeetingMicRecorder: MeetingMicRecording {
         lock.withLock { activeChildStorage?.kind ?? kind(for: preferredInputDeviceIDStorage) }
     }
 
+    func isTerminallyFailedForDebug() -> Bool {
+        lock.withLock { lifecycleState == .failed }
+    }
+
     func prepare() throws {
         try lifecycleQueue.sync {
             let selection = desiredSelectionOnLifecycleQueue()
@@ -386,7 +391,7 @@ final class RouteAwareMeetingMicRecorder: MeetingMicRecording {
                 failedDesiredRevision = nil
             }
             switch lifecycleState {
-            case .running, .awaitingFirstBuffer:
+            case .running, .awaitingFirstBuffer, .failed:
                 if pendingHandoffStorage == nil,
                    activeChildStorage?.selection.preferredInputDeviceID == selection.preferredInputDeviceID {
                     activeChildStorage?.selection = selection
@@ -417,13 +422,12 @@ final class RouteAwareMeetingMicRecorder: MeetingMicRecording {
             return true
         }
         guard shouldPause else { return }
-        // Closing admission under the state lock prevents any new callback
-        // from entering. Only already-admitted, lightweight handler delivery
-        // is drained here; potentially blocking CoreAudio graph work remains
-        // on the lifecycle queue so pause controls stay responsive.
-        callbackDeliveryGroup.wait()
         lifecycleQueue.async { [weak self] in
             guard let self else { return }
+            // Closing admission under the state lock prevents new callback
+            // delivery. Drain callbacks already admitted without blocking the
+            // main actor, then pause the graph on its lifecycle lane.
+            self.callbackDeliveryGroup.wait()
             self.lock.withLock { self.activeChildStorage?.recorder }?.pause()
         }
     }
@@ -709,7 +713,7 @@ final class RouteAwareMeetingMicRecorder: MeetingMicRecording {
               let fallback = Self.fallbackSelection(from: pending.selection) else {
             lock.withLock {
                 routeChangeStartedAtStorage = nil
-                lifecycleState = .running
+                lifecycleState = .failed
             }
             return
         }
