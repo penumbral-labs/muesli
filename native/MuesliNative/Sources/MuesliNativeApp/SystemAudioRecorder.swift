@@ -1,4 +1,5 @@
 import AVFoundation
+import Atomics
 import Foundation
 import ScreenCaptureKit
 import MuesliCore
@@ -11,8 +12,18 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SystemAudioCapturing,
     private var outputFile: FileHandle?
     private var outputURL: URL?
     private var totalBytesWritten = 0
-    private(set) var isRecording = false
-    private(set) var isPaused = false
+    private let recordingFlag = ManagedAtomic(false)
+    private let pausedFlag = ManagedAtomic(false)
+    private(set) var isRecording: Bool {
+        get { recordingFlag.load(ordering: .acquiring) }
+        set { recordingFlag.store(newValue, ordering: .releasing) }
+    }
+    private(set) var isPaused: Bool {
+        get { pausedFlag.load(ordering: .acquiring) }
+        set { pausedFlag.store(newValue, ordering: .releasing) }
+    }
+    private let sampleHandlerQueue = DispatchQueue(label: "com.muesli.system-audio")
+    private let sampleHandlerQueueKey = DispatchSpecificKey<UInt8>()
 
     private static let sampleRate: Double = 16_000
     private static let channels: Int = 1
@@ -51,6 +62,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SystemAudioCapturing,
 
     override init() {
         super.init()
+        sampleHandlerQueue.setSpecific(key: sampleHandlerQueueKey, value: 1)
     }
 
     func start() async throws {
@@ -117,6 +129,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SystemAudioCapturing,
             _ = semaphore.wait(timeout: .now() + 3)
         }
         stream = nil
+        drainSampleHandlerQueue()
 
         // Finalize WAV
         if let outputFile {
@@ -138,6 +151,9 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SystemAudioCapturing,
     func pause() {
         guard isRecording else { return }
         isPaused = true
+        // A callback that passed the pre-pause guard must finish before the
+        // meeting writer establishes its pause/rebase boundary.
+        drainSampleHandlerQueue()
     }
 
     func resume() {
@@ -174,7 +190,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SystemAudioCapturing,
         config.excludesCurrentProcessAudio = true
 
         let stream = SCStream(filter: filter, configuration: config, delegate: nil)
-        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "com.muesli.system-audio"))
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleHandlerQueue)
         try await stream.startCapture()
         self.stream = stream
     }
@@ -308,6 +324,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SystemAudioCapturing,
         isPaused = false
         stream = nil
         onPCMSamples = nil
+        drainSampleHandlerQueue()
 
         if let outputFile {
             outputFile.closeFile()
@@ -319,5 +336,10 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SystemAudioCapturing,
         }
         outputURL = nil
         totalBytesWritten = 0
+    }
+
+    private func drainSampleHandlerQueue() {
+        guard DispatchQueue.getSpecific(key: sampleHandlerQueueKey) == nil else { return }
+        sampleHandlerQueue.sync {}
     }
 }

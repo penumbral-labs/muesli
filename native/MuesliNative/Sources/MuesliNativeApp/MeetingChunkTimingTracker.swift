@@ -29,6 +29,17 @@ struct MeetingChunkTimingTracker: Sendable {
         currentChunkSampleCount += Int64(sampleCount)
     }
 
+    /// Advance the logical 16 kHz clock without claiming that audio exists.
+    /// Recovery callers rotate the pre-gap chunk first, so the next real audio
+    /// begins at the correct meeting offset without feeding synthetic silence
+    /// through VAD or transcription.
+    mutating func advance(sampleCount: Int64) {
+        guard sampleCount > 0,
+              currentChunkSampleCount == 0,
+              let currentChunkStartSampleIndex else { return }
+        self.currentChunkStartSampleIndex = currentChunkStartSampleIndex + sampleCount
+    }
+
     mutating func rotate() -> MeetingChunkTimingSnapshot? {
         guard let currentChunkStartSampleIndex else { return nil }
         let snapshot = MeetingChunkTimingSnapshot(

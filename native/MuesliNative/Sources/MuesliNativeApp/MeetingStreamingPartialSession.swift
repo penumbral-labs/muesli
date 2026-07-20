@@ -95,11 +95,13 @@ enum MeetingLiveCaptionModelStore {
 protocol MeetingStreamingPartialEngine: AnyObject, Sendable {
     func setPartialHandler(_ handler: @escaping @Sendable (String) -> Void) async
     func process(samples: [Float]) async throws
+    func resetForDiscontinuity() async throws
     func finish() async throws
     func shutdown() async
 }
 
 extension MeetingStreamingPartialEngine {
+    func resetForDiscontinuity() async throws {}
     func finish() async throws {}
 }
 
@@ -141,9 +143,42 @@ private actor ParakeetEOUMeetingPartialEngine: MeetingStreamingPartialEngine {
         _ = try await manager.process(audioBuffer: buffer)
     }
 
+    func resetForDiscontinuity() async throws {
+        await manager.reset()
+    }
+
     func shutdown() async {
         await manager.cleanup()
         fputs("[meeting-partials] \(label) Parakeet EOU session stopped\n", stderr)
+    }
+}
+
+/// Small value-type gate kept separate from the model implementation so the
+/// generation rule protecting actor-reentrant Nemotron calls is deterministic
+/// and unit testable without loading model artifacts.
+struct NemotronMeetingPartialLifecycle: Sendable {
+    private(set) var generation: UInt64 = 0
+    private(set) var isShutdown = false
+
+    var operationGeneration: UInt64? {
+        isShutdown ? nil : generation
+    }
+
+    mutating func beginReset() -> UInt64? {
+        guard !isShutdown else { return nil }
+        generation &+= 1
+        return generation
+    }
+
+    mutating func shutDown() -> Bool {
+        guard !isShutdown else { return false }
+        isShutdown = true
+        generation &+= 1
+        return true
+    }
+
+    func admits(_ operationGeneration: UInt64) -> Bool {
+        !isShutdown && operationGeneration == generation
     }
 }
 
@@ -155,6 +190,11 @@ private actor Nemotron35MeetingPartialEngine: MeetingStreamingPartialEngine {
     private var sampleBuffer: [Float] = []
     private var transcript = ""
     private var partialHandler: (@Sendable (String) -> Void)?
+    /// Every operation that suspends while calling the shared transcriber must
+    /// prove that it still belongs to the current engine lifecycle before it
+    /// writes actor state. Actor reentrancy otherwise lets a late process/reset
+    /// continuation recreate stream state after `shutdown()` cleared it.
+    private var lifecycle = NemotronMeetingPartialLifecycle()
 
     init(transcriber: Nemotron35StreamingTranscriber, label: String) {
         self.transcriber = transcriber
@@ -162,24 +202,34 @@ private actor Nemotron35MeetingPartialEngine: MeetingStreamingPartialEngine {
     }
 
     func prepare() async throws {
-        streamState = try await transcriber.makeStreamState()
+        guard let generation = lifecycle.operationGeneration else {
+            throw CancellationError()
+        }
+        let preparedState = try await transcriber.makeStreamState()
+        guard lifecycle.admits(generation) else {
+            throw CancellationError()
+        }
+        streamState = preparedState
     }
 
     func setPartialHandler(_ handler: @escaping @Sendable (String) -> Void) async {
+        guard !lifecycle.isShutdown else { return }
         partialHandler = handler
     }
 
     func process(samples: [Float]) async throws {
-        guard !samples.isEmpty else { return }
+        guard let generation = lifecycle.operationGeneration, !samples.isEmpty else { return }
         sampleBuffer.append(contentsOf: samples)
         let chunkSize = transcriber.chunkSamples
         while sampleBuffer.count >= chunkSize {
+            guard lifecycle.admits(generation) else { return }
             let chunk = Array(sampleBuffer.prefix(chunkSize))
             sampleBuffer.removeFirst(chunkSize)
             guard var state = streamState else {
                 throw Nemotron35StreamingTranscriber.TranscriberError.notLoaded
             }
             let text = try await transcriber.transcribeChunk(samples: chunk, state: &state)
+            guard lifecycle.admits(generation) else { return }
             streamState = state
             guard !text.isEmpty else { continue }
             transcript += text
@@ -188,7 +238,7 @@ private actor Nemotron35MeetingPartialEngine: MeetingStreamingPartialEngine {
     }
 
     func finish() async throws {
-        guard !sampleBuffer.isEmpty else { return }
+        guard let generation = lifecycle.operationGeneration, !sampleBuffer.isEmpty else { return }
         let chunkSize = transcriber.chunkSamples
         sampleBuffer.append(contentsOf: repeatElement(0, count: max(chunkSize - sampleBuffer.count, 0)))
         if sampleBuffer.count >= chunkSize {
@@ -198,6 +248,7 @@ private actor Nemotron35MeetingPartialEngine: MeetingStreamingPartialEngine {
                 throw Nemotron35StreamingTranscriber.TranscriberError.notLoaded
             }
             let text = try await transcriber.transcribeChunk(samples: chunk, state: &state)
+            guard lifecycle.admits(generation) else { return }
             streamState = state
             if !text.isEmpty {
                 transcript += text
@@ -206,7 +257,20 @@ private actor Nemotron35MeetingPartialEngine: MeetingStreamingPartialEngine {
         }
     }
 
+    func resetForDiscontinuity() async throws {
+        guard let generation = lifecycle.beginReset() else { throw CancellationError() }
+        sampleBuffer.removeAll(keepingCapacity: true)
+        transcript = ""
+        streamState = nil
+        let resetState = try await transcriber.makeStreamState()
+        guard lifecycle.admits(generation) else {
+            throw CancellationError()
+        }
+        streamState = resetState
+    }
+
     func shutdown() async {
+        guard lifecycle.shutDown() else { return }
         sampleBuffer.removeAll()
         transcript = ""
         streamState = nil
@@ -225,7 +289,10 @@ private actor Nemotron35MeetingPartialEngine: MeetingStreamingPartialEngine {
 final class MeetingStreamingPartialSession: @unchecked Sendable {
     /// Called with the current provisional tail text on a background thread.
     /// An empty string clears the tail.
-    var onPartialUpdate: ((String) -> Void)?
+    var onPartialUpdate: ((String) -> Void)? {
+        get { partialUpdateHandler.withLock { $0 } }
+        set { partialUpdateHandler.withLock { $0 = newValue } }
+    }
 
     /// Feed the EOU manager at its 320 ms shift cadence. The manager retains the
     /// larger look-ahead window required by its cache-aware encoder.
@@ -233,14 +300,19 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
     static let maxQueuedChunks = 3
     static let publicationIntervalNanoseconds: UInt64 = 250_000_000
     static let finishDrainTimeoutNanoseconds: UInt64 = 30_000_000_000
+    static let shutdownGraceNanoseconds: UInt64 = 250_000_000
 
     private let engine: MeetingStreamingPartialEngine
     private let label: String
+    private let shutdownGraceNanoseconds: UInt64
+    private let scheduledPublicationDidPrepare: (@Sendable () -> Void)?
 
     private struct PendingSegment {
         let id: UUID
+        let transcriptEpoch: UInt64
         let prefixLength: Int
         var isCommitted = false
+        let frozenText: String
     }
 
     private struct State {
@@ -254,16 +326,38 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
         var isSuspended = false
         var didFail = false
         var pendingPublicationTail: String?
+        var pendingPublicationLifecycleRevision: UInt64?
         var lastPublishedTail: String?
+        var lastDeliveredTail: String?
         var isPublicationScheduled = false
+        var publicationRevision: UInt64 = 0
         var lifecycleRevision: UInt64 = 0
         var activeInferenceRevision: UInt64?
+        var isResettingForDiscontinuity = false
+        var pendingResetRevision: UInt64?
+        var transcriptEpoch: UInt64 = 0
+        var isShutdownRequested = false
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
+    private let partialUpdateHandler = OSAllocatedUnfairLock<((String) -> Void)?>(initialState: nil)
+    private let publicationQueue = DispatchQueue(label: "com.muesli.meeting-partials.publication")
 
-    init(engine: MeetingStreamingPartialEngine, label: String) {
+    private struct Publication: Sendable {
+        let tail: String
+        let lifecycleRevision: UInt64
+        let publicationRevision: UInt64
+    }
+
+    init(
+        engine: MeetingStreamingPartialEngine,
+        label: String,
+        shutdownGraceNanoseconds: UInt64 = MeetingStreamingPartialSession.shutdownGraceNanoseconds,
+        scheduledPublicationDidPrepare: (@Sendable () -> Void)? = nil
+    ) {
         self.engine = engine
         self.label = label
+        self.shutdownGraceNanoseconds = shutdownGraceNanoseconds
+        self.scheduledPublicationDidPrepare = scheduledPublicationDidPrepare
     }
 
     func connect() async {
@@ -286,6 +380,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             if s.chunkQueue.count > Self.maxQueuedChunks {
                 s.chunkQueue.removeFirst(s.chunkQueue.count - Self.maxQueuedChunks)
             }
+            guard !s.isResettingForDiscontinuity else { return false }
             guard !s.chunkQueue.isEmpty, !s.isDraining else { return false }
             s.isDraining = true
             return true
@@ -299,7 +394,52 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
 
     func markSegmentBoundary(id: UUID) {
         state.withLock { s in
-            s.pendingSegments.append(PendingSegment(id: id, prefixLength: s.engineText.count))
+            let previousPrefixLength = s.pendingSegments.last(where: {
+                $0.transcriptEpoch == s.transcriptEpoch
+            })?.prefixLength ?? s.committedPrefixLength
+            let startOffset = min(previousPrefixLength, s.engineText.count)
+            let endOffset = s.engineText.count
+            let frozenText: String
+            if endOffset > startOffset {
+                let start = s.engineText.index(s.engineText.startIndex, offsetBy: startOffset)
+                frozenText = String(s.engineText[start...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                frozenText = ""
+            }
+            s.pendingSegments.append(PendingSegment(
+                id: id,
+                transcriptEpoch: s.transcriptEpoch,
+                prefixLength: endOffset,
+                frozenText: frozenText
+            ))
+        }
+    }
+
+    /// Drop sub-frame audio that straddles a microphone route discontinuity.
+    /// Existing durable segment boundaries remain intact, while lifecycle
+    /// revision validation suppresses any in-flight pre-gap partial update.
+    func markDiscontinuity() {
+        let shouldStartReset = state.withLock { s -> Bool in
+            guard !s.isStopped, !s.isSuspended, !s.didFail else { return false }
+            s.lifecycleRevision &+= 1
+            s.transcriptEpoch &+= 1
+            s.sampleBuffer.removeAll(keepingCapacity: true)
+            s.chunkQueue.removeAll(keepingCapacity: true)
+            s.engineText = ""
+            s.committedPrefixLength = 0
+            s.pendingPublicationTail = nil
+            s.pendingPublicationLifecycleRevision = nil
+            s.pendingResetRevision = s.lifecycleRevision
+            guard !s.isResettingForDiscontinuity else { return false }
+            s.isResettingForDiscontinuity = true
+            return true
+        }
+        publishImmediately("")
+        if shouldStartReset {
+            Task.detached(priority: .utility) { [weak self] in
+                await self?.resetEngineForDiscontinuity()
+            }
         }
     }
 
@@ -308,59 +448,74 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             guard !s.isStopped, !s.didFail,
                   let segmentIndex = s.pendingSegments.firstIndex(where: { $0.id == id }) else { return nil }
             let segment = s.pendingSegments[segmentIndex]
-            let previousPrefixLength = segmentIndex > 0
-                ? s.pendingSegments[segmentIndex - 1].prefixLength
-                : s.committedPrefixLength
-            let startOffset = min(previousPrefixLength, s.engineText.count)
-            let endOffset = min(max(segment.prefixLength, startOffset), s.engineText.count)
-            guard endOffset > startOffset else { return nil }
-            let start = s.engineText.index(s.engineText.startIndex, offsetBy: startOffset)
-            let end = s.engineText.index(s.engineText.startIndex, offsetBy: endOffset)
-            let text = String(s.engineText[start..<end])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.isEmpty ? nil : text
+            return segment.frozenText.isEmpty ? nil : segment.frozenText
         }
     }
 
     func commitSegment(id: UUID) {
-        let publication: (tail: String, revision: UInt64)? = state.withLock { s in
+        let publication: Publication? = state.withLock { s in
             guard !s.isStopped, !s.isSuspended, !s.didFail else { return nil }
             guard let segmentIndex = s.pendingSegments.firstIndex(where: { $0.id == id }) else { return nil }
             s.pendingSegments[segmentIndex].isCommitted = true
             var didAdvance = false
             while let first = s.pendingSegments.first, first.isCommitted {
-                s.committedPrefixLength = max(
-                    s.committedPrefixLength,
-                    min(first.prefixLength, s.engineText.count)
-                )
+                if first.transcriptEpoch == s.transcriptEpoch {
+                    s.committedPrefixLength = max(
+                        s.committedPrefixLength,
+                        min(first.prefixLength, s.engineText.count)
+                    )
+                }
                 s.pendingSegments.removeFirst()
                 didAdvance = true
             }
             guard didAdvance else { return nil }
-            return (visibleTail(for: s), s.lifecycleRevision)
+            return preparePublicationLocked(
+                visibleTail(for: s),
+                expectedLifecycleRevision: s.lifecycleRevision,
+                state: &s
+            )
         }
         if let publication {
-            publishImmediately(publication.tail, expectedRevision: publication.revision)
+            enqueuePreparedPublication(publication)
         }
     }
 
-    /// Pause uses the existing VAD/chunk boundary as the durable commit point.
-    /// Buffered audio is dropped and the current engine prefix is hidden; the
-    /// cache-aware model state remains warm for a low-latency resume.
+    /// Pause is a transcript epoch boundary, not just a UI suppression flag.
+    ///
+    /// A model inference may still be running when capture reaches its pause
+    /// barrier. Advancing the lifecycle revision fences that callback
+    /// immediately, while the asynchronous reset waits for the in-flight call
+    /// to leave the engine before clearing its cumulative decoder state. Audio
+    /// accepted after an early resume remains buffered behind that reset.
     func suspend() {
-        state.withLock { s in
+        let shouldStartReset = state.withLock { s -> Bool in
+            guard !s.isStopped, !s.didFail, !s.isSuspended else { return false }
             s.isSuspended = true
             s.lifecycleRevision &+= 1
+            s.transcriptEpoch &+= 1
             s.sampleBuffer.removeAll(keepingCapacity: true)
             s.chunkQueue.removeAll(keepingCapacity: true)
-            s.committedPrefixLength = s.engineText.count
+            s.engineText = ""
+            s.committedPrefixLength = 0
             s.pendingSegments.removeAll(keepingCapacity: true)
+            s.pendingPublicationTail = nil
+            s.pendingPublicationLifecycleRevision = nil
+            s.pendingResetRevision = s.lifecycleRevision
+            guard !s.isResettingForDiscontinuity else { return false }
+            s.isResettingForDiscontinuity = true
+            return true
         }
         publishImmediately("")
+        if shouldStartReset {
+            Task.detached(priority: .utility) { [weak self] in
+                await self?.resetEngineForDiscontinuity()
+            }
+        }
     }
 
     func resume() {
         state.withLock { s in
+            guard !s.isStopped, !s.didFail, s.isSuspended else { return }
             s.isSuspended = false
         }
     }
@@ -368,24 +523,36 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
     func finish(
         drainTimeoutNanoseconds: UInt64 = MeetingStreamingPartialSession.finishDrainTimeoutNanoseconds
     ) async -> String? {
-        let shouldDrain = state.withLock { s -> Bool in
-            guard !s.isStopped, !s.isSuspended, !s.didFail else { return false }
-            if !s.sampleBuffer.isEmpty {
-                s.sampleBuffer.append(contentsOf: repeatElement(0, count: Self.feedSamples - s.sampleBuffer.count))
-                s.chunkQueue.append(s.sampleBuffer)
-                s.sampleBuffer.removeAll(keepingCapacity: true)
-            }
-            guard !s.chunkQueue.isEmpty, !s.isDraining else { return false }
-            s.isDraining = true
-            return true
-        }
-        if shouldDrain {
-            Task.detached(priority: .utility) { [weak self] in
-                await self?.drain()
-            }
-        }
         let drainDeadline = DispatchTime.now().uptimeNanoseconds &+ drainTimeoutNanoseconds
-        while state.withLock({ $0.isDraining || !$0.chunkQueue.isEmpty }) {
+        while true {
+            let drainState = state.withLock { s -> (ready: Bool, startDrain: Bool, terminal: Bool) in
+                guard !s.isStopped, !s.isSuspended, !s.didFail else {
+                    return (false, false, true)
+                }
+                guard !s.isResettingForDiscontinuity else {
+                    return (false, false, false)
+                }
+                if !s.sampleBuffer.isEmpty {
+                    s.sampleBuffer.append(contentsOf: repeatElement(
+                        0,
+                        count: Self.feedSamples - s.sampleBuffer.count
+                    ))
+                    s.chunkQueue.append(s.sampleBuffer)
+                    s.sampleBuffer.removeAll(keepingCapacity: true)
+                }
+                let startDrain = !s.chunkQueue.isEmpty && !s.isDraining
+                if startDrain {
+                    s.isDraining = true
+                }
+                return (!s.isDraining && s.chunkQueue.isEmpty, startDrain, false)
+            }
+            if drainState.terminal { return nil }
+            if drainState.startDrain {
+                Task.detached(priority: .utility) { [weak self] in
+                    await self?.drain()
+                }
+            }
+            if drainState.ready { break }
             guard DispatchTime.now().uptimeNanoseconds < drainDeadline else {
                 goDormant(error: NSError(
                     domain: "MeetingStreamingPartialSession",
@@ -396,7 +563,6 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
-        guard !state.withLock({ $0.didFail || $0.isStopped }) else { return nil }
         let finishRevision = state.withLock { s -> UInt64 in
             s.activeInferenceRevision = s.lifecycleRevision
             return s.lifecycleRevision
@@ -404,7 +570,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
         do {
             try await engine.finish()
         } catch {
-            goDormant(error: error)
+            goDormant(error: error, completedInference: true)
             return nil
         }
         state.withLock { s in
@@ -428,16 +594,18 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             s.committedPrefixLength = 0
             s.pendingSegments.removeAll()
             s.pendingPublicationTail = nil
-            s.activeInferenceRevision = nil
+            s.pendingPublicationLifecycleRevision = nil
+            s.pendingResetRevision = nil
         }
         publishImmediately("")
-        Task { await engine.shutdown() }
+        requestEngineShutdown()
     }
 
     private func drain() async {
         while true {
             let work: (chunk: [Float], revision: UInt64)? = state.withLock { s in
-                guard !s.isStopped, !s.isSuspended, !s.didFail, !s.chunkQueue.isEmpty else {
+                guard !s.isStopped, !s.isSuspended, !s.didFail,
+                      !s.isResettingForDiscontinuity, !s.chunkQueue.isEmpty else {
                     s.isDraining = false
                     return nil
                 }
@@ -455,7 +623,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
                     }
                 }
             } catch {
-                goDormant(error: error)
+                goDormant(error: error, completedInference: true)
                 return
             }
         }
@@ -465,10 +633,11 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
         let filteredText = TranscriptionEngineArtifactsFilter.apply(text)
         let tail: String? = state.withLock { s in
             guard !s.isStopped, !s.isSuspended, !s.didFail,
+                  !s.isResettingForDiscontinuity,
                   s.activeInferenceRevision == s.lifecycleRevision else { return nil }
             if filteredText.count < s.committedPrefixLength {
                 s.committedPrefixLength = 0
-                s.pendingSegments.removeAll()
+                s.pendingSegments.removeAll { $0.transcriptEpoch == s.transcriptEpoch }
             }
             s.engineText = filteredText
             return visibleTail(for: s)
@@ -478,7 +647,11 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
         }
     }
 
-    private func goDormant(error: Error) {
+    private func goDormant(
+        error: Error,
+        completedInference: Bool = false,
+        completedReset: Bool = false
+    ) {
         state.withLock { s in
             s.didFail = true
             s.lifecycleRevision &+= 1
@@ -488,11 +661,19 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             s.engineText = ""
             s.committedPrefixLength = 0
             s.pendingSegments.removeAll()
-            s.activeInferenceRevision = nil
+            s.pendingPublicationTail = nil
+            s.pendingPublicationLifecycleRevision = nil
+            if completedInference {
+                s.activeInferenceRevision = nil
+            }
+            if completedReset {
+                s.isResettingForDiscontinuity = false
+                s.pendingResetRevision = nil
+            }
         }
         fputs("[meeting-partials] \(label) session dormant after error: \(error)\n", stderr)
         publishImmediately("")
-        Task { await engine.shutdown() }
+        requestEngineShutdown()
     }
 
     /// Core ML may produce partials faster than SwiftUI can lay out a long live
@@ -503,6 +684,7 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
             guard !s.isStopped, !s.isSuspended, !s.didFail else { return false }
             guard tail != s.lastPublishedTail || s.pendingPublicationTail != nil else { return false }
             s.pendingPublicationTail = tail
+            s.pendingPublicationLifecycleRevision = s.lifecycleRevision
             guard !s.isPublicationScheduled else { return false }
             s.isPublicationScheduled = true
             return true
@@ -516,40 +698,169 @@ final class MeetingStreamingPartialSession: @unchecked Sendable {
     }
 
     private func flushScheduledPublication() {
-        let tail: String? = state.withLock { s in
+        let publication: Publication? = state.withLock { s in
             s.isPublicationScheduled = false
             guard !s.isStopped, !s.isSuspended, !s.didFail,
-                  let pending = s.pendingPublicationTail else {
+                  let tail = s.pendingPublicationTail,
+                  let lifecycleRevision = s.pendingPublicationLifecycleRevision,
+                  lifecycleRevision == s.lifecycleRevision else {
                 s.pendingPublicationTail = nil
+                s.pendingPublicationLifecycleRevision = nil
                 return nil
             }
             s.pendingPublicationTail = nil
-            guard pending != s.lastPublishedTail else { return nil }
-            s.lastPublishedTail = pending
-            return pending
+            s.pendingPublicationLifecycleRevision = nil
+            return preparePublicationLocked(
+                tail,
+                expectedLifecycleRevision: lifecycleRevision,
+                state: &s
+            )
         }
-        if let tail {
-            onPartialUpdate?(tail)
-        }
+        guard let publication else { return }
+        scheduledPublicationDidPrepare?()
+        enqueuePreparedPublication(publication)
     }
 
-    private func publishImmediately(_ tail: String, expectedRevision: UInt64? = nil) {
-        let shouldPublish = state.withLock { s -> Bool in
-            if let expectedRevision, expectedRevision != s.lifecycleRevision {
-                return false
-            }
-            s.pendingPublicationTail = nil
-            guard tail != s.lastPublishedTail else { return false }
-            s.lastPublishedTail = tail
+    private func publishImmediately(_ tail: String) {
+        enqueuePublication(
+            tail,
+            expectedLifecycleRevision: nil
+        )
+    }
+
+    private func enqueuePublication(
+        _ tail: String,
+        expectedLifecycleRevision: UInt64?
+    ) {
+        let publication: Publication? = state.withLock { s in
+            preparePublicationLocked(
+                tail,
+                expectedLifecycleRevision: expectedLifecycleRevision,
+                state: &s
+            )
+        }
+        guard let publication else { return }
+        enqueuePreparedPublication(publication)
+    }
+
+    private func preparePublicationLocked(
+        _ tail: String,
+        expectedLifecycleRevision: UInt64?,
+        state: inout State
+    ) -> Publication? {
+        if let expectedLifecycleRevision,
+           expectedLifecycleRevision != state.lifecycleRevision {
+            return nil
+        }
+        state.pendingPublicationTail = nil
+        state.pendingPublicationLifecycleRevision = nil
+        state.publicationRevision &+= 1
+        let publicationRevision = state.publicationRevision
+        state.lastPublishedTail = tail
+
+        // If this value has already reached the observer, incrementing the
+        // token above is still required to invalidate any older queued
+        // delivery, but another duplicate callback is unnecessary.
+        guard tail != state.lastDeliveredTail else { return nil }
+        return Publication(
+            tail: tail,
+            lifecycleRevision: state.lifecycleRevision,
+            publicationRevision: publicationRevision
+        )
+    }
+
+    private func enqueuePreparedPublication(_ publication: Publication) {
+        let delivery: @Sendable () -> Void = { [weak self] in
+            self?.deliver(publication)
+        }
+        publicationQueue.async(execute: delivery)
+    }
+
+    private func deliver(_ publication: Publication) {
+        let shouldDeliver = state.withLock { s -> Bool in
+            guard s.publicationRevision == publication.publicationRevision,
+                  s.lifecycleRevision == publication.lifecycleRevision,
+                  s.lastDeliveredTail != publication.tail else { return false }
+            s.lastDeliveredTail = publication.tail
             return true
         }
-        if shouldPublish {
-            onPartialUpdate?(tail)
+        if shouldDeliver {
+            partialUpdateHandler.withLock { $0 }?(publication.tail)
         }
     }
 
     private func visibleTail(for state: State) -> String {
         let dropCount = min(state.committedPrefixLength, state.engineText.count)
         return String(state.engineText.dropFirst(dropCount))
+    }
+
+    private func resetEngineForDiscontinuity() async {
+        while true {
+            while state.withLock({ !$0.isStopped && $0.activeInferenceRevision != nil }) {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            guard let revision = state.withLock({ s -> UInt64? in
+                guard !s.isStopped, !s.didFail else {
+                    s.isResettingForDiscontinuity = false
+                    s.pendingResetRevision = nil
+                    return nil
+                }
+                return s.pendingResetRevision
+            }) else { return }
+
+            do {
+                try await engine.resetForDiscontinuity()
+            } catch {
+                goDormant(error: error, completedReset: true)
+                return
+            }
+
+            let completion = state.withLock { s -> (finished: Bool, startDrain: Bool) in
+                guard !s.isStopped, !s.didFail else {
+                    s.isResettingForDiscontinuity = false
+                    s.pendingResetRevision = nil
+                    return (true, false)
+                }
+                guard s.pendingResetRevision == revision else { return (false, false) }
+                s.pendingResetRevision = nil
+                s.isResettingForDiscontinuity = false
+                let shouldDrain = !s.isSuspended && !s.chunkQueue.isEmpty && !s.isDraining
+                if shouldDrain {
+                    s.isDraining = true
+                }
+                return (true, shouldDrain)
+            }
+            if completion.startDrain {
+                Task.detached(priority: .utility) { [weak self] in
+                    await self?.drain()
+                }
+            }
+            if completion.finished { return }
+        }
+    }
+
+    private func shutdownEngineAfterPendingWork() async {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ shutdownGraceNanoseconds
+        // Prefer orderly teardown, but never let a wedged model inference or
+        // reset keep the meeting lifecycle alive indefinitely.
+        while state.withLock({
+            $0.isResettingForDiscontinuity || $0.activeInferenceRevision != nil
+        }) {
+            guard DispatchTime.now().uptimeNanoseconds < deadline else { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        await engine.shutdown()
+    }
+
+    private func requestEngineShutdown() {
+        let shouldSchedule = state.withLock { s -> Bool in
+            guard !s.isShutdownRequested else { return false }
+            s.isShutdownRequested = true
+            return true
+        }
+        guard shouldSchedule else { return }
+        Task { [self] in
+            await shutdownEngineAfterPendingWork()
+        }
     }
 }

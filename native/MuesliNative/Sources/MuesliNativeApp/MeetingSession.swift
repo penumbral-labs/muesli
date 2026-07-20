@@ -147,6 +147,47 @@ private enum MeetingTranscriptRecoveryResult {
     case replace([SpeechSegment])
 }
 
+/// Dispatch's work-item closure is `@Sendable`, while `MeetingSession` is
+/// deliberately queue-confined rather than globally Sendable. Keep that
+/// unchecked boundary local to the one queue that owns capture teardown.
+private final class MeetingCaptureTeardownWork: @unchecked Sendable {
+    private let operation: () -> Void
+
+    init(_ operation: @escaping () -> Void) {
+        self.operation = operation
+    }
+
+    func run() {
+        operation()
+    }
+}
+
+/// Defines the synchronous capture stop boundary shared by the real meeting
+/// session and deterministic lifecycle tests. A source's `pause` operation is
+/// a callback barrier: after both pauses return, callbacks admitted before the
+/// stop request have crossed into the owner queue. Disconnecting callbacks
+/// then prevents graph teardown from producing a second copy of the tail.
+enum MeetingCaptureStopBoundary {
+    static func quiesce<OwnerArtifacts, WriterArtifacts, GraphArtifacts>(
+        pauseSources: () -> Void,
+        disconnectSourceCallbacks: () -> Void,
+        drainOwnerAndFinalizeChunks: () -> OwnerArtifacts,
+        finalizeWriter: () -> WriterArtifacts,
+        stopGraphs: () -> GraphArtifacts
+    ) -> (
+        owner: OwnerArtifacts,
+        writer: WriterArtifacts,
+        graphs: GraphArtifacts
+    ) {
+        pauseSources()
+        disconnectSourceCallbacks()
+        let owner = drainOwnerAndFinalizeChunks()
+        let writer = finalizeWriter()
+        let graphs = stopGraphs()
+        return (owner, writer, graphs)
+    }
+}
+
 final class MeetingSession {
     private static let logger = Logger(subsystem: "com.muesli.native", category: "MeetingSession")
 
@@ -174,9 +215,20 @@ final class MeetingSession {
     private let systemChunkHealthTracker = MeetingTranscriptChunkHealthTracker()
     private let micHealthTracker = MeetingMicHealthTracker()
     private let chunkRotationQueue = DispatchQueue(label: "MuesliNative.MeetingSession.chunkRotation")
-    private let pausedDisplayLock = OSAllocatedUnfairLock(initialState: false)
+    /// Potentially blocking CoreAudio teardown belongs here, never on the UI
+    /// executor. Stop and discard share the queue so their graph mutations
+    /// cannot overlap if termination races an interactive lifecycle action.
+    private let captureTeardownQueue = DispatchQueue(label: "MuesliNative.MeetingSession.captureTeardown")
+    private struct CaptureActivityState {
+        var startTime: Date?
+        var isRecording = false
+        var isPaused = false
+    }
+    private let captureActivityState = OSAllocatedUnfairLock(initialState: CaptureActivityState())
+    private let screenPauseCommandGeneration = OSAllocatedUnfairLock(initialState: UInt64(0))
     private var chunkTimingTracker = MeetingChunkTimingTracker()
     private var systemChunkTimingTracker = MeetingChunkTimingTracker()
+    private var lastMicRecoveryGeneration: UInt64 = 0
     private var systemChunkRecorder: PCMChunkRecorder?
     var onProgress: ((MeetingProcessingStage) -> Void)?
     var onMicHealthChanged: ((MeetingMicHealthSnapshot) -> Void)?
@@ -203,19 +255,37 @@ final class MeetingSession {
 
     /// Current mic power level for waveform visualization.
     func currentPower() -> Float {
-        if pausedDisplayLock.withLock({ $0 }) {
+        if isPaused {
             return -160
         }
         return meetingMicRecorder.currentPower()
     }
 
-    private(set) var startTime: Date?
-    private(set) var isRecording = false
-    private(set) var isPaused = false
+    private(set) var startTime: Date? {
+        get { captureActivityState.withLock { $0.startTime } }
+        set { captureActivityState.withLock { $0.startTime = newValue } }
+    }
+    private(set) var isRecording: Bool {
+        get { captureActivityState.withLock { $0.isRecording } }
+        set { captureActivityState.withLock { $0.isRecording = newValue } }
+    }
+    private(set) var isPaused: Bool {
+        get { captureActivityState.withLock { $0.isPaused } }
+        set { captureActivityState.withLock { $0.isPaused = newValue } }
+    }
 
     private func setPausedStateOnQueue(_ paused: Bool) {
         isPaused = paused
-        pausedDisplayLock.withLock { $0 = paused }
+    }
+
+    private func setScreenContextPaused(_ paused: Bool) {
+        let commandGeneration = screenPauseCommandGeneration.withLock { generation -> UInt64 in
+            generation &+= 1
+            return generation
+        }
+        Task { [screenContextCollector] in
+            await screenContextCollector.setPaused(paused, commandGeneration: commandGeneration)
+        }
     }
 
     init(
@@ -263,6 +333,7 @@ final class MeetingSession {
             startTime = now
             chunkTimingTracker.start()
             systemChunkTimingTracker.start()
+            lastMicRecoveryGeneration = 0
             isRecording = true
             setPausedStateOnQueue(false)
         }
@@ -279,6 +350,8 @@ final class MeetingSession {
             systemVadController?.stop()
             systemVadController = nil
             meetingMicRecorder.onRawPCMSamples = nil
+            meetingMicRecorder.onCaptureEvent = nil
+            meetingMicRecorder.onRecordingFailed = nil
             systemAudioRecorder.onPCMSamples = nil
             retainedRecordingWriter?.cancel()
             retainedRecordingWriter = nil
@@ -440,22 +513,32 @@ final class MeetingSession {
     }
 
     func pause() {
-        let shouldPause = chunkRotationQueue.sync { () -> Bool in
+        let shouldPauseSources = chunkRotationQueue.sync {
+            isRecording && !isPaused
+        }
+        guard shouldPauseSources else { return }
+
+        // Capture sources establish their own callback barriers first. Once
+        // these calls return, every pre-pause sample has either reached
+        // chunkRotationQueue or been rejected by its source generation.
+        meetingMicRecorder.pause()
+        systemAudioRecorder.pause()
+
+        let didCommitPause = chunkRotationQueue.sync { () -> Bool in
             guard isRecording, !isPaused else { return false }
             appendFlushedStreamingMicOnQueue()
             rotateChunkOnQueue()
             rotateSystemChunkOnQueue()
             retainedRecordingWriter?.markPauseBoundary()
             neuralAec.resetForStreaming()
+            vadController?.resetForDiscontinuity()
+            systemVadController?.resetForDiscontinuity()
             setPausedStateOnQueue(true)
             suspendPartialSessions()
             return true
         }
-        guard shouldPause else { return }
-
-        meetingMicRecorder.pause()
-        systemAudioRecorder.pause()
-        Task { await screenContextCollector.setPaused(true) }
+        guard didCommitPause else { return }
+        setScreenContextPaused(true)
         fputs("[meeting] recording paused\n", stderr)
     }
 
@@ -470,13 +553,44 @@ final class MeetingSession {
 
         meetingMicRecorder.resume()
         systemAudioRecorder.resume()
-        Task { await screenContextCollector.setPaused(false) }
+        setScreenContextPaused(false)
         fputs("[meeting] recording resumed\n", stderr)
     }
 
     /// Abandon the recording — stop everything, delete temp files, don't transcribe.
-    func discard() {
+    /// The continuation resumes only after both audio sources have released
+    /// CoreAudio, which is the controller's capture-quiescence boundary.
+    func discard() async {
+        screenContextCollector.invalidateCapture()
+        await withCheckedContinuation { continuation in
+            let work = MeetingCaptureTeardownWork { [self] in
+                discardOnCaptureTeardownQueue()
+                continuation.resume()
+            }
+            captureTeardownQueue.async { work.run() }
+        }
+        // Screen context belongs only to this retired session. Its actor may be
+        // occupied by slow AX/Vision work, so never make discard or the next
+        // meeting's audio lease wait for it.
+        Task { [screenContextCollector] in
+            _ = await screenContextCollector.stopAndDrain()
+        }
+    }
+
+    /// Application termination is already a blocking boundary, so it may wait
+    /// synchronously while still using the same serialized teardown path.
+    func discardForTermination() {
+        // Process exit does not admit another meeting, so this can remain a
+        // best-effort asynchronous cancellation rather than blocking AppKit
+        // termination on an in-flight Vision request.
+        screenContextCollector.invalidateCapture()
         Task { await screenContextCollector.stopAndDrain() }
+        captureTeardownQueue.sync { [self] in
+            discardOnCaptureTeardownQueue()
+        }
+    }
+
+    private func discardOnCaptureTeardownQueue() {
         let (rawRecorder, systemRecorder) = chunkRotationQueue.sync { () -> (PCMChunkRecorder?, PCMChunkRecorder?) in
             isRecording = false
             setPausedStateOnQueue(false)
@@ -499,6 +613,8 @@ final class MeetingSession {
         rawRecorder?.cancel()
         systemRecorder?.cancel()
         meetingMicRecorder.onRawPCMSamples = nil
+        meetingMicRecorder.onCaptureEvent = nil
+        meetingMicRecorder.onRecordingFailed = nil
         meetingMicRecorder.cancel()
         systemAudioRecorder.onPCMSamples = nil
         if let url = systemAudioRecorder.stop() {
@@ -509,7 +625,9 @@ final class MeetingSession {
         fputs("[meeting] recording discarded\n", stderr)
     }
 
-    func stop() async throws -> MeetingSessionResult {
+    func stop(
+        onCaptureQuiesced: (() async -> Void)? = nil
+    ) async throws -> MeetingSessionResult {
         onProgress?(.transcribingAudio)
         let endTime = Date()
         var micSegments: [SpeechSegment] = []
@@ -517,43 +635,31 @@ final class MeetingSession {
         let usesUnifiedNemotronTranscript = config.enableLiveStreamingPartials
             && config.resolvedMeetingLiveCaptionBackend == .nemotron35
 
-        // Stop VAD controller
-        if !usesUnifiedNemotronTranscript {
-            stopPartialSessions()
-        }
-        vadController?.stop()
-        vadController = nil
-        systemVadController?.stop()
-        systemVadController = nil
-        meetingMicRecorder.onRawPCMSamples = nil
-        systemAudioRecorder.onPCMSamples = nil
-        let (meetingStart, lastChunkTiming, lastRawMicURL, lastSystemChunkTiming, lastSystemChunkURL) = chunkRotationQueue.sync { () -> (Date, MeetingChunkTimingSnapshot?, URL?, MeetingChunkTimingSnapshot?, URL?) in
-            isRecording = false
-            setPausedStateOnQueue(false)
+        let capture = await quiesceCaptureForStop(
+            usesUnifiedNemotronTranscript: usesUnifiedNemotronTranscript
+        )
+        // Transcript finalization may take minutes, but it no longer owns any
+        // microphone/system capture graph. The controller can safely admit the
+        // next meeting immediately after this awaited handoff returns.
+        await onCaptureQuiesced?()
+        // Context finalization is intentionally after the audio handoff. A
+        // wedged Accessibility or Vision request can delay only this retired
+        // meeting's summary, never another application's microphone access.
+        let visualContext = await screenContextCollector.stopAndDrain()
 
-            // Flush partial AEC frame before stopping chunk recorder
-            appendFlushedStreamingMicOnQueue()
-
-            let meetingStart = self.startTime ?? Date()
-            let lastRawMicURL = rawMicChunkRecorder?.stop()
-            let lastSystemChunkURL = systemChunkRecorder?.stop()
-            rawMicChunkRecorder = nil
-            systemChunkRecorder = nil
-            let lastChunkTiming = chunkTimingTracker.finish()
-            let lastSystemChunkTiming = systemChunkTimingTracker.finish()
-            return (meetingStart, lastChunkTiming, lastRawMicURL, lastSystemChunkTiming, lastSystemChunkURL)
-        }
-        let rawStreamingMicURL = meetingMicRecorder.stop()
-        let retainedRecordingURL = retainedRecordingWriter?.stop()
-        retainedRecordingWriter = nil
+        let meetingStart = capture.meetingStart
+        let lastChunkTiming = capture.lastChunkTiming
+        let lastRawMicURL = capture.lastRawMicURL
+        let lastSystemChunkTiming = capture.lastSystemChunkTiming
+        let lastSystemChunkURL = capture.lastSystemChunkURL
+        let rawStreamingMicURL = capture.rawStreamingMicURL
+        let retainedRecordingURL = capture.retainedRecordingURL
+        let systemAudioURL = capture.systemAudioURL
         defer {
             if let rawStreamingMicURL {
                 try? FileManager.default.removeItem(at: rawStreamingMicURL)
             }
         }
-
-        // Stop system audio
-        let systemAudioURL = systemAudioRecorder.stop()
 
         if usesUnifiedNemotronTranscript {
             async let micRetirement: Void = micChunkCollector.waitUntilRetired()
@@ -713,7 +819,6 @@ final class MeetingSession {
             generatedTitle = title
         }
 
-        let visualContext = await screenContextCollector.stopAndDrain()
         Self.logger.info("visual context drained chars=\(visualContext.count) includedInPrompt=\(!visualContext.isEmpty) useOCR=\(self.config.useCoreAudioTap)")
         fputs("[meeting] visual context drained chars=\(visualContext.count) includedInPrompt=\(!visualContext.isEmpty) useOCR=\(config.useCoreAudioTap)\n", stderr)
         onProgress?(.summarizingNotes)
@@ -748,7 +853,7 @@ final class MeetingSession {
             rawMicURL: rawStreamingMicURL,
             systemAudioURL: systemAudioURL,
             systemCapture: (systemAudioRecorder as? SystemAudioDiagnosticsProviding)?.diagnosticsSnapshot,
-            micRecorder: meetingMicRecorder.diagnosticsSnapshot(),
+            micRecorder: capture.micRecorderDiagnostics,
             micHealth: micHealthTracker.snapshot(),
             aec: neuralAec.diagnosticsSnapshot,
             micChunks: micChunkHealthTracker.snapshot(),
@@ -771,6 +876,108 @@ final class MeetingSession {
             systemRecordingURL: systemAudioURL,
             templateSnapshot: templateSnapshot
         )
+    }
+
+    private struct AudioCaptureStopArtifacts: @unchecked Sendable {
+        let meetingStart: Date
+        let lastChunkTiming: MeetingChunkTimingSnapshot?
+        let lastRawMicURL: URL?
+        let lastSystemChunkTiming: MeetingChunkTimingSnapshot?
+        let lastSystemChunkURL: URL?
+        let rawStreamingMicURL: URL?
+        let retainedRecordingURL: URL?
+        let systemAudioURL: URL?
+        let micRecorderDiagnostics: MeetingMicRecorderDiagnosticsSnapshot
+    }
+
+    private func quiesceCaptureForStop(
+        usesUnifiedNemotronTranscript: Bool
+    ) async -> AudioCaptureStopArtifacts {
+        // Establish the metadata fence synchronously, without waiting for the
+        // screen collector actor. Only audio resources govern capture handoff.
+        screenContextCollector.invalidateCapture()
+        let audio: AudioCaptureStopArtifacts = await withCheckedContinuation { continuation in
+            let work = MeetingCaptureTeardownWork { [self] in
+                let boundary = MeetingCaptureStopBoundary.quiesce(
+                    pauseSources: {
+                        // Both implementations drain callbacks already admitted
+                        // by their current generation before returning.
+                        meetingMicRecorder.pause()
+                        systemAudioRecorder.pause()
+                    },
+                    disconnectSourceCallbacks: {
+                        meetingMicRecorder.onRawPCMSamples = nil
+                        meetingMicRecorder.onCaptureEvent = nil
+                        meetingMicRecorder.onRecordingFailed = nil
+                        systemAudioRecorder.onPCMSamples = nil
+                    },
+                    drainOwnerAndFinalizeChunks: {
+                        // The sync is the owner-queue drain. Every sample that
+                        // crossed a source pause barrier executes before this
+                        // closure finalizes the two tail chunks.
+                        chunkRotationQueue.sync {
+                            () -> (Date, MeetingChunkTimingSnapshot?, URL?, MeetingChunkTimingSnapshot?, URL?) in
+                            isRecording = false
+                            setPausedStateOnQueue(false)
+                            appendFlushedStreamingMicOnQueue()
+
+                            let meetingStart = startTime ?? Date()
+                            let lastRawMicURL = rawMicChunkRecorder?.stop()
+                            let lastSystemChunkURL = systemChunkRecorder?.stop()
+                            rawMicChunkRecorder = nil
+                            systemChunkRecorder = nil
+                            let lastChunkTiming = chunkTimingTracker.finish()
+                            let lastSystemChunkTiming = systemChunkTimingTracker.finish()
+                            return (
+                                meetingStart,
+                                lastChunkTiming,
+                                lastRawMicURL,
+                                lastSystemChunkTiming,
+                                lastSystemChunkURL
+                            )
+                        }
+                    },
+                    finalizeWriter: {
+                        // Tail samples have now passed through the writer and
+                        // partial/VAD consumers; only then retire those owners.
+                        if !usesUnifiedNemotronTranscript {
+                            stopPartialSessions()
+                        }
+                        vadController?.stop()
+                        vadController = nil
+                        systemVadController?.stop()
+                        systemVadController = nil
+                        let url = retainedRecordingWriter?.stop()
+                        retainedRecordingWriter = nil
+                        return url
+                    },
+                    stopGraphs: {
+                        // Graph stop may block in CoreAudio, but callbacks are
+                        // disconnected and the tail is already durable.
+                        let micDiagnostics = meetingMicRecorder.diagnosticsSnapshot()
+                        return (
+                            meetingMicRecorder.stop(),
+                            systemAudioRecorder.stop(),
+                            micDiagnostics
+                        )
+                    }
+                )
+
+                continuation.resume(returning: AudioCaptureStopArtifacts(
+                    meetingStart: boundary.owner.0,
+                    lastChunkTiming: boundary.owner.1,
+                    lastRawMicURL: boundary.owner.2,
+                    lastSystemChunkTiming: boundary.owner.3,
+                    lastSystemChunkURL: boundary.owner.4,
+                    rawStreamingMicURL: boundary.graphs.0,
+                    retainedRecordingURL: boundary.writer,
+                    systemAudioURL: boundary.graphs.1,
+                    micRecorderDiagnostics: boundary.graphs.2
+                ))
+            }
+            captureTeardownQueue.async { work.run() }
+        }
+        return audio
     }
 
     static func calendarTitleCandidate(originalTitle: String, calendarEventID: String?) -> String? {
@@ -962,20 +1169,26 @@ final class MeetingSession {
     private func configureRealtimeAudioCallbacks(vadManager: VadManager?) {
         if let vadManager {
             let controller = StreamingVadController(vadManager: vadManager)
-            controller.onChunkBoundary = { [weak self] in
+            controller.onChunkBoundary = { [weak self, weak controller] generation in
                 // Streaming VAD callbacks can arrive off-main; serialize chunk rotation explicitly.
-                self?.chunkRotationQueue.async { [weak self] in
-                    self?.rotateChunkOnQueue()
+                self?.chunkRotationQueue.async { [weak self, weak controller] in
+                    guard let self,
+                          let controller,
+                          controller.isBoundaryGenerationCurrent(generation) else { return }
+                    self.rotateChunkOnQueue()
                 }
             }
             controller.start()
             vadController = controller
 
             let systemController = StreamingVadController(vadManager: vadManager)
-            systemController.onChunkBoundary = { [weak self] in
+            systemController.onChunkBoundary = { [weak self, weak systemController] generation in
                 // Streaming VAD callbacks can arrive off-main; serialize chunk rotation explicitly.
-                self?.chunkRotationQueue.async { [weak self] in
-                    self?.rotateSystemChunkOnQueue()
+                self?.chunkRotationQueue.async { [weak self, weak systemController] in
+                    guard let self,
+                          let systemController,
+                          systemController.isBoundaryGenerationCurrent(generation) else { return }
+                    self.rotateSystemChunkOnQueue()
                 }
             }
             systemController.start()
@@ -988,9 +1201,70 @@ final class MeetingSession {
         meetingMicRecorder.onRawPCMSamples = { [weak self] samples in
             self?.enqueueRealtimeMicSamples(samples)
         }
+        meetingMicRecorder.onCaptureEvent = { [weak self] event in
+            self?.enqueueMicCaptureEvent(event)
+        }
+        meetingMicRecorder.onRecordingFailed = { [weak self] error in
+            self?.enqueueMicCaptureFailure(reason: error.localizedDescription)
+        }
         systemAudioRecorder.onPCMSamples = { [weak self] samples in
             self?.enqueueRealtimeSystemSamples(samples)
         }
+    }
+
+    private func enqueueMicCaptureEvent(_ event: StreamingMicCaptureEvent) {
+        chunkRotationQueue.async { [weak self] in
+            guard let self, self.isRecording else { return }
+            switch event {
+            case .recovered(let discontinuity):
+                self.handleMicDiscontinuityOnQueue(discontinuity)
+            case .failed(let failure):
+                self.handleMicCaptureFailureOnQueue(
+                    reason: "capture_recovery_failed:\(failure.reason.rawValue):\(failure.message)"
+                )
+            }
+        }
+    }
+
+    private func enqueueMicCaptureFailure(reason: String) {
+        chunkRotationQueue.async { [weak self] in
+            guard let self, self.isRecording else { return }
+            self.handleMicCaptureFailureOnQueue(reason: "recorder_failed:\(reason)")
+        }
+    }
+
+    private func handleMicCaptureFailureOnQueue(reason: String) {
+        let snapshot = micHealthTracker.noteCaptureFailure(reason: reason)
+        onMicHealthChanged?(snapshot)
+        fputs("[meeting] microphone capture degraded: \(reason)\n", stderr)
+    }
+
+    private func handleMicDiscontinuityOnQueue(_ discontinuity: StreamingMicDiscontinuity) {
+        guard !isPaused,
+              discontinuity.generation > lastMicRecoveryGeneration else { return }
+        lastMicRecoveryGeneration = discontinuity.generation
+
+        // Finish and freeze all pre-gap state before advancing the logical mic
+        // clock. The first replacement-tap buffer is queued immediately after
+        // this event, so it cannot be paired with pre-gap system audio.
+        rotateChunkOnQueue()
+        let missingSamples = max(0, discontinuity.missingSampleCount)
+        chunkTimingTracker.advance(sampleCount: missingSamples)
+        neuralAec.noteMicDiscontinuity(
+            missingSampleCount: Int(min(missingSamples, Int64(Int.max)))
+        )
+        vadController?.resetForDiscontinuity()
+        micPartialSession()?.markDiscontinuity()
+        retainedRecordingWriter?.markMicDiscontinuity(missingSampleCount: missingSamples)
+
+        let health = micHealthTracker.noteCaptureRecovered()
+        onMicHealthChanged?(health)
+        fputs(
+            "[meeting] microphone timeline recovered generation=\(discontinuity.generation) " +
+            "gap_samples=\(missingSamples) old_device=\(String(describing: discontinuity.previousInput.actualDeviceID)) " +
+            "new_device=\(String(describing: discontinuity.currentInput.actualDeviceID))\n",
+            stderr
+        )
     }
 
     private func enqueueRealtimeMicSamples(_ rawSamples: [Int16]) {

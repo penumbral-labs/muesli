@@ -1,5 +1,4 @@
 import AppKit
-import Atomics
 import AudioToolbox
 import AVFoundation
 import CoreAudio
@@ -18,6 +17,67 @@ protocol SystemAudioCapturing: AnyObject {
     func stop() -> URL?
 }
 
+struct CoreAudioCaptureAdmissionTicket: Equatable, Sendable {
+    let graphGeneration: UInt64
+    let pauseEpoch: UInt64
+}
+
+/// One lock-protected state machine spans the CoreAudio IO queue, conversion
+/// queue, and lifecycle caller. Tickets prevent a callback copied before pause
+/// or graph replacement from entering a later recording epoch.
+struct CoreAudioCaptureAdmissionState: Equatable, Sendable {
+    private(set) var isRecording = false
+    private(set) var isPaused = false
+    private(set) var graphGeneration: UInt64 = 0
+    private(set) var pauseEpoch: UInt64 = 0
+
+    mutating func activateCapture() {
+        isRecording = true
+        isPaused = false
+        pauseEpoch &+= 1
+    }
+
+    mutating func beginGraph() -> UInt64 {
+        graphGeneration &+= 1
+        return graphGeneration
+    }
+
+    @discardableResult
+    mutating func pause() -> Bool {
+        guard isRecording, !isPaused else { return false }
+        isPaused = true
+        pauseEpoch &+= 1
+        return true
+    }
+
+    mutating func resume() {
+        guard isRecording else { return }
+        isPaused = false
+    }
+
+    mutating func endCapture() {
+        isRecording = false
+        isPaused = false
+        graphGeneration &+= 1
+        pauseEpoch &+= 1
+    }
+
+    func ticket(forGraph generation: UInt64) -> CoreAudioCaptureAdmissionTicket? {
+        guard isRecording, !isPaused, graphGeneration == generation else { return nil }
+        return CoreAudioCaptureAdmissionTicket(
+            graphGeneration: generation,
+            pauseEpoch: pauseEpoch
+        )
+    }
+
+    func accepts(_ ticket: CoreAudioCaptureAdmissionTicket) -> Bool {
+        isRecording
+            && !isPaused
+            && graphGeneration == ticket.graphGeneration
+            && pauseEpoch == ticket.pauseEpoch
+    }
+}
+
 /// Captures system audio via CoreAudio process tap + aggregate device.
 ///
 /// Replaces `SystemAudioRecorder` (ScreenCaptureKit) for meeting system audio capture.
@@ -33,22 +93,20 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
     private var deviceIOProcID: AudioDeviceIOProcID?
     private var deviceIOBlock: AudioDeviceIOBlock?
     private let deviceIOQueue = DispatchQueue(label: "com.muesli.system-audio-tap.io", qos: .userInitiated)
+    private let deviceIOQueueKey = DispatchSpecificKey<UInt8>()
     private let processingQueue = DispatchQueue(label: "com.muesli.system-audio-tap")
+    private let processingQueueKey = DispatchSpecificKey<UInt8>()
     private var defaultOutputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
 
     private var outputFile: FileHandle?
     private var outputURL: URL?
     private var totalBytesWritten = 0
-    private var activeCaptureGeneration: UInt64 = 0
-    private let recordingFlag = ManagedAtomic(false)
-    private let pausedFlag = ManagedAtomic(false)
-    private(set) var isRecording: Bool {
-        get { recordingFlag.load(ordering: .acquiring) }
-        set { recordingFlag.store(newValue, ordering: .releasing) }
+    private let captureAdmission = OSAllocatedUnfairLock(initialState: CoreAudioCaptureAdmissionState())
+    var isRecording: Bool {
+        captureAdmission.withLock { $0.isRecording }
     }
-    private(set) var isPaused: Bool {
-        get { pausedFlag.load(ordering: .acquiring) }
-        set { pausedFlag.store(newValue, ordering: .releasing) }
+    var isPaused: Bool {
+        captureAdmission.withLock { $0.isPaused }
     }
 
     private static let targetSampleRate: Double = 16_000
@@ -93,6 +151,11 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
         }
     }
 
+    init() {
+        deviceIOQueue.setSpecific(key: deviceIOQueueKey, value: 1)
+        processingQueue.setSpecific(key: processingQueueKey, value: 1)
+    }
+
     deinit {
         if isRecording
             || outputFile != nil
@@ -118,8 +181,7 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
         outputFile = file
         outputURL = url
         totalBytesWritten = 0
-        isRecording = true
-        isPaused = false
+        captureAdmission.withLock { $0.activateCapture() }
 
         do {
             try createTapAndAggregateDevice()
@@ -135,11 +197,11 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
 
     func stop() -> URL? {
         guard isRecording || outputFile != nil || outputURL != nil else { return nil }
-        isRecording = false
-        isPaused = false
+        captureAdmission.withLock { $0.endCapture() }
 
         removeDefaultOutputDeviceListener()
-        processingQueue.sync {
+        syncDeviceIOQueue {}
+        syncProcessingQueue {
             teardownTapAndAudioDevice()
             onPCMSamples = nil
         }
@@ -162,13 +224,17 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
     }
 
     func pause() {
-        guard isRecording else { return }
-        isPaused = true
+        guard captureAdmission.withLock({ $0.pause() }) else { return }
+        // First drain IO intake so every callback that observed the old epoch
+        // has submitted its conversion work. Then drain conversion/owner
+        // delivery. Generation validation rejects the old ticket even if pause
+        // was called reentrantly from either queue.
+        syncDeviceIOQueue {}
+        syncProcessingQueue {}
     }
 
     func resume() {
-        guard isRecording else { return }
-        isPaused = false
+        captureAdmission.withLock { $0.resume() }
     }
 
     // MARK: - Tap + Aggregate Device Setup
@@ -247,10 +313,12 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
     private func setupAndStartAudioDevice() throws {
         let format = sourceFormat
         configureResampler(for: format)
-        activeCaptureGeneration &+= 1
-        let generation = activeCaptureGeneration
+        let generation = captureAdmission.withLock { $0.beginGraph() }
         let block: AudioDeviceIOBlock = { [weak self] _, inputData, _, _, _ in
-            guard let self, self.isRecording, !self.isPaused else { return }
+            guard let self,
+                  let admissionTicket = self.captureAdmission.withLock({
+                      $0.ticket(forGraph: generation)
+                  }) else { return }
             self.diagnosticsLock.withLock { $0.callbackCount += 1 }
 
             let buffers = Self.copyAudioBuffers(from: inputData)
@@ -264,8 +332,8 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
             }
 
             self.processingQueue.async { [weak self] in
-                guard let self, self.isRecording, !self.isPaused else { return }
-                guard self.activeCaptureGeneration == generation else { return }
+                guard let self,
+                      self.captureAdmission.withLock({ $0.accepts(admissionTicket) }) else { return }
                 self.processAudioBuffers(buffers, format: format)
             }
         }
@@ -742,8 +810,7 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
             fputs("[system-audio] CoreAudio tap capture restarted for default output device\n", stderr)
         } catch {
             teardownTapAndAudioDevice()
-            isRecording = false
-            isPaused = false
+            captureAdmission.withLock { $0.endCapture() }
             onPCMSamples = nil
             fputs("[system-audio] failed to restart after default output device change: \(error)\n", stderr)
         }
@@ -787,7 +854,7 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
     }
 
     private func teardownTapAndAudioDevice() {
-        activeCaptureGeneration &+= 1
+        captureAdmission.withLock { _ = $0.beginGraph() }
         resampler = nil
         resamplerInputFormat = nil
         resamplerOutputFormat = nil
@@ -811,8 +878,7 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
     }
 
     private func cleanupFailedStart() {
-        isRecording = false
-        isPaused = false
+        captureAdmission.withLock { $0.endCapture() }
         onPCMSamples = nil
 
         removeDefaultOutputDeviceListener()
@@ -828,6 +894,22 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
         }
         outputURL = nil
         totalBytesWritten = 0
+    }
+
+    private func syncProcessingQueue(_ work: () -> Void) {
+        if DispatchQueue.getSpecific(key: processingQueueKey) != nil {
+            work()
+        } else {
+            processingQueue.sync(execute: work)
+        }
+    }
+
+    private func syncDeviceIOQueue(_ work: () -> Void) {
+        if DispatchQueue.getSpecific(key: deviceIOQueueKey) != nil {
+            work()
+        } else {
+            deviceIOQueue.sync(execute: work)
+        }
     }
 
 }

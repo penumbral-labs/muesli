@@ -4,6 +4,38 @@ import Testing
 
 @Suite("CoreAudioSystemRecorder")
 struct CoreAudioSystemRecorderTests {
+    @Test("pause rejects IO admitted before the boundary after resume")
+    func pauseEpochRejectsPrePauseTicketAfterResume() throws {
+        var state = CoreAudioCaptureAdmissionState()
+        state.activateCapture()
+        let graph = state.beginGraph()
+        let oldTicket = try #require(state.ticket(forGraph: graph))
+
+        let didPause = state.pause()
+        #expect(didPause)
+        state.resume()
+
+        #expect(!state.accepts(oldTicket))
+        #expect(state.ticket(forGraph: graph) != nil)
+    }
+
+    @Test("graph replacement and stop reject callbacks from retired IOProcs")
+    func graphGenerationFencesRetiredCallbacks() throws {
+        var state = CoreAudioCaptureAdmissionState()
+        state.activateCapture()
+        let oldGraph = state.beginGraph()
+        let oldTicket = try #require(state.ticket(forGraph: oldGraph))
+
+        let replacementGraph = state.beginGraph()
+        #expect(!state.accepts(oldTicket))
+        let replacementTicket = try #require(state.ticket(forGraph: replacementGraph))
+        #expect(state.accepts(replacementTicket))
+
+        state.endCapture()
+        #expect(!state.accepts(replacementTicket))
+        #expect(state.ticket(forGraph: replacementGraph) == nil)
+    }
+
 
     @Test("global tap description captures process mix except Muesli")
     func globalTapDescriptionExcludesSelfAudio() {

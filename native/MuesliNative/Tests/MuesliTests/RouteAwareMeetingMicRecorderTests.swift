@@ -58,6 +58,83 @@ struct RouteAwareMeetingMicRecorderTests {
         #expect(failureCount == 0)
     }
 
+    @Test("typed child failure preserves the route wrapper's legacy callback")
+    func typedFailureBridgesToLegacyCaller() throws {
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let appScoped = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: appScoped
+        )
+        var deliveredError: Error?
+        recorder.onRecordingFailed = { deliveredError = $0 }
+        try recorder.start()
+
+        let input = StreamingMicInputSnapshot(
+            requestedDeviceID: nil,
+            actualDeviceID: 42,
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        let failure = StreamingMicCaptureFailure(
+            generation: 9,
+            reason: .inputConfigurationChanged,
+            restartAttemptCount: 2,
+            previousInput: input,
+            message: "route restart failed"
+        )
+
+        appScoped.onCaptureEvent?(.failed(failure))
+        #expect(deliveredError == nil)
+        system.onCaptureEvent?(.failed(failure))
+
+        #expect((deliveredError as NSError?)?.domain == "StreamingMicRecorder.Recovery")
+        #expect(deliveredError?.localizedDescription == "route restart failed")
+    }
+
+    @Test("typed route consumer receives recovery and failure without legacy duplicates")
+    func typedConsumerSuppressesLegacyDuplicate() throws {
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        )
+        var events: [StreamingMicCaptureEvent] = []
+        var legacyFailureCount = 0
+        recorder.onCaptureEvent = { events.append($0) }
+        recorder.onRecordingFailed = { _ in legacyFailureCount += 1 }
+        try recorder.start()
+
+        let input = StreamingMicInputSnapshot(
+            requestedDeviceID: nil,
+            actualDeviceID: 42,
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        let discontinuity = StreamingMicDiscontinuity(
+            generation: 10,
+            reason: .inputConfigurationChanged,
+            missingSampleCount: 160,
+            downtimeSeconds: 0.01,
+            restartAttemptCount: 1,
+            previousInput: input,
+            currentInput: input
+        )
+        let failure = StreamingMicCaptureFailure(
+            generation: 11,
+            reason: .inputConfigurationChanged,
+            restartAttemptCount: 2,
+            previousInput: input,
+            message: "route restart failed"
+        )
+
+        system.onCaptureEvent?(.recovered(discontinuity))
+        system.onCaptureEvent?(.failed(failure))
+
+        #expect(events == [.recovered(discontinuity), .failed(failure)])
+        #expect(legacyFailureCount == 0)
+    }
+
     @Test("lifecycle delegates to active recorder and cancels inactive recorder on stop")
     func lifecycleDelegatesToActiveRecorderAndCancelsInactiveRecorderOnStop() throws {
         let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
@@ -75,6 +152,25 @@ struct RouteAwareMeetingMicRecorderTests {
         #expect(appScoped.resumeCalls == 1)
         #expect(appScoped.stopCalls == 1)
         #expect(system.cancelCalls >= 1)
+    }
+
+    @Test("meeting adapter returns the recording then fully cools the child graph")
+    func meetingAdapterCoolsChildGraphAfterStop() throws {
+        let child = FakeStreamingMeetingRecorder()
+        let expectedURL = URL(fileURLWithPath: "/tmp/meeting-mic.wav")
+        child.stopURL = expectedURL
+        let adapter = StreamingMeetingMicRecorderAdapter(
+            recorder: child,
+            kind: .systemDefaultStreaming
+        )
+
+        try adapter.start()
+        let actualURL = adapter.stop()
+
+        #expect(actualURL == expectedURL)
+        #expect(child.stopCalls == 1)
+        #expect(child.cancelCalls == 1)
+        #expect(child.lifecycle == ["start", "stop", "cancel"])
     }
 
     @Test("diagnostics include active recorder kind and route snapshot")
@@ -108,10 +204,40 @@ struct RouteAwareMeetingMicRecorderTests {
     }
 }
 
+private final class FakeStreamingMeetingRecorder: StreamingDictationRecording {
+    var onAudioBuffer: (([Float]) -> Void)?
+    var onRecordingFailed: ((Error) -> Void)?
+    var preferredInputDeviceID: AudioObjectID?
+    var stopURL: URL?
+    var stopCalls = 0
+    var cancelCalls = 0
+    var lifecycle: [String] = []
+
+    func prepare() throws {}
+
+    func start() throws {
+        lifecycle.append("start")
+    }
+
+    func stop() -> URL? {
+        stopCalls += 1
+        lifecycle.append("stop")
+        return stopURL
+    }
+
+    func cancel() {
+        cancelCalls += 1
+        lifecycle.append("cancel")
+    }
+
+    func currentPower() -> Float { -160 }
+}
+
 private final class FakeMeetingMicRecorder: MeetingMicRecording {
     var preferredInputDeviceID: AudioObjectID?
     var onRawPCMSamples: (([Int16]) -> Void)?
     var onRecordingFailed: ((Error) -> Void)?
+    var onCaptureEvent: ((StreamingMicCaptureEvent) -> Void)?
 
     let kind: MeetingMicRecorderKind
     var prepareCalls = 0

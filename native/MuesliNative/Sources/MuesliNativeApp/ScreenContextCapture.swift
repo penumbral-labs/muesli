@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Vision
+import os
 
 // MARK: - Dictation context (Accessibility + optional on-device OCR)
 
@@ -289,6 +290,14 @@ enum ScreenContextCapture {
 // Uses the Accessibility API instead of CGWindowListCreateImage to avoid
 // disrupting the active SCStream system audio capture during meetings.
 
+struct MeetingScreenContextCaptureSample: Sendable {
+    let timestamp: Date
+    let appName: String
+    let contextText: String
+    let ocrCharCount: Int
+    let appContextCharCount: Int
+}
+
 actor MeetingScreenContextCollector {
     private struct Snapshot {
         let timestamp: Date
@@ -307,6 +316,24 @@ actor MeetingScreenContextCollector {
     private var snapshots: [Snapshot] = []
     private var captureTask: Task<Void, Never>?
     private var isPaused = false
+    /// This fence is deliberately nonisolated. Meeting audio teardown can
+    /// invalidate a slow AX/Vision capture synchronously without first waiting
+    /// for the collector actor to become available.
+    private nonisolated let captureGeneration = OSAllocatedUnfairLock(initialState: UInt64(0))
+    private var pauseCommandGeneration: UInt64 = 0
+    private let captureOperation: @Sendable (Bool) async -> MeetingScreenContextCaptureSample?
+
+    init() {
+        captureOperation = { useOCR in
+            await Self.captureSample(useOCR: useOCR)
+        }
+    }
+
+    init(
+        captureOperation: @escaping @Sendable (Bool) async -> MeetingScreenContextCaptureSample?
+    ) {
+        self.captureOperation = captureOperation
+    }
 
     private static func isMeaningfulAppContext(_ text: String, appName: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -319,43 +346,30 @@ actor MeetingScreenContextCollector {
     ///   When `false`, uses Accessibility API only (lightweight, no screenshots).
     func startPeriodicCapture(interval: TimeInterval = 60, useOCR: Bool = false) {
         captureTask?.cancel()
+        let generation = captureGeneration.withLock { value -> UInt64 in
+            value &+= 1
+            return value
+        }
         isPaused = false
         captureTask = Task {
-            while !Task.isCancelled {
+            while !Task.isCancelled, isCaptureGenerationCurrent(generation) {
                 if isPaused {
                     try? await Task.sleep(for: .seconds(2))
                     continue
                 }
 
-                let timestamp = Date()
-                let appContext = DictationContextCapture.capture()
-                let appContextText = DictationContextCapture.formatForPrompt(appContext)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let meaningfulAppContext = Self.isMeaningfulAppContext(appContextText, appName: appContext.appName)
-                    ? appContextText
-                    : ""
-
-                let screenContext = useOCR ? await ScreenContextCapture.captureOnce() : nil
-                let ocrText = screenContext?.ocrText.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let appName = screenContext?.appName ?? appContext.appName
-
-                var sections: [String] = []
-                if !meaningfulAppContext.isEmpty {
-                    sections.append("App context:\n\(String(meaningfulAppContext.prefix(700)))")
-                }
-                if !ocrText.isEmpty {
-                    sections.append("OCR visual text:\n\(String(ocrText.prefix(1000)))")
-                }
-
-                let contextText = sections.joined(separator: "\n\n")
-                fputs("[meeting] context capture app=\(appName) axChars=\(meaningfulAppContext.count) ocrChars=\(ocrText.count) appended=\(!contextText.isEmpty)\n", stderr)
-                if !contextText.isEmpty {
+                let sample = await captureOperation(useOCR)
+                // OCR/AX capture can outlive cancellation. Generation plus
+                // cancellation checks prevent an obsolete in-flight capture
+                // from appending after stopAndDrain (or a later restart).
+                guard !Task.isCancelled, isCaptureGenerationCurrent(generation) else { return }
+                if let sample, !sample.contextText.isEmpty {
                     snapshots.append(Snapshot(
-                        timestamp: screenContext?.capturedAt ?? timestamp,
-                        appName: appName,
-                        contextText: contextText,
-                        ocrCharCount: ocrText.count,
-                        appContextCharCount: meaningfulAppContext.count
+                        timestamp: sample.timestamp,
+                        appName: sample.appName,
+                        contextText: sample.contextText,
+                        ocrCharCount: sample.ocrCharCount,
+                        appContextCharCount: sample.appContextCharCount
                     ))
                 }
 
@@ -364,14 +378,36 @@ actor MeetingScreenContextCollector {
         }
     }
 
-    func setPaused(_ paused: Bool) {
+    /// Pause commands are issued from synchronous meeting controls through
+    /// unstructured tasks. Their execution order is not guaranteed, so only
+    /// the newest command may mutate collector state.
+    func setPaused(_ paused: Bool, commandGeneration: UInt64) {
+        guard commandGeneration >= pauseCommandGeneration else { return }
+        pauseCommandGeneration = commandGeneration
         isPaused = paused
+    }
+
+    func pausedStateForTesting() -> Bool {
+        isPaused
+    }
+
+    /// Immediately fences the current capture without an actor hop. The actor
+    /// will cancel and release its task when `stopAndDrain()` later runs.
+    nonisolated func invalidateCapture() {
+        captureGeneration.withLock { $0 &+= 1 }
     }
 
     @discardableResult
     func stopAndDrain() -> String {
-        captureTask?.cancel()
+        // Invalidate before cancellation so an in-flight Vision/AX operation
+        // that ignores cancellation cannot append when it eventually returns.
+        // Do not await that operation: it is not an audio resource, and a slow
+        // framework call must never retain the capture lease or delay the next
+        // meeting after the microphone and system graphs are already cold.
+        invalidateCapture()
+        let task = captureTask
         captureTask = nil
+        task?.cancel()
         isPaused = false
         guard !snapshots.isEmpty else { return "" }
 
@@ -393,5 +429,41 @@ actor MeetingScreenContextCollector {
         }.joined(separator: "\n\n")
 
         return String(result.prefix(5000))
+    }
+
+    private nonisolated func isCaptureGenerationCurrent(_ generation: UInt64) -> Bool {
+        captureGeneration.withLock { $0 == generation }
+    }
+
+    private static func captureSample(useOCR: Bool) async -> MeetingScreenContextCaptureSample? {
+        let timestamp = Date()
+        let appContext = DictationContextCapture.capture()
+        let appContextText = DictationContextCapture.formatForPrompt(appContext)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let meaningfulAppContext = isMeaningfulAppContext(appContextText, appName: appContext.appName)
+            ? appContextText
+            : ""
+
+        let screenContext = useOCR ? await ScreenContextCapture.captureOnce() : nil
+        let ocrText = screenContext?.ocrText.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let appName = screenContext?.appName ?? appContext.appName
+
+        var sections: [String] = []
+        if !meaningfulAppContext.isEmpty {
+            sections.append("App context:\n\(String(meaningfulAppContext.prefix(700)))")
+        }
+        if !ocrText.isEmpty {
+            sections.append("OCR visual text:\n\(String(ocrText.prefix(1000)))")
+        }
+
+        let contextText = sections.joined(separator: "\n\n")
+        fputs("[meeting] context capture app=\(appName) axChars=\(meaningfulAppContext.count) ocrChars=\(ocrText.count) appended=\(!contextText.isEmpty)\n", stderr)
+        return MeetingScreenContextCaptureSample(
+            timestamp: screenContext?.capturedAt ?? timestamp,
+            appName: appName,
+            contextText: contextText,
+            ocrCharCount: ocrText.count,
+            appContextCharCount: meaningfulAppContext.count
+        )
     }
 }

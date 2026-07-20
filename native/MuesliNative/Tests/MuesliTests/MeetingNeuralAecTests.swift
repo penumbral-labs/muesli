@@ -210,6 +210,28 @@ struct MeetingNeuralAecTests {
         #expect(processor.processedFrameCount == 2)
     }
 
+    @Test("mic discontinuity resets adaptive state and advances system reference position")
+    func discontinuityAdvancesReferencePosition() {
+        let processor = PassthroughAecProcessor(name: "localvqe", frameSize: 4)
+        let aec = MeetingNeuralAec(preloadedProcessor: processor)
+        aec.resetForStreaming()
+        aec.feedSystemSamples([
+            0, 0, 0, 0,
+            1, 1, 1, 1,
+            2, 2, 2, 2,
+        ])
+
+        _ = aec.processStreamingMic([0.4, 0.4, 0.4, 0.4])
+        aec.noteMicDiscontinuity(missingSampleCount: 4)
+        _ = aec.processStreamingMic([0.5, 0.5, 0.5, 0.5])
+
+        #expect(processor.resetCount == 2)
+        #expect(processor.firstReferenceFrameFirstSample == 2)
+        #expect(aec.diagnosticsSnapshot.micDiscontinuityCount == 1)
+        #expect(aec.diagnosticsSnapshot.missingMicTimelineSamples == 4)
+        #expect(aec.diagnosticsSnapshot.micSamplesReceived == 12)
+    }
+
     @Test("delay estimator reports missing mic candidate windows")
     func delayEstimatorReportsMissingMicCandidateWindows() throws {
         let estimator = MeetingAecDelayEstimator()
@@ -299,6 +321,7 @@ private final class PassthroughAecProcessor: MeetingAecProcessor {
     private(set) var processedFrameCount = 0
     private(set) var nonZeroReferenceFrameCount = 0
     private(set) var firstReferenceFrameFirstSample: Float?
+    private(set) var resetCount = 0
 
     init(name: String = "test-passthrough", frameSize: Int) {
         self.name = name
@@ -306,6 +329,7 @@ private final class PassthroughAecProcessor: MeetingAecProcessor {
     }
 
     func reset() {
+        resetCount += 1
         processedFrameCount = 0
         nonZeroReferenceFrameCount = 0
         firstReferenceFrameFirstSample = nil

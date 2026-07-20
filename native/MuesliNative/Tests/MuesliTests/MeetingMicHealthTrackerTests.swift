@@ -90,4 +90,32 @@ struct MeetingMicHealthTrackerTests {
         #expect(recovered.warningMessage == nil)
         #expect(recovered.firstNonZeroMicAt != nil)
     }
+
+    @Test("explicit capture failure warns even when system audio is quiet")
+    func captureFailureWarnsWithoutSystemActivity() {
+        let tracker = MeetingMicHealthTracker()
+        let failed = tracker.noteCaptureFailure(reason: "first_buffer_timeout")
+
+        #expect(failed.state == .captureFailed)
+        #expect(failed.warningMessage != nil)
+
+        let recovered = tracker.noteCaptureRecovered()
+        #expect(recovered.state == .waitingForAudio)
+        #expect(recovered.warningMessage == nil)
+    }
+
+    @Test("explicit capture failure stays sticky until recovery")
+    func captureFailureIsSticky() {
+        let tracker = MeetingMicHealthTracker()
+        _ = tracker.noteCaptureFailure(reason: "route restart exhausted")
+
+        for _ in 0..<4 {
+            _ = tracker.noteSystemSamples(Array(repeating: 12_000, count: 16_000))
+            _ = tracker.noteRawMicSamples(Array(repeating: 2_000, count: 1_600))
+        }
+
+        #expect(tracker.snapshot().state == .captureFailed)
+        _ = tracker.noteCaptureRecovered()
+        #expect(tracker.snapshot().state == .waitingForAudio)
+    }
 }

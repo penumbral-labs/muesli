@@ -603,4 +603,21 @@ struct MeetingChunkTimingTrackerTests {
         #expect(second?.startTimeSeconds == 0.1)
         #expect(second?.durationSeconds == 0.05)
     }
+
+    @Test("advances the next chunk across a capture discontinuity without adding audio")
+    func advancesAcrossDiscontinuity() {
+        var tracker = MeetingChunkTimingTracker()
+        tracker.start()
+        tracker.append(sampleCount: 1_600)
+        let beforeGap = tracker.rotate()
+        tracker.advance(sampleCount: 8_000)
+        tracker.append(sampleCount: 800)
+        let afterGap = tracker.finish()
+
+        #expect(beforeGap?.startSampleIndex == 0)
+        #expect(beforeGap?.sampleCount == 1_600)
+        #expect(afterGap?.startSampleIndex == 9_600)
+        #expect(afterGap?.sampleCount == 800)
+        #expect(afterGap?.startTimeSeconds == 0.6)
+    }
 }
