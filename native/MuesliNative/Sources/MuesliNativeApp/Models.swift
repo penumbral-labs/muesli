@@ -1002,6 +1002,8 @@ struct AppConfig: Codable {
     var sttBackend: String = BackendOption.whisper.backend
     var sttModel: String = BackendOption.whisper.model
     var dictationInputDeviceUID: String? = nil
+    var meetingInputDeviceUID: String? = nil
+    var meetingInputDeviceSelectionMigrationApplied: Bool = true
     var cohereLanguage: String = CohereTranscribeLanguage.defaultLanguage.rawValue
     var indicASRLanguage: String = IndicASRLanguage.defaultLanguage.rawValue
     var nemotron35Language: String = Nemotron35Language.defaultLanguage.rawValue
@@ -1121,6 +1123,8 @@ struct AppConfig: Codable {
         case sttBackend = "stt_backend"
         case sttModel = "stt_model"
         case dictationInputDeviceUID = "dictation_input_device_uid"
+        case meetingInputDeviceUID = "meeting_input_device_uid"
+        case meetingInputDeviceSelectionMigrationApplied = "meeting_input_device_selection_migration_applied"
         case cohereLanguage = "cohere_language"
         case indicASRLanguage = "indic_asr_language"
         case nemotron35Language = "nemotron35_language"
@@ -1244,6 +1248,17 @@ struct AppConfig: Codable {
         sttBackend = (try? c.decode(String.self, forKey: .sttBackend)) ?? defaults.sttBackend
         sttModel = (try? c.decode(String.self, forKey: .sttModel)) ?? defaults.sttModel
         dictationInputDeviceUID = try? c.decode(String.self, forKey: .dictationInputDeviceUID)
+        if c.contains(.meetingInputDeviceSelectionMigrationApplied) {
+            meetingInputDeviceUID = try? c.decode(String.self, forKey: .meetingInputDeviceUID)
+        } else {
+            // Before Meetings had an independent selector, its microphone route
+            // followed the Dictation choice. Preserve that choice once when an
+            // existing config is upgraded. The marker lets a subsequently saved
+            // nil continue to mean an explicit Automatic selection.
+            meetingInputDeviceUID = (try? c.decode(String.self, forKey: .meetingInputDeviceUID))
+                ?? dictationInputDeviceUID
+        }
+        meetingInputDeviceSelectionMigrationApplied = true
         cohereLanguage = CohereTranscribeLanguage.resolvedCode(try? c.decode(String.self, forKey: .cohereLanguage))
         indicASRLanguage = IndicASRLanguage.resolvedCode(try? c.decode(String.self, forKey: .indicASRLanguage))
         nemotron35Language = Nemotron35Language.resolvedCode(try? c.decode(String.self, forKey: .nemotron35Language))

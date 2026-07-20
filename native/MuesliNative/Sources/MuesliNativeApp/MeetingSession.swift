@@ -317,6 +317,14 @@ final class MeetingSession {
         backendLock.withLock { $0 = backend }
     }
 
+    /// Applies a meeting-only microphone route without touching the meeting
+    /// application's device choice. The recorder serializes graph teardown and
+    /// first-buffer verification away from the main actor while system audio
+    /// capture continues uninterrupted.
+    func requestMicrophoneRouteChange(_ selection: MeetingInputRouteSelection) {
+        meetingMicRecorder.requestInputRouteChange(selection)
+    }
+
     private func currentBackend() -> BackendOption {
         backendLock.withLock { $0 }
     }
@@ -340,7 +348,12 @@ final class MeetingSession {
 
         do {
             try prepareRealtimeAudioPipeline(vadManager: vadManager)
-            try meetingMicRecorder.prepare()
+            if let prepareError = MeetingMicStartupPreflight.prepareBestEffort(meetingMicRecorder) {
+                fputs(
+                    "[meeting] microphone prewarm failed; continuing with recoverable start: \(prepareError.localizedDescription)\n",
+                    stderr
+                )
+            }
             setupRetainedRecordingWriterIfNeeded()
             try await systemAudioRecorder.start()
             try meetingMicRecorder.start()

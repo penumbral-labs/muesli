@@ -246,6 +246,7 @@ struct FallbackStreamingDictationRecorderTests {
         route.onCaptureEvent = { events.append($0) }
         route.onRecordingFailed = { _ in legacyFailureCount += 1 }
         try route.start()
+        selectedChild.onAudioBuffer?([0.1])
 
         let (_, failure) = captureEvents()
         inactiveChild.onCaptureEvent?(failure)

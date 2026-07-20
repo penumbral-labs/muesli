@@ -438,6 +438,101 @@ struct StreamingMicRecoveryCoordinatorTests {
         #expect(staleChange == .ignored)
     }
 
+    @Test("a caught AVFAudio graph failure retries and recovers on a fresh capture token")
+    func caughtGraphFailureRetriesWithFreshToken() throws {
+        var coordinator = StreamingMicRecoveryCoordinator(policy: policy)
+        let initialTap = try startInitialCapture(&coordinator, now: 0)
+        _ = coordinator.noteBuffer(token: initialTap, callbackTime: 1, sampleCount: 4_096)
+
+        let firstSettlement = try settlement(from: coordinator.noteConfigurationChange(now: 1.1))
+        let firstRequest = try restart(from: coordinator.settlementElapsed(firstSettlement))
+        #expect(coordinator.graphPrepared(for: firstRequest, input: airPods) == .startGraph)
+        let retrySettlement = try retry(from: coordinator.graphStartFailed(
+            request: firstRequest,
+            message: "Install microphone tap failed: format not supported (-10868)"
+        ))
+
+        let secondRequest = try restart(from: coordinator.settlementElapsed(retrySettlement))
+        #expect(secondRequest.captureToken != firstRequest.captureToken)
+        _ = try prepareAndStartGraph(&coordinator, request: secondRequest, input: airPods)
+
+        guard case .recovered = coordinator.noteBuffer(
+            token: secondRequest.captureToken,
+            callbackTime: 2,
+            sampleCount: 4_096
+        ) else {
+            Issue.record("Expected the fresh replacement graph to recover")
+            return
+        }
+        #expect(coordinator.noteBuffer(
+            token: firstRequest.captureToken,
+            callbackTime: 2.1,
+            sampleCount: 4_096
+        ) == .rejected)
+        #expect(coordinator.diagnosticsSnapshot.graphRestartAttemptCount == 2)
+        #expect(coordinator.diagnosticsSnapshot.successfulRecoveryCount == 1)
+        #expect(coordinator.diagnosticsSnapshot.failedRecoveryCount == 0)
+    }
+
+    @Test("waiting for a Bluetooth route does not consume graph-start attempts")
+    func routeSettlementDoesNotConsumeGraphRetryBudget() throws {
+        var coordinator = StreamingMicRecoveryCoordinator(policy: policy)
+        let initialTap = try startInitialCapture(&coordinator, now: 0)
+        _ = coordinator.noteBuffer(token: initialTap, callbackTime: 1, sampleCount: 4_096)
+
+        let firstSettlement = try settlement(from: coordinator.noteConfigurationChange(now: 1.1))
+        let provisionalRequest = try restart(from: coordinator.settlementElapsed(firstSettlement))
+        let deferredSettlement = try retry(from: coordinator.routeStillSettling(
+            for: provisionalRequest
+        ))
+        #expect(coordinator.diagnosticsSnapshot.graphRestartAttemptCount == 0)
+
+        let firstRealRequest = try restart(from: coordinator.settlementElapsed(deferredSettlement))
+        #expect(firstRealRequest.attempt == 1)
+        _ = try prepareAndStartGraph(&coordinator, request: firstRealRequest, input: airPods)
+        guard case .recovered = coordinator.noteBuffer(
+            token: firstRealRequest.captureToken,
+            callbackTime: 2,
+            sampleCount: 4_096
+        ) else {
+            Issue.record("Expected recovery after route settlement")
+            return
+        }
+        #expect(coordinator.diagnosticsSnapshot.graphRestartAttemptCount == 1)
+    }
+
+    @Test("two caught AVFAudio graph failures emit one bounded terminal failure")
+    func caughtGraphFailuresRemainBounded() throws {
+        var coordinator = StreamingMicRecoveryCoordinator(policy: policy)
+        let initialTap = try startInitialCapture(&coordinator, now: 0)
+        _ = coordinator.noteBuffer(token: initialTap, callbackTime: 1, sampleCount: 4_096)
+
+        let firstSettlement = try settlement(from: coordinator.noteConfigurationChange(now: 1.1))
+        let firstRequest = try restart(from: coordinator.settlementElapsed(firstSettlement))
+        #expect(coordinator.graphPrepared(for: firstRequest, input: airPods) == .startGraph)
+        let retrySettlement = try retry(from: coordinator.graphStartFailed(
+            request: firstRequest,
+            message: "format not supported (-10868)"
+        ))
+        let finalRequest = try restart(from: coordinator.settlementElapsed(retrySettlement))
+        #expect(coordinator.graphPrepared(for: finalRequest, input: airPods) == .startGraph)
+
+        guard case .failed(let failure) = coordinator.graphStartFailed(
+            request: finalRequest,
+            message: "format not supported (-10868)"
+        ) else {
+            Issue.record("Expected the final safe graph failure to become terminal")
+            return
+        }
+        #expect(failure.restartAttemptCount == 2)
+        #expect(coordinator.diagnosticsSnapshot.failedRecoveryCount == 1)
+        #expect(coordinator.graphStartFailed(
+            request: finalRequest,
+            message: "late duplicate"
+        ) == .ignored)
+        #expect(coordinator.diagnosticsSnapshot.failedRecoveryCount == 1)
+    }
+
     private func startInitialCapture(
         _ coordinator: inout StreamingMicRecoveryCoordinator,
         now: TimeInterval

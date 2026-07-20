@@ -39,6 +39,27 @@ struct RouteAwareMeetingMicRecorderTests {
         #expect(appScoped.preferredInputDeviceID == 82)
     }
 
+    @Test("meeting startup continues to the real start when microphone prewarm fails")
+    func prewarmFailureDoesNotBlockMeetingStart() throws {
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        system.prepareError = NSError(
+            domain: "AVFAudio",
+            code: -10_868,
+            userInfo: [NSLocalizedDescriptionKey: "Route is changing"]
+        )
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        )
+
+        let prewarmError = MeetingMicStartupPreflight.prepareBestEffort(recorder)
+        try recorder.start()
+
+        #expect(prewarmError != nil)
+        #expect(system.prepareCalls == 1)
+        #expect(system.startCalls == 1)
+    }
+
     @Test("callbacks from inactive recorder are ignored")
     func callbacksFromInactiveRecorderAreIgnored() throws {
         let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
@@ -69,6 +90,7 @@ struct RouteAwareMeetingMicRecorderTests {
         var deliveredError: Error?
         recorder.onRecordingFailed = { deliveredError = $0 }
         try recorder.start()
+        system.onRawPCMSamples?([1])
 
         let input = StreamingMicInputSnapshot(
             requestedDeviceID: nil,
@@ -104,6 +126,7 @@ struct RouteAwareMeetingMicRecorderTests {
         recorder.onCaptureEvent = { events.append($0) }
         recorder.onRecordingFailed = { _ in legacyFailureCount += 1 }
         try recorder.start()
+        system.onRawPCMSamples?([1])
 
         let input = StreamingMicInputSnapshot(
             requestedDeviceID: nil,
@@ -133,6 +156,381 @@ struct RouteAwareMeetingMicRecorderTests {
 
         #expect(events == [.recovered(discontinuity), .failed(failure)])
         #expect(legacyFailureCount == 0)
+    }
+
+    @Test("system to explicit handoff publishes recovery before admitting replacement samples")
+    func systemToExplicitHandoffGatesFirstBuffer() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.system-to-explicit")
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let explicit = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: explicit,
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 5
+        )
+        var deliveryOrder: [String] = []
+        var deliveredSamples: [[Int16]] = []
+        var events: [StreamingMicCaptureEvent] = []
+        recorder.onCaptureEvent = { event in
+            events.append(event)
+            deliveryOrder.append("event")
+        }
+        recorder.onRawPCMSamples = { samples in
+            deliveredSamples.append(samples)
+            deliveryOrder.append("samples")
+        }
+
+        try recorder.start()
+        let staleSystemCallback = try #require(system.onRawPCMSamples)
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 1, preferredInputDeviceID: 82))
+        drain(lifecycleQueue)
+
+        staleSystemCallback([1, 2])
+        #expect(deliveredSamples.isEmpty)
+        #expect(events.isEmpty)
+
+        explicit.onRawPCMSamples?([3, 4])
+
+        #expect(deliveryOrder == ["event", "samples"])
+        #expect(deliveredSamples == [[3, 4]])
+        let recovery = try #require(events.first?.recovery)
+        #expect(recovery.reason == .inputConfigurationChanged)
+        #expect(recovery.previousInput.requestedDeviceID == nil)
+        #expect(recovery.currentInput.requestedDeviceID == 82)
+        #expect(recovery.currentInput.actualDeviceID == 82)
+    }
+
+    @Test("explicit device handoff creates a fresh child and rejects callbacks from the retired child")
+    func explicitToExplicitHandoffUsesFreshChild() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.explicit-to-explicit")
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let firstExplicit = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let secondExplicit = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        var factoryCalls = 0
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: firstExplicit,
+            appScopedRecorderFactory: {
+                factoryCalls += 1
+                return secondExplicit
+            },
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 5
+        )
+        recorder.preferredInputDeviceID = 71
+        var deliveredSamples: [[Int16]] = []
+        var events: [StreamingMicCaptureEvent] = []
+        recorder.onRawPCMSamples = { deliveredSamples.append($0) }
+        recorder.onCaptureEvent = { events.append($0) }
+
+        try recorder.start()
+        let staleSamples = try #require(firstExplicit.onRawPCMSamples)
+        let staleEvent = try #require(firstExplicit.onCaptureEvent)
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 1, preferredInputDeviceID: 72))
+        drain(lifecycleQueue)
+
+        #expect(factoryCalls == 1)
+        #expect(firstExplicit.stopCalls == 1)
+        #expect(firstExplicit.cancelCalls >= 1)
+        #expect(secondExplicit.startCalls == 1)
+        #expect(secondExplicit.preferredInputDeviceID == 72)
+
+        staleSamples([7])
+        staleEvent(.recovered(makeDiscontinuity(generation: 500, requestedDeviceID: 71)))
+        #expect(deliveredSamples.isEmpty)
+        #expect(events.isEmpty)
+
+        secondExplicit.onRawPCMSamples?([8])
+        #expect(deliveredSamples == [[8]])
+        #expect(events.count == 1)
+        #expect(events.first?.recovery?.currentInput.requestedDeviceID == 72)
+    }
+
+    @Test("rapid route changes coalesce to the newest device without bypassing first-buffer admission")
+    func rapidRouteChangesUseLatestSelection() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.rapid-selection")
+        let stopEntered = DispatchSemaphore(value: 0)
+        let allowStop = DispatchSemaphore(value: 0)
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        system.stopEntered = stopEntered
+        system.allowStop = allowStop
+        var replacements: [FakeMeetingMicRecorder] = []
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorderFactory: {
+                let replacement = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+                replacements.append(replacement)
+                return replacement
+            },
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 5
+        )
+        var deliveryOrder: [String] = []
+        recorder.onCaptureEvent = { _ in deliveryOrder.append("event") }
+        recorder.onRawPCMSamples = { _ in deliveryOrder.append("samples") }
+
+        try recorder.start()
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 1, preferredInputDeviceID: 81))
+        #expect(stopEntered.wait(timeout: .now() + 1) == .success)
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 2, preferredInputDeviceID: 82))
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 3, preferredInputDeviceID: 83))
+        allowStop.signal()
+        drain(lifecycleQueue)
+
+        #expect(replacements.count == 1)
+        let replacement = try #require(replacements.first)
+        #expect(replacement.preferredInputDeviceID == 83)
+        #expect(deliveryOrder.isEmpty)
+
+        replacement.onRawPCMSamples?([83])
+        #expect(deliveryOrder == ["event", "samples"])
+    }
+
+    @Test("stopping during a pending handoff rejects late replacement callbacks")
+    func stopDuringPendingHandoffRejectsLateCallback() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.stop-pending")
+        let replacement = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: FakeMeetingMicRecorder(kind: .systemDefaultStreaming),
+            appScopedRecorder: replacement,
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 5
+        )
+        var deliveredSamples: [[Int16]] = []
+        var events: [StreamingMicCaptureEvent] = []
+        recorder.onRawPCMSamples = { deliveredSamples.append($0) }
+        recorder.onCaptureEvent = { events.append($0) }
+
+        try recorder.start()
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 1, preferredInputDeviceID: 92))
+        drain(lifecycleQueue)
+        let lateSamples = try #require(replacement.onRawPCMSamples)
+        let lateEvent = try #require(replacement.onCaptureEvent)
+
+        _ = recorder.stop()
+        lateEvent(.recovered(makeDiscontinuity(generation: 1, requestedDeviceID: 92)))
+        lateSamples([9, 2])
+
+        #expect(replacement.stopCalls == 1)
+        #expect(replacement.cancelCalls >= 1)
+        #expect(deliveredSamples.isEmpty)
+        #expect(events.isEmpty)
+    }
+
+    @Test("replacement first-buffer timeout reports a typed failure then falls back to automatic input")
+    func replacementFirstBufferTimeoutFallsBackToSystemRecorder() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.timeout-fallback")
+        let fallbackStarted = DispatchSemaphore(value: 0)
+        let initialSystem = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let replacement = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let fallbackSystem = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        fallbackSystem.samplesOnStart = [10, 1]
+        fallbackSystem.onStart = { fallbackStarted.signal() }
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: initialSystem,
+            appScopedRecorder: replacement,
+            systemDefaultRecorderFactory: { fallbackSystem },
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 0.05
+        )
+        var events: [StreamingMicCaptureEvent] = []
+        var deliveredSamples: [[Int16]] = []
+        recorder.onCaptureEvent = { events.append($0) }
+        recorder.onRawPCMSamples = { deliveredSamples.append($0) }
+
+        try recorder.start()
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 1, preferredInputDeviceID: 101))
+        drain(lifecycleQueue)
+        #expect(fallbackStarted.wait(timeout: .now() + 1) == .success)
+        drain(lifecycleQueue)
+
+        #expect(replacement.stopCalls == 1)
+        #expect(replacement.cancelCalls >= 1)
+        let failure = try #require(events.first?.failure)
+        #expect(failure.reason == .inputConfigurationChanged)
+        #expect(failure.message.contains("produced no audio"))
+
+        #expect(events.count == 2)
+        #expect(events.last?.recovery?.currentInput.requestedDeviceID == nil)
+        #expect(deliveredSamples == [[10, 1]])
+    }
+
+    @Test("initial explicit microphone is verified and falls back when it produces no buffer")
+    func initialExplicitMicrophoneRequiresFirstBuffer() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.initial-proof")
+        let fallbackStarted = DispatchSemaphore(value: 0)
+        let explicit = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let fallbackSystem = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        fallbackSystem.samplesOnStart = [4, 2]
+        fallbackSystem.onStart = { fallbackStarted.signal() }
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: fallbackSystem,
+            appScopedRecorder: explicit,
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 0.05
+        )
+        recorder.preferredInputDeviceID = 71
+        var events: [StreamingMicCaptureEvent] = []
+        var deliveredSamples: [[Int16]] = []
+        recorder.onCaptureEvent = { events.append($0) }
+        recorder.onRawPCMSamples = { deliveredSamples.append($0) }
+
+        try recorder.start()
+        #expect(deliveredSamples.isEmpty)
+        #expect(fallbackStarted.wait(timeout: .now() + 1) == .success)
+        drain(lifecycleQueue)
+
+        #expect(explicit.stopCalls == 1)
+        #expect(events.count == 2)
+        #expect(events.first?.failure?.message.contains("produced no audio") == true)
+        #expect(events.last?.recovery?.currentInput.requestedDeviceID == nil)
+        #expect(deliveredSamples == [[4, 2]])
+    }
+
+    @Test("system-default timeout falls back to the built-in microphone")
+    func systemDefaultTimeoutFallsBackToBuiltInMicrophone() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.system-timeout-fallback")
+        let systemTarget = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let initialExplicit = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let builtInFallback = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let fallbackStarted = DispatchSemaphore(value: 0)
+        builtInFallback.samplesOnStart = [8, 2]
+        builtInFallback.onStart = { fallbackStarted.signal() }
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: systemTarget,
+            appScopedRecorder: initialExplicit,
+            appScopedRecorderFactory: { builtInFallback },
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 0.05
+        )
+        recorder.preferredInputDeviceID = 71
+        var events: [StreamingMicCaptureEvent] = []
+        var deliveredSamples: [[Int16]] = []
+        recorder.onCaptureEvent = { events.append($0) }
+        recorder.onRawPCMSamples = { deliveredSamples.append($0) }
+
+        try recorder.start()
+        recorder.requestInputRouteChange(makeMeetingInputSelection(
+            revision: 1,
+            preferredInputDeviceID: nil,
+            defaultInputDeviceID: 91,
+            builtInInputDeviceID: 82
+        ))
+        drain(lifecycleQueue)
+        #expect(fallbackStarted.wait(timeout: .now() + 1) == .success)
+        drain(lifecycleQueue)
+
+        #expect(systemTarget.stopCalls == 1)
+        #expect(builtInFallback.preferredInputDeviceID == 82)
+        #expect(events.count == 2)
+        #expect(events.first?.failure != nil)
+        #expect(events.last?.recovery?.currentInput.requestedDeviceID == 82)
+        #expect(deliveredSamples == [[8, 2]])
+    }
+
+    @Test("route selection while paused is deferred until resume")
+    func pausedRouteSelectionIsDeferredUntilResume() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.paused-selection")
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let explicit = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: explicit,
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 5
+        )
+        var deliveryOrder: [String] = []
+        recorder.onCaptureEvent = { _ in deliveryOrder.append("event") }
+        recorder.onRawPCMSamples = { _ in deliveryOrder.append("samples") }
+
+        try recorder.start()
+        recorder.pause()
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 1, preferredInputDeviceID: 82))
+        drain(lifecycleQueue)
+
+        #expect(system.pauseCalls == 1)
+        #expect(explicit.startCalls == 0)
+
+        recorder.resume()
+        drain(lifecycleQueue)
+
+        #expect(system.stopCalls == 1)
+        #expect(explicit.startCalls == 1)
+        #expect(deliveryOrder.isEmpty)
+
+        explicit.onRawPCMSamples?([8, 2])
+        #expect(deliveryOrder == ["event", "samples"])
+    }
+
+    @Test("new selection while paused supersedes an awaiting fallback")
+    func pausedSelectionSupersedesPendingFallback() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.paused-fallback")
+        let initialSystem = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let failedExplicit = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        failedExplicit.startError = NSError(domain: "RouteAwareMeetingMicRecorderTests", code: 32)
+        let pendingFallback = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let newestExplicit = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: initialSystem,
+            appScopedRecorder: failedExplicit,
+            systemDefaultRecorderFactory: { pendingFallback },
+            appScopedRecorderFactory: { newestExplicit },
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 5
+        )
+        var deliveredSamples: [[Int16]] = []
+        recorder.onRawPCMSamples = { deliveredSamples.append($0) }
+
+        try recorder.start()
+        initialSystem.onRawPCMSamples?([1])
+        deliveredSamples.removeAll()
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 1, preferredInputDeviceID: 101))
+        drain(lifecycleQueue)
+        let staleFallbackCallback = try #require(pendingFallback.onRawPCMSamples)
+
+        recorder.pause()
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 2, preferredInputDeviceID: 202))
+        recorder.resume()
+        drain(lifecycleQueue)
+
+        #expect(pendingFallback.stopCalls == 1)
+        #expect(newestExplicit.startCalls == 1)
+        #expect(newestExplicit.preferredInputDeviceID == 202)
+
+        staleFallbackCallback([101])
+        #expect(deliveredSamples.isEmpty)
+        newestExplicit.onRawPCMSamples?([202])
+        #expect(deliveredSamples == [[202]])
+    }
+
+    @Test("replacement child events are remapped onto one monotonic meeting generation")
+    func replacementChildEventsUseMonotonicGeneration() throws {
+        let lifecycleQueue = DispatchQueue(label: "RouteAwareMeetingMicRecorderTests.monotonic-generation")
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let replacement = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: replacement,
+            lifecycleQueue: lifecycleQueue,
+            firstBufferTimeout: 5
+        )
+        var events: [StreamingMicCaptureEvent] = []
+        recorder.onCaptureEvent = { events.append($0) }
+
+        try recorder.start()
+        system.onRawPCMSamples?([1])
+        system.onCaptureEvent?(.recovered(makeDiscontinuity(generation: 50, requestedDeviceID: nil)))
+        recorder.requestInputRouteChange(makeMeetingInputSelection(revision: 1, preferredInputDeviceID: 102))
+        drain(lifecycleQueue)
+
+        replacement.onCaptureEvent?(.recovered(makeDiscontinuity(generation: 2, requestedDeviceID: 102)))
+        #expect(events.map(\.generation) == [50])
+        replacement.onRawPCMSamples?([1])
+        replacement.onCaptureEvent?(.recovered(makeDiscontinuity(generation: 1, requestedDeviceID: 102)))
+
+        #expect(events.map(\.generation) == [50, 51, 52])
+        #expect(events[1].recovery?.currentInput.requestedDeviceID == 102)
     }
 
     @Test("lifecycle delegates to active recorder and cancels inactive recorder on stop")
@@ -246,6 +644,12 @@ private final class FakeMeetingMicRecorder: MeetingMicRecording {
     var resumeCalls = 0
     var stopCalls = 0
     var cancelCalls = 0
+    var prepareError: Error?
+    var startError: Error?
+    var stopEntered: DispatchSemaphore?
+    var allowStop: DispatchSemaphore?
+    var samplesOnStart: [Int16]?
+    var onStart: (() -> Void)?
 
     init(kind: MeetingMicRecorderKind) {
         self.kind = kind
@@ -253,10 +657,20 @@ private final class FakeMeetingMicRecorder: MeetingMicRecording {
 
     func prepare() throws {
         prepareCalls += 1
+        if let prepareError {
+            throw prepareError
+        }
     }
 
     func start() throws {
         startCalls += 1
+        if let startError {
+            throw startError
+        }
+        if let samplesOnStart {
+            onRawPCMSamples?(samplesOnStart)
+        }
+        onStart?()
     }
 
     func pause() {
@@ -269,6 +683,10 @@ private final class FakeMeetingMicRecorder: MeetingMicRecording {
 
     func stop() -> URL? {
         stopCalls += 1
+        stopEntered?.signal()
+        if let allowStop {
+            _ = allowStop.wait(timeout: .now() + 1)
+        }
         return nil
     }
 
@@ -286,5 +704,73 @@ private final class FakeMeetingMicRecorder: MeetingMicRecording {
             preferredInputDeviceID: preferredInputDeviceID,
             route: nil
         )
+    }
+}
+
+private func drain(_ queue: DispatchQueue) {
+    queue.sync {}
+}
+
+private func makeMeetingInputSelection(
+    revision: UInt64,
+    preferredInputDeviceID: AudioObjectID?,
+    defaultInputDeviceID: AudioObjectID = 40,
+    builtInInputDeviceID: AudioObjectID = 40
+) -> MeetingInputRouteSelection {
+    MeetingInputRouteSelection(
+        revision: revision,
+        preferredInputDeviceID: preferredInputDeviceID,
+        routeSnapshot: MeetingMicRouteDiagnosticsSnapshot(
+            outputRouteKind: "speaker-like",
+            outputIsAmbiguousBluetooth: false,
+            selectedInputDeviceUID: preferredInputDeviceID.map { "device-\($0)" },
+            selectedInputDeviceResolved: true,
+            preferredInputDeviceID: preferredInputDeviceID,
+            preferredInputDeviceName: preferredInputDeviceID.map { "Microphone \($0)" },
+            defaultInputDeviceID: defaultInputDeviceID,
+            defaultInputDeviceName: "Default Microphone",
+            builtInInputDeviceID: builtInInputDeviceID,
+            systemDefaultInputIsBuiltIn: defaultInputDeviceID == builtInInputDeviceID
+        )
+    )
+}
+
+private func makeDiscontinuity(
+    generation: UInt64,
+    requestedDeviceID: AudioObjectID?
+) -> StreamingMicDiscontinuity {
+    let input = StreamingMicInputSnapshot(
+        requestedDeviceID: requestedDeviceID,
+        actualDeviceID: requestedDeviceID ?? 40,
+        sampleRate: 16_000,
+        channelCount: 1
+    )
+    return StreamingMicDiscontinuity(
+        generation: generation,
+        reason: .inputConfigurationChanged,
+        missingSampleCount: 160,
+        downtimeSeconds: 0.01,
+        restartAttemptCount: 1,
+        previousInput: input,
+        currentInput: input
+    )
+}
+
+private extension StreamingMicCaptureEvent {
+    var generation: UInt64 {
+        switch self {
+        case .recovered(let discontinuity): discontinuity.generation
+        case .failed(let failure): failure.generation
+        }
+    }
+
+    var recovery: StreamingMicDiscontinuity? {
+        guard case .recovered(let discontinuity) = self else { return nil }
+        return discontinuity
+    }
+
+    var failure: StreamingMicCaptureFailure? {
+        guard case .failed(let failure) = self else { return nil }
+        return failure
     }
 }

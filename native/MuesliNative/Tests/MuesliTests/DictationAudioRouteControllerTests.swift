@@ -21,8 +21,8 @@ struct DictationAudioRouteControllerTests {
         #expect(controller.cachedPreferredInputDeviceIDForDictation() == 82)
     }
 
-    @Test("meeting reuses route-aware preferred input policy")
-    func meetingReusesRouteAwarePreferredInputPolicy() {
+    @Test("meeting automatic policy prefers the built-in microphone")
+    func meetingAutomaticPolicyPrefersBuiltInMicrophone() {
         let inspector = FakeCoreAudioDeviceInspector(
             defaultOutputDeviceID: 10,
             outputRouteKind: .headphoneLike,
@@ -175,11 +175,12 @@ struct DictationAudioRouteControllerTests {
         #expect(controller.cachedPreferredInputDeviceIDForDictation() == nil)
     }
 
-    @Test("user selected microphone overrides automatic route policy")
-    func userSelectedMicrophoneOverridesAutomaticRoutePolicy() {
+    @Test("dictation and meeting microphone selections are independent")
+    func dictationAndMeetingMicrophoneSelectionsAreIndependent() {
         let inspector = FakeCoreAudioDeviceInspector(
             defaultOutputDeviceID: 10,
             outputRouteKind: .headphoneLike,
+            defaultInputDeviceID: 91,
             builtInInputDeviceID: 82,
             inputDevices: [
                 AudioInputDeviceInfo(uid: "external-mic", name: "External Mic", deviceID: 91, isBuiltIn: false),
@@ -195,7 +196,13 @@ struct DictationAudioRouteControllerTests {
 
         #expect(controller.preferredInputDeviceIDForDictation() == 91)
         #expect(controller.cachedPreferredInputDeviceIDForDictation() == 91)
-        #expect(controller.preferredInputDeviceIDForMeeting() == 91)
+        #expect(controller.preferredInputDeviceIDForMeeting() == 82)
+
+        controller.selectedMeetingInputDeviceUID = "external-mic"
+
+        #expect(controller.preferredInputDeviceIDForDictation() == 91)
+        #expect(controller.preferredInputDeviceIDForMeeting() == nil)
+        #expect(controller.meetingInputRouteSnapshot().selectedInputDeviceUID == "external-mic")
     }
 
     @Test("user selected default microphone uses system default recorder")
@@ -216,7 +223,7 @@ struct DictationAudioRouteControllerTests {
             queue: routeQueue,
             observesDefaultOutputChanges: false
         )
-        controller.selectedInputDeviceUID = "external-mic"
+        controller.selectedMeetingInputDeviceUID = "external-mic"
         routeQueue.sync {}
 
         #expect(controller.preferredInputDeviceIDForMeeting() == nil)
@@ -253,19 +260,25 @@ struct DictationAudioRouteControllerTests {
             routeQueue.sync {}
         }
         let inspectionCountBeforeSelection = inspector.inspectionCallCount
+        let initialRevision = controller.meetingInputRouteSelection().revision
 
-        controller.selectedInputDeviceUID = "external-mic"
+        controller.selectedMeetingInputDeviceUID = "external-mic"
 
         #expect(controller.preferredInputDeviceIDForMeeting() == 91)
-        let externalSnapshot = controller.meetingInputRouteSnapshot()
+        let externalSelection = controller.meetingInputRouteSelection()
+        let externalSnapshot = externalSelection.routeSnapshot
+        #expect(externalSelection.revision > initialRevision)
+        #expect(externalSelection.preferredInputDeviceID == 91)
         #expect(externalSnapshot.selectedInputDeviceUID == "external-mic")
         #expect(externalSnapshot.selectedInputDeviceResolved)
         #expect(externalSnapshot.preferredInputDeviceName == "External Mic")
 
-        controller.selectedInputDeviceUID = "built-in-mic"
+        controller.selectedMeetingInputDeviceUID = "built-in-mic"
 
         #expect(controller.preferredInputDeviceIDForMeeting() == nil)
-        let builtInSnapshot = controller.meetingInputRouteSnapshot()
+        let builtInSelection = controller.meetingInputRouteSelection()
+        let builtInSnapshot = builtInSelection.routeSnapshot
+        #expect(builtInSelection.revision > externalSelection.revision)
         #expect(builtInSnapshot.selectedInputDeviceUID == "built-in-mic")
         #expect(builtInSnapshot.selectedInputDeviceResolved)
         #expect(inspector.inspectionCallCount == inspectionCountBeforeSelection)
@@ -340,11 +353,15 @@ struct DictationAudioRouteControllerTests {
             queue: routeQueue,
             observesDefaultOutputChanges: false
         )
-        controller.selectedInputDeviceUID = "external-mic"
+        routeQueue.sync {}
+        var routeSelections: [MeetingInputRouteSelection] = []
+        controller.onMeetingPreferredInputDeviceChanged = { routeSelections.append($0) }
+        controller.selectedMeetingInputDeviceUID = "external-mic"
         routeQueue.sync {}
 
         #expect(controller.preferredInputDeviceIDForMeeting() == 91)
         #expect(controller.meetingInputRouteSnapshot().selectedInputDeviceResolved)
+        #expect(routeSelections.last?.preferredInputDeviceID == 91)
 
         inspector.inputDevices.removeAll { $0.uid == "external-mic" }
         controller.refreshRouteCache(notifyEvenIfPreferredUnchanged: true)
@@ -352,6 +369,8 @@ struct DictationAudioRouteControllerTests {
 
         #expect(controller.preferredInputDeviceIDForMeeting() == nil)
         #expect(!controller.meetingInputRouteSnapshot().selectedInputDeviceResolved)
+        #expect(routeSelections.last?.preferredInputDeviceID == nil)
+        #expect(routeSelections.last?.routeSnapshot.selectedInputDeviceResolved == false)
 
         inspector.inputDevices.append(
             AudioInputDeviceInfo(uid: "external-mic", name: "External Mic", deviceID: 92, isBuiltIn: false)
@@ -361,6 +380,184 @@ struct DictationAudioRouteControllerTests {
 
         #expect(controller.preferredInputDeviceIDForMeeting() == 92)
         #expect(controller.meetingInputRouteSnapshot().selectedInputDeviceResolved)
+        #expect(routeSelections.map(\.preferredInputDeviceID) == [91, nil, 92])
+        #expect(routeSelections[0].revision < routeSelections[1].revision)
+        #expect(routeSelections[1].revision < routeSelections[2].revision)
+    }
+
+    @Test("unchanged normalized meeting selection is a no-op")
+    func unchangedNormalizedMeetingSelectionIsNoOp() {
+        let inspector = FakeCoreAudioDeviceInspector(
+            defaultOutputDeviceID: 10,
+            outputRouteKind: .speakerLike,
+            defaultInputDeviceID: 82,
+            builtInInputDeviceID: 82,
+            inputDevices: [
+                AudioInputDeviceInfo(uid: "external-mic", name: "External Mic", deviceID: 91, isBuiltIn: false),
+                AudioInputDeviceInfo(uid: "built-in-mic", name: "MacBook Microphone", deviceID: 82, isBuiltIn: true),
+            ]
+        )
+        let routeQueue = DispatchQueue(label: "test.dictation-audio-route.unchanged-meeting-input")
+        let controller = DictationAudioRouteController(
+            inspector: inspector,
+            queue: routeQueue,
+            observesDefaultOutputChanges: false
+        )
+        routeQueue.sync {}
+        var meetingCallbacks = 0
+        var dictationCallbacks = 0
+        controller.onMeetingPreferredInputDeviceChanged = { _ in meetingCallbacks += 1 }
+        controller.onPreferredInputDeviceChanged = { _ in dictationCallbacks += 1 }
+
+        controller.selectedMeetingInputDeviceUID = "  external-mic  "
+        routeQueue.sync {}
+        let revisionAfterSelection = controller.meetingInputRouteSelection().revision
+        let inspectionsAfterSelection = inspector.inspectionCallCount
+        #expect(meetingCallbacks == 1)
+
+        controller.selectedMeetingInputDeviceUID = "external-mic"
+        routeQueue.sync {}
+
+        #expect(controller.meetingInputRouteSelection().revision == revisionAfterSelection)
+        #expect(inspector.inspectionCallCount == inspectionsAfterSelection)
+        #expect(meetingCallbacks == 1)
+        #expect(dictationCallbacks == 0)
+    }
+
+    @Test("rapid meeting selections coalesce behind one strictly newer revision")
+    func rapidMeetingSelectionsCoalesce() {
+        let inspector = FakeCoreAudioDeviceInspector(
+            defaultOutputDeviceID: 10,
+            outputRouteKind: .speakerLike,
+            defaultInputDeviceID: 82,
+            builtInInputDeviceID: 82,
+            inputDevices: [
+                AudioInputDeviceInfo(uid: "external-mic", name: "External Mic", deviceID: 91, isBuiltIn: false),
+                AudioInputDeviceInfo(uid: "built-in-mic", name: "MacBook Microphone", deviceID: 82, isBuiltIn: true),
+            ]
+        )
+        let routeQueue = DispatchQueue(label: "test.dictation-audio-route.coalesced-meeting-input")
+        let controller = DictationAudioRouteController(
+            inspector: inspector,
+            queue: routeQueue,
+            observesDefaultOutputChanges: false
+        )
+        routeQueue.sync {}
+        let initialRevision = controller.meetingInputRouteSelection().revision
+        var routeSelections: [MeetingInputRouteSelection] = []
+        controller.onMeetingPreferredInputDeviceChanged = { routeSelections.append($0) }
+
+        routeQueue.suspend()
+        controller.selectedMeetingInputDeviceUID = "external-mic"
+        controller.selectedMeetingInputDeviceUID = "built-in-mic"
+        let latestSynchronousSelection = controller.meetingInputRouteSelection()
+        routeQueue.resume()
+        routeQueue.sync {}
+
+        #expect(latestSynchronousSelection.revision > initialRevision)
+        #expect(latestSynchronousSelection.routeSnapshot.selectedInputDeviceUID == "built-in-mic")
+        #expect(routeSelections.count == 1)
+        #expect(routeSelections[0].revision == latestSynchronousSelection.revision)
+        #expect(routeSelections[0].routeSnapshot.selectedInputDeviceUID == "built-in-mic")
+    }
+
+    @Test("unchanged normalized dictation selection is a no-op")
+    func unchangedNormalizedDictationSelectionIsNoOp() {
+        let inspector = FakeCoreAudioDeviceInspector(
+            defaultOutputDeviceID: 10,
+            outputRouteKind: .speakerLike,
+            defaultInputDeviceID: 82,
+            builtInInputDeviceID: 82,
+            inputDevices: [
+                AudioInputDeviceInfo(uid: "external-mic", name: "External Mic", deviceID: 91, isBuiltIn: false),
+                AudioInputDeviceInfo(uid: "built-in-mic", name: "MacBook Microphone", deviceID: 82, isBuiltIn: true),
+            ]
+        )
+        let routeQueue = DispatchQueue(label: "test.dictation-audio-route.unchanged-dictation-input")
+        let controller = DictationAudioRouteController(
+            inspector: inspector,
+            queue: routeQueue,
+            observesDefaultOutputChanges: false
+        )
+        routeQueue.sync {}
+        var dictationCallbacks = 0
+        controller.onPreferredInputDeviceChanged = { _ in dictationCallbacks += 1 }
+
+        controller.selectedInputDeviceUID = "external-mic"
+        routeQueue.sync {}
+        let inspectionsAfterSelection = inspector.inspectionCallCount
+        #expect(dictationCallbacks == 1)
+
+        controller.selectedInputDeviceUID = "  external-mic  "
+        routeQueue.sync {}
+
+        #expect(inspector.inspectionCallCount == inspectionsAfterSelection)
+        #expect(dictationCallbacks == 1)
+    }
+
+    @Test("dictation selection does not notify or revise the meeting route")
+    func dictationSelectionDoesNotNotifyMeetingRoute() {
+        let inspector = FakeCoreAudioDeviceInspector(
+            defaultOutputDeviceID: 10,
+            outputRouteKind: .speakerLike,
+            defaultInputDeviceID: 82,
+            builtInInputDeviceID: 82,
+            inputDevices: [
+                AudioInputDeviceInfo(uid: "external-mic", name: "External Mic", deviceID: 91, isBuiltIn: false),
+                AudioInputDeviceInfo(uid: "built-in-mic", name: "MacBook Microphone", deviceID: 82, isBuiltIn: true),
+            ]
+        )
+        let routeQueue = DispatchQueue(label: "test.dictation-audio-route.dictation-independent")
+        let controller = DictationAudioRouteController(
+            inspector: inspector,
+            queue: routeQueue,
+            observesDefaultOutputChanges: false
+        )
+        routeQueue.sync {}
+        let initialRevision = controller.meetingInputRouteSelection().revision
+        var meetingCallbacks = 0
+        controller.onMeetingPreferredInputDeviceChanged = { _ in meetingCallbacks += 1 }
+
+        controller.selectedInputDeviceUID = "external-mic"
+        routeQueue.sync {}
+
+        #expect(controller.preferredInputDeviceIDForDictation() == 91)
+        #expect(controller.meetingInputRouteSelection().revision == initialRevision)
+        #expect(meetingCallbacks == 0)
+    }
+
+    @Test("default input identity changes notify meetings even when explicit capture ID is unchanged")
+    func defaultInputIdentityChangeNotifiesMeetingRoute() {
+        let inspector = FakeCoreAudioDeviceInspector(
+            defaultOutputDeviceID: 10,
+            outputRouteKind: .speakerLike,
+            defaultInputDeviceID: 91,
+            builtInInputDeviceID: 82,
+            inputDevices: [
+                AudioInputDeviceInfo(uid: "first-default", name: "First Default", deviceID: 91, isBuiltIn: false),
+                AudioInputDeviceInfo(uid: "second-default", name: "Second Default", deviceID: 92, isBuiltIn: false),
+                AudioInputDeviceInfo(uid: "built-in-mic", name: "MacBook Microphone", deviceID: 82, isBuiltIn: true),
+            ]
+        )
+        let routeQueue = DispatchQueue(label: "test.dictation-audio-route.default-input-identity")
+        let controller = DictationAudioRouteController(
+            inspector: inspector,
+            queue: routeQueue,
+            observesDefaultOutputChanges: false
+        )
+        routeQueue.sync {}
+        var routeSelections: [MeetingInputRouteSelection] = []
+        controller.onMeetingPreferredInputDeviceChanged = { routeSelections.append($0) }
+        let initialRevision = controller.meetingInputRouteSelection().revision
+
+        inspector.defaultInputDeviceIDValue = 92
+        controller.refreshRouteCache(notifyEvenIfPreferredUnchanged: true)
+        routeQueue.sync {}
+
+        #expect(routeSelections.count == 1)
+        #expect(routeSelections[0].preferredInputDeviceID == 82)
+        #expect(routeSelections[0].routeSnapshot.defaultInputDeviceID == 92)
+        #expect(routeSelections[0].revision > initialRevision)
     }
 
     @Test("synchronous route refresh clears an unavailable cached microphone")
@@ -382,6 +579,7 @@ struct DictationAudioRouteControllerTests {
             observesDefaultOutputChanges: false
         )
         controller.selectedInputDeviceUID = "external-mic"
+        controller.selectedMeetingInputDeviceUID = "external-mic"
         routeQueue.sync {}
         #expect(controller.cachedPreferredInputDeviceIDForDictation() == 91)
 

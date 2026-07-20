@@ -1,5 +1,6 @@
 import AVFoundation
 import AudioToolbox
+import AudioGraphExceptionBridge
 import CoreAudio
 import Darwin
 import Foundation
@@ -283,7 +284,13 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         set { routeLock.withLock { $0 = newValue } }
     }
 
-    private let engine = AVAudioEngine()
+    /// An AVAudioEngine that has observed an I/O configuration change is never
+    /// reused. AVFAudio retains the old node formats even after stop/reset, so
+    /// route recovery always swaps in a fresh graph instance.
+    private var engine: AVAudioEngine
+    private let engineFactory: () -> AVAudioEngine
+    private let audioDeviceInspector: CoreAudioDeviceInspector
+    private var engineGeneration: UInt64 = 0
     private let directoryName: String
     /// Sole owner of AVAudioEngine graph mutations. Delayed work is still
     /// generation-validated; queue ordering prevents concurrent stop/start.
@@ -305,12 +312,30 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
     )
     private var tapInstalled = false
     private var graphPreparedInputDeviceID: AudioObjectID?
+    private var graphPreparedRouteFingerprint: StreamingMicRouteFingerprint?
     private var isGraphPrepared = false
     private var configurationChangeObserver: (any NSObjectProtocol)?
+    private var routeSettlementWindow: RouteSettlementWindow?
 
     private struct FailureState {
         var activeRecordingID: UUID?
         var hasReportedFailure = false
+    }
+
+    private struct RouteObservation {
+        let fingerprint: StreamingMicRouteFingerprint
+        let outputFormat: AVAudioFormat
+    }
+
+    private struct RouteSettlementWindow {
+        let recordingID: UUID
+        let recoveryGeneration: UInt64
+        let hardDeadline: TimeInterval
+
+        func matches(_ request: StreamingMicRecoveryCoordinator.RestartRequest) -> Bool {
+            recordingID == request.settlementToken.recordingID
+                && recoveryGeneration == request.settlementToken.recoveryGeneration
+        }
     }
 
     private struct FileState {
@@ -323,12 +348,20 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
 
     private static let sampleRate: Double = 16_000
     private static let bufferSize: AVAudioFrameCount = 4096 // 256ms at 16kHz
+    private static let routeStabilityPollDelay: TimeInterval = 0.10
+    private static let routeStabilityTimeout: TimeInterval = 1.25
+    private static let routeStabilityHardTimeout: TimeInterval = 8.0
 
     init(
         directoryName: String = "muesli-meeting-mic",
         recoveryPolicy: StreamingMicRecoveryCoordinator.Policy = .production,
-        callbackDelivery: StreamingMicCallbackDeliveryGate = StreamingMicCallbackDeliveryGate()
+        callbackDelivery: StreamingMicCallbackDeliveryGate = StreamingMicCallbackDeliveryGate(),
+        engineFactory: @escaping () -> AVAudioEngine = { AVAudioEngine() },
+        audioDeviceInspector: CoreAudioDeviceInspector = CoreAudioDeviceInspector()
     ) {
+        self.engineFactory = engineFactory
+        engine = engineFactory()
+        self.audioDeviceInspector = audioDeviceInspector
         self.directoryName = directoryName
         self.callbackDelivery = callbackDelivery
         recoveryLock = OSAllocatedUnfairLock(initialState: StreamingMicRecoveryCoordinator(policy: recoveryPolicy))
@@ -360,32 +393,62 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
     private func prepareOnEngineQueue() throws {
         let requestedDeviceID = preferredInputDeviceID
         if isGraphPrepared,
-           graphPreparedInputDeviceID == requestedDeviceID {
+           graphPreparedInputDeviceID == requestedDeviceID,
+           let preparedFingerprint = graphPreparedRouteFingerprint {
+            let currentFingerprint = try? currentRouteObservationOnEngineQueue().fingerprint
+            if let currentFingerprint,
+               currentFingerprint.validationFailure == nil,
+               currentFingerprint == preparedFingerprint {
+                emitLatency("app_scoped_prepare_reused")
+                return
+            }
+
+            // The route moved while the graph was prewarmed. A reset is not
+            // sufficient because AVAudioEngine retains the old I/O formats.
+            replaceAudioEngineOnEngineQueue()
+        } else if isGraphPrepared {
+            replaceAudioEngineOnEngineQueue()
+        }
+
+        if isGraphPrepared {
             emitLatency("app_scoped_prepare_reused")
             return
         }
 
         emitLatency("app_scoped_prepare_begin")
-        AudioInputDeviceSelection.applyPreferredInputDeviceID(
-            requestedDeviceID,
-            to: engine,
-            logPrefix: "streaming-mic"
-        )
-        emitLatency("app_scoped_preferred_input_applied")
+        do {
+            try AudioInputDeviceSelection.applyPreferredInputDeviceID(
+                requestedDeviceID,
+                to: engine,
+                logPrefix: "streaming-mic"
+            )
+            emitLatency("app_scoped_preferred_input_applied")
 
-        let inputNode = engine.inputNode
-        let hwFormat = inputNode.outputFormat(forBus: 0)
-        guard hwFormat.sampleRate > 0 else {
-            isGraphPrepared = false
-            graphPreparedInputDeviceID = nil
-            throw NSError(domain: "StreamingMicRecorder", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "No audio input available",
-            ])
+            let beforePrepare = try currentRouteObservationOnEngineQueue().fingerprint
+            if let failure = beforePrepare.validationFailure {
+                throw Self.runtimeError(code: 1, message: failure)
+            }
+            if let error = MuesliAudioGraphPrepareEngine(engine) {
+                throw error
+            }
+            let afterPrepare = try currentRouteObservationOnEngineQueue().fingerprint
+            guard afterPrepare.validationFailure == nil,
+                  afterPrepare == beforePrepare else {
+                throw Self.runtimeError(
+                    code: 11,
+                    message: "The microphone route changed while its audio graph was being prepared"
+                )
+            }
+            isGraphPrepared = true
+            graphPreparedInputDeviceID = requestedDeviceID
+            graphPreparedRouteFingerprint = afterPrepare
+            emitLatency("app_scoped_prepare_end")
+        } catch {
+            // The prepare operation itself can poison AVFAudio's retained
+            // formats, so even an initial-start retry receives a fresh graph.
+            replaceAudioEngineOnEngineQueue()
+            throw error
         }
-        engine.prepare()
-        isGraphPrepared = true
-        graphPreparedInputDeviceID = requestedDeviceID
-        emitLatency("app_scoped_prepare_end")
     }
 
     func start() throws {
@@ -406,13 +469,29 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
                         message: "The previous microphone capture must be stopped or discarded before starting again"
                     )
                 }
-                try prepareOnEngineQueue()
+                routeSettlementWindow = nil
+                var initialGraphError: Error?
+                do {
+                    try prepareOnEngineQueue()
+                } catch {
+                    initialGraphError = error
+                }
 
                 // File creation precedes run activation. A filesystem failure must
                 // not leave a phantom active recording/failure generation behind.
                 let fileState = try createNewFile()
                 let recordingID = UUID()
-                let input = currentInputSnapshot()
+                let input: StreamingMicInputSnapshot
+                if initialGraphError == nil {
+                    do {
+                        input = try currentInputSnapshot()
+                    } catch {
+                        initialGraphError = error
+                        input = fallbackInputSnapshot()
+                    }
+                } else {
+                    input = fallbackInputSnapshot()
+                }
                 let captureToken = recoveryLock.withLock {
                     $0.beginRecording(
                         recordingID: recordingID,
@@ -428,11 +507,30 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
                 callbackDelivery.begin(recordingID)
                 lock.withLock { $0 = fileState }
 
+                if let initialGraphError {
+                    if beginInitialGraphRecoveryOnEngineQueue(
+                        captureToken: captureToken,
+                        previousInput: input,
+                        error: initialGraphError
+                    ) {
+                        return
+                    }
+                    recoveryLock.withLock { $0.endRecording(recordingID) }
+                    replaceAudioEngineOnEngineQueue()
+                    clearFailureState(recordingID: recordingID)
+                    _ = callbackDelivery.invalidate(recordingID)
+                    callbackRunToDrain = recordingID
+                    callbackDrainFence.withLock { $0.begin() }
+                    removeCurrentFile()
+                    throw initialGraphError
+                }
+
                 installConfigurationChangeObserverIfNeeded()
                 do {
                     try startEngineWithTapOnEngineQueue(captureToken: captureToken)
+                    let startedInput = try currentInputSnapshot()
                     let startedDecision = recoveryLock.withLock {
-                        $0.initialGraphStarted(token: captureToken, input: currentInputSnapshot())
+                        $0.initialGraphStarted(token: captureToken, input: startedInput)
                     }
                     guard case .awaitFirstBuffer(let timeoutToken, let timeoutDelay) = startedDecision else {
                         throw Self.runtimeError(
@@ -443,10 +541,21 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
                     isRunning = true
                     scheduleFirstBufferTimeout(timeoutToken, delay: timeoutDelay)
                 } catch {
+                    // A route transition can overlap initial meeting startup,
+                    // not only an established recording. Keep the meeting and
+                    // system-audio side alive while the same asynchronous
+                    // fresh-engine recovery path restores the microphone.
+                    if beginInitialGraphRecoveryOnEngineQueue(
+                        captureToken: captureToken,
+                        previousInput: input,
+                        error: error
+                    ) {
+                        return
+                    }
                     recoveryLock.withLock { $0.endRecording(recordingID) }
-                    removeTapIfNeeded()
-                    engine.stop()
-                    removeConfigurationChangeObserverIfNeeded()
+                    // A graph that failed setup may retain an incompatible
+                    // CoreAudio format. Discard the entire instance.
+                    replaceAudioEngineOnEngineQueue()
                     clearFailureState(recordingID: recordingID)
                     _ = callbackDelivery.invalidate(recordingID)
                     callbackRunToDrain = recordingID
@@ -463,15 +572,52 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         }
     }
 
+    private func beginInitialGraphRecoveryOnEngineQueue(
+        captureToken: StreamingMicRecoveryCoordinator.CaptureToken,
+        previousInput: StreamingMicInputSnapshot,
+        error: Error
+    ) -> Bool {
+        let recoveryDecision = recoveryLock.withLock {
+            let startedDecision = $0.initialGraphStarted(
+                token: captureToken,
+                input: previousInput
+            )
+            guard case .awaitFirstBuffer(let timeoutToken, _) = startedDecision else {
+                return StreamingMicRecoveryCoordinator.RecoveryFailureDecision.ignored
+            }
+            return $0.firstBufferTimedOut(
+                timeoutToken,
+                now: ProcessInfo.processInfo.systemUptime
+            )
+        }
+        guard case .retry = recoveryDecision else { return false }
+
+        replaceAudioEngineOnEngineQueue()
+        isRunning = true
+        emitLatency("initial_engine_start_recovery_scheduled")
+        handleRecoveryFailureOnEngineQueue(recoveryDecision, error: error)
+        return true
+    }
+
     /// Installs the input tap (with conversion to 16kHz mono) and starts the engine.
     /// Called only on `engineControlQueue`; restart taps keep appending to the
     /// same file while capture generations reject in-flight callbacks from the
     /// graph they replaced.
     private func startEngineWithTapOnEngineQueue(
-        captureToken: StreamingMicRecoveryCoordinator.CaptureToken
+        captureToken: StreamingMicRecoveryCoordinator.CaptureToken,
+        expectedRoute: StreamingMicRouteFingerprint? = nil
     ) throws {
-        let inputNode = engine.inputNode
-        let hwFormat = inputNode.outputFormat(forBus: 0)
+        let route = try currentRouteObservationOnEngineQueue()
+        if let failure = route.fingerprint.validationFailure {
+            throw Self.runtimeError(code: 12, message: failure)
+        }
+        if let expectedRoute, route.fingerprint != expectedRoute {
+            throw Self.runtimeError(
+                code: 13,
+                message: "The microphone route changed immediately before its tap was installed"
+            )
+        }
+        let hwFormat = route.outputFormat
 
         // Target format: 16kHz mono Float32
         guard let targetFormat = AVAudioFormat(
@@ -487,14 +633,35 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
 
         // Install converter if sample rates differ
         let needsConversion = hwFormat.sampleRate != Self.sampleRate || hwFormat.channelCount != 1
-        let converter: AVAudioConverter? = needsConversion
-            ? AVAudioConverter(from: hwFormat, to: targetFormat)
-            : nil
+        let converter: AVAudioConverter?
+        if needsConversion {
+            guard let createdConverter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
+                throw Self.runtimeError(
+                    code: 14,
+                    message: "Could not convert the current microphone format to 16 kHz mono"
+                )
+            }
+            converter = createdConverter
+        } else {
+            converter = nil
+        }
 
         emitLatency("app_scoped_tap_install_begin")
-        inputNode.installTap(onBus: 0, bufferSize: Self.bufferSize, format: nil) { [weak self] buffer, when in
+        let expectedTapFormat = StreamingMicAudioFormatFingerprint(hwFormat)
+        let tapEngineGeneration = engineGeneration
+        let tapBlock: AVAudioNodeTapBlock = { [weak self] buffer, when in
             guard let self else { return }
             guard self.recoveryLock.withLock({ $0.accepts(captureToken) }) else { return }
+            guard StreamingMicAudioFormatFingerprint(buffer.format) == expectedTapFormat else {
+                // A route can still move after start's postflight check. Do not
+                // let a differently formatted callback prove recovery.
+                self.engineControlQueue.async { [weak self] in
+                    self?.handleEngineConfigurationChangeOnEngineQueue(
+                        observedEngineGeneration: tapEngineGeneration
+                    )
+                }
+                return
+            }
 
             let monoBuffer: AVAudioPCMBuffer
             if let converter {
@@ -538,6 +705,9 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
             }
             let frameCount = Int(monoBuffer.frameLength)
             guard frameCount > 0 else { return }
+            let floatSamples = Array(
+                UnsafeBufferPointer(start: floatData, count: frameCount)
+            )
 
             // Write Int16 PCM to file
             let int16Samples: [Int16] = {
@@ -594,9 +764,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
                     recoveryEvent = nil
                 }
                 if recoveryEvent != nil || shouldEmit {
-                    let floats = shouldEmit
-                        ? Array(UnsafeBufferPointer(start: floatData, count: frameCount))
-                        : []
+                    let floats = shouldEmit ? floatSamples : []
                     // Bind handlers to this run as well as gating execution.
                     // Even an already-running callback can never read handlers
                     // installed later by a new recording.
@@ -628,11 +796,27 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
                 )
             }
         }
+        if let error = MuesliAudioGraphInstallInputTap(
+            engine,
+            0,
+            Self.bufferSize,
+            hwFormat,
+            tapBlock
+        ) {
+            throw error
+        }
         tapInstalled = true
         emitLatency("app_scoped_tap_install_end")
 
+        // Prepare after the tap has configured the candidate graph. This call
+        // is deliberately inside the Objective-C exception boundary too.
+        if let error = MuesliAudioGraphPrepareEngine(engine) {
+            throw error
+        }
         emitLatency("app_scoped_engine_start_begin")
-        try engine.start()
+        if let error = MuesliAudioGraphStartEngine(engine) {
+            throw error
+        }
         emitLatency("app_scoped_engine_start_end")
     }
 
@@ -645,13 +829,16 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
     /// the engine so capture continues into the same file.
     private func installConfigurationChangeObserverIfNeeded() {
         guard configurationChangeObserver == nil else { return }
+        let observedEngineGeneration = engineGeneration
         configurationChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
             queue: nil
         ) { [weak self] _ in
             self?.engineControlQueue.async { [weak self] in
-                self?.handleEngineConfigurationChangeOnEngineQueue()
+                self?.handleEngineConfigurationChangeOnEngineQueue(
+                    observedEngineGeneration: observedEngineGeneration
+                )
             }
         }
     }
@@ -662,22 +849,28 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         configurationChangeObserver = nil
     }
 
-    private func handleEngineConfigurationChangeOnEngineQueue() {
-        guard isRunning else { return }
+    private func handleEngineConfigurationChangeOnEngineQueue(
+        observedEngineGeneration: UInt64
+    ) {
+        guard isRunning, observedEngineGeneration == engineGeneration else { return }
         let decision = recoveryLock.withLock {
             $0.noteConfigurationChange(now: ProcessInfo.processInfo.systemUptime)
         }
         switch decision {
-        case .ignored, .coalesced:
+        case .ignored:
             return
+        case .coalesced:
+            // Yield the device immediately. The current rebuild will observe
+            // the newer coordinator generation and schedule a fresh graph.
+            teardownCurrentEngineGraphOnEngineQueue()
         case .schedule(let token, let delay):
+            // AVAudioEngine has already stopped its callbacks at this point.
+            // Explicitly release Muesli's tap while the meeting client settles.
+            teardownCurrentEngineGraphOnEngineQueue()
             emitLatency("engine_config_change_settling")
             scheduleSettlement(token, delay: delay)
         case .failed(let failure):
-            removeTapIfNeeded()
-            engine.stop()
-            isGraphPrepared = false
-            graphPreparedInputDeviceID = nil
+            replaceAudioEngineOnEngineQueue()
             handleRecoveryFailureOnEngineQueue(
                 .failed(failure),
                 error: Self.runtimeError(code: 9, message: failure.message)
@@ -702,51 +895,210 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         guard case .rebuild(let request) = decision else { return }
 
         emitLatency("engine_config_change_restart_begin")
-        removeTapIfNeeded()
-        engine.stop()
-        isGraphPrepared = false
-        graphPreparedInputDeviceID = nil
+        beginStableRouteRecoveryOnEngineQueue(request)
+    }
+
+    private func beginStableRouteRecoveryOnEngineQueue(
+        _ request: StreamingMicRecoveryCoordinator.RestartRequest
+    ) {
+        // Never rebuild on the AVAudioEngine that observed the route change.
+        // AVFAudio retains its previous node formats across stop/reset.
+        replaceAudioEngineOnEngineQueue()
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let window: RouteSettlementWindow
+        if let existing = routeSettlementWindow, existing.matches(request) {
+            window = existing
+        } else {
+            window = RouteSettlementWindow(
+                recordingID: request.settlementToken.recordingID,
+                recoveryGeneration: request.settlementToken.recoveryGeneration,
+                hardDeadline: now + Self.routeStabilityHardTimeout
+            )
+            routeSettlementWindow = window
+        }
 
         do {
-            try prepareOnEngineQueue()
-            let input = currentInputSnapshot()
-            let preparedDecision = recoveryLock.withLock {
-                $0.graphPrepared(for: request, input: input)
-            }
-            switch preparedDecision {
-            case .ignored:
-                return
-            case .scheduleTrailing(let trailingToken, let delay):
-                scheduleSettlement(trailingToken, delay: delay)
-                return
-            case .startGraph:
-                try startEngineWithTapOnEngineQueue(captureToken: request.captureToken)
-                emitLatency("engine_config_change_engine_started")
-                let startedInput = currentInputSnapshot()
-                let startedDecision = recoveryLock.withLock {
-                    $0.recoveryGraphStarted(for: request, input: startedInput)
-                }
-                switch startedDecision {
-                case .ignored:
-                    return
-                case .scheduleTrailing(let trailingToken, let delay):
-                    scheduleSettlement(trailingToken, delay: delay)
-                case .awaitFirstBuffer(let timeoutToken, let delay):
-                    scheduleFirstBufferTimeout(timeoutToken, delay: delay)
-                }
-            }
+            try AudioInputDeviceSelection.applyPreferredInputDeviceID(
+                preferredInputDeviceID,
+                to: engine,
+                logPrefix: "streaming-mic-recovery"
+            )
+            pollStableRouteOnEngineQueue(
+                request: request,
+                engineGeneration: engineGeneration,
+                gate: StreamingMicRouteStabilityGate(),
+                deadline: min(now + Self.routeStabilityTimeout, window.hardDeadline),
+                hardDeadline: window.hardDeadline,
+                lastWaitReason: "Waiting for the microphone route"
+            )
         } catch {
-            removeTapIfNeeded()
-            engine.stop()
-            isGraphPrepared = false
-            graphPreparedInputDeviceID = nil
-            handleRecoveryFailureOnEngineQueue(
-                recoveryLock.withLock {
-                    $0.graphStartFailed(request: request, message: error.localizedDescription)
-                },
+            deferUnstableRouteOnEngineQueue(
+                request: request,
+                hardDeadline: window.hardDeadline,
                 error: error
             )
         }
+    }
+
+    private func pollStableRouteOnEngineQueue(
+        request: StreamingMicRecoveryCoordinator.RestartRequest,
+        engineGeneration expectedEngineGeneration: UInt64,
+        gate incomingGate: StreamingMicRouteStabilityGate,
+        deadline: TimeInterval,
+        hardDeadline: TimeInterval,
+        lastWaitReason: String
+    ) {
+        guard isRunning, engineGeneration == expectedEngineGeneration else { return }
+
+        var gate = incomingGate
+        let observation: RouteObservation
+        do {
+            observation = try currentRouteObservationOnEngineQueue()
+        } catch {
+            deferUnstableRouteOnEngineQueue(
+                request: request,
+                hardDeadline: hardDeadline,
+                error: error
+            )
+            return
+        }
+        switch gate.observe(observation.fingerprint) {
+        case .ready(let stableRoute):
+            finishStableRouteRecoveryOnEngineQueue(
+                request: request,
+                expectedEngineGeneration: expectedEngineGeneration,
+                stableRoute: stableRoute
+            )
+
+        case .waiting(let reason):
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now < deadline else {
+                deferUnstableRouteOnEngineQueue(
+                    request: request,
+                    hardDeadline: hardDeadline,
+                    error: Self.runtimeError(
+                        code: 15,
+                        message: "Microphone route did not stabilize: \(reason.isEmpty ? lastWaitReason : reason)"
+                    )
+                )
+                return
+            }
+            let nextGate = gate
+            engineControlQueue.asyncAfter(deadline: .now() + Self.routeStabilityPollDelay) { [weak self] in
+                self?.pollStableRouteOnEngineQueue(
+                    request: request,
+                    engineGeneration: expectedEngineGeneration,
+                    gate: nextGate,
+                    deadline: deadline,
+                    hardDeadline: hardDeadline,
+                    lastWaitReason: reason
+                )
+            }
+        }
+    }
+
+    private func deferUnstableRouteOnEngineQueue(
+        request: StreamingMicRecoveryCoordinator.RestartRequest,
+        hardDeadline: TimeInterval,
+        error: Error
+    ) {
+        guard ProcessInfo.processInfo.systemUptime < hardDeadline else {
+            routeSettlementWindow = nil
+            failRecoveryGraphOnEngineQueue(request: request, error: error)
+            return
+        }
+
+        // Reading input-node state can itself raise while CoreAudio changes
+        // routes. Since no graph mutation has occurred, discard the candidate
+        // and defer without spending the graph-start retry budget.
+        replaceAudioEngineOnEngineQueue()
+        let settlementDecision = recoveryLock.withLock {
+            $0.routeStillSettling(for: request)
+        }
+        handleRecoveryFailureOnEngineQueue(settlementDecision, error: error)
+    }
+
+    private func finishStableRouteRecoveryOnEngineQueue(
+        request: StreamingMicRecoveryCoordinator.RestartRequest,
+        expectedEngineGeneration: UInt64,
+        stableRoute: StreamingMicRouteFingerprint
+    ) {
+        guard isRunning, engineGeneration == expectedEngineGeneration else { return }
+
+        let preparedDecision = recoveryLock.withLock {
+            $0.graphPrepared(for: request, input: inputSnapshot(from: stableRoute))
+        }
+        switch preparedDecision {
+        case .ignored:
+            routeSettlementWindow = nil
+            replaceAudioEngineOnEngineQueue()
+            return
+        case .scheduleTrailing(let trailingToken, let delay):
+            replaceAudioEngineOnEngineQueue()
+            scheduleSettlement(trailingToken, delay: delay)
+            return
+        case .startGraph:
+            routeSettlementWindow = nil
+            break
+        }
+
+        do {
+            // Observe changes on the candidate before graph mutation. A
+            // notification racing with setup is serialized behind this work;
+            // the explicit post-start validation closes the remaining window.
+            installConfigurationChangeObserverIfNeeded()
+            try startEngineWithTapOnEngineQueue(
+                captureToken: request.captureToken,
+                expectedRoute: stableRoute
+            )
+
+            let postStartRoute = try currentRouteObservationOnEngineQueue().fingerprint
+            guard postStartRoute.validationFailure == nil,
+                  postStartRoute == stableRoute else {
+                throw Self.runtimeError(
+                    code: 16,
+                    message: "The microphone route changed while its replacement graph was starting"
+                )
+            }
+
+            isGraphPrepared = true
+            graphPreparedInputDeviceID = preferredInputDeviceID
+            graphPreparedRouteFingerprint = postStartRoute
+            emitLatency("engine_config_change_engine_started")
+            let startedDecision = recoveryLock.withLock {
+                $0.recoveryGraphStarted(
+                    for: request,
+                    input: inputSnapshot(from: postStartRoute)
+                )
+            }
+            switch startedDecision {
+            case .ignored:
+                replaceAudioEngineOnEngineQueue()
+            case .scheduleTrailing(let trailingToken, let delay):
+                replaceAudioEngineOnEngineQueue()
+                scheduleSettlement(trailingToken, delay: delay)
+            case .awaitFirstBuffer(let timeoutToken, let delay):
+                scheduleFirstBufferTimeout(timeoutToken, delay: delay)
+            }
+        } catch {
+            failRecoveryGraphOnEngineQueue(request: request, error: error)
+        }
+    }
+
+    private func failRecoveryGraphOnEngineQueue(
+        request: StreamingMicRecoveryCoordinator.RestartRequest,
+        error: Error
+    ) {
+        // An exception or format mismatch poisons this graph identity. Retire
+        // it before asking the coordinator whether a bounded retry is allowed.
+        replaceAudioEngineOnEngineQueue()
+        handleRecoveryFailureOnEngineQueue(
+            recoveryLock.withLock {
+                $0.graphStartFailed(request: request, message: error.localizedDescription)
+            },
+            error: error
+        )
     }
 
     private func scheduleFirstBufferTimeout(
@@ -759,10 +1111,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
                 $0.firstBufferTimedOut(token, now: ProcessInfo.processInfo.systemUptime)
             }
             guard decision != .ignored else { return }
-            self.removeTapIfNeeded()
-            self.engine.stop()
-            self.isGraphPrepared = false
-            self.graphPreparedInputDeviceID = nil
+            self.replaceAudioEngineOnEngineQueue()
             self.handleRecoveryFailureOnEngineQueue(
                 decision,
                 error: Self.runtimeError(
@@ -785,7 +1134,8 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
             scheduleSettlement(token, delay: delay)
         case .failed(let failure):
             isRunning = false
-            removeConfigurationChangeObserverIfNeeded()
+            routeSettlementWindow = nil
+            replaceAudioEngineOnEngineQueue()
             emitLatency("engine_config_change_failed")
             guard let recordingID = failureLock.withLock({ $0.activeRecordingID }),
                   claimFailureDelivery(recordingID: recordingID) else { return }
@@ -837,9 +1187,8 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
             guard recordingID != nil || hasFile || isRunning else { return (nil, nil) }
             let invalidatedRun = invalidateCapture(recordingID: recordingID)
             isRunning = false
-            removeConfigurationChangeObserverIfNeeded()
-            removeTapIfNeeded()
-            engine.stop()
+            routeSettlementWindow = nil
+            replaceAudioEngineOnEngineQueue()
 
             let finalState = takeCurrentFile()
             return (finalizeFile(finalState), invalidatedRun)
@@ -897,11 +1246,8 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
                 recordingID: failureLock.withLock { $0.activeRecordingID }
             )
             isRunning = false
-            removeConfigurationChangeObserverIfNeeded()
-            removeTapIfNeeded()
-            engine.stop()
-            isGraphPrepared = false
-            graphPreparedInputDeviceID = nil
+            routeSettlementWindow = nil
+            replaceAudioEngineOnEngineQueue()
             removeCurrentFile()
             return invalidatedRun
         }
@@ -918,8 +1264,27 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
 
     private func removeTapIfNeeded() {
         guard tapInstalled else { return }
-        engine.inputNode.removeTap(onBus: 0)
         tapInstalled = false
+        if let error = MuesliAudioGraphRemoveInputTap(engine, 0) {
+            fputs("[streaming-mic] safe tap removal failed: \(error.localizedDescription)\n", stderr)
+        }
+    }
+
+    private func teardownCurrentEngineGraphOnEngineQueue() {
+        removeTapIfNeeded()
+        if let error = MuesliAudioGraphStopEngine(engine) {
+            fputs("[streaming-mic] safe engine stop failed: \(error.localizedDescription)\n", stderr)
+        }
+        isGraphPrepared = false
+        graphPreparedInputDeviceID = nil
+        graphPreparedRouteFingerprint = nil
+    }
+
+    private func replaceAudioEngineOnEngineQueue() {
+        removeConfigurationChangeObserverIfNeeded()
+        teardownCurrentEngineGraphOnEngineQueue()
+        engine = engineFactory()
+        engineGeneration &+= 1
     }
 
     private func clearFailureState(recordingID: UUID?) {
@@ -988,32 +1353,66 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         }
     }
 
-    private func currentInputSnapshot() -> StreamingMicInputSnapshot {
-        let format = engine.inputNode.outputFormat(forBus: 0)
-        return StreamingMicInputSnapshot(
-            requestedDeviceID: preferredInputDeviceID,
-            actualDeviceID: currentInputDeviceID(),
-            sampleRate: format.sampleRate,
-            channelCount: UInt32(format.channelCount)
+    private func currentInputSnapshot() throws -> StreamingMicInputSnapshot {
+        inputSnapshot(from: try currentRouteObservationOnEngineQueue().fingerprint)
+    }
+
+    private func inputSnapshot(
+        from fingerprint: StreamingMicRouteFingerprint
+    ) -> StreamingMicInputSnapshot {
+        StreamingMicInputSnapshot(
+            requestedDeviceID: fingerprint.requestedDeviceID,
+            actualDeviceID: fingerprint.actualDeviceID,
+            sampleRate: fingerprint.outputFormat.sampleRate,
+            channelCount: fingerprint.outputFormat.channelsPerFrame
         )
     }
 
-    private func currentInputDeviceID() -> AudioObjectID? {
-        guard let audioUnit = engine.inputNode.audioUnit else { return preferredInputDeviceID }
-        var deviceID = AudioObjectID(kAudioObjectUnknown)
-        var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
-        let status = AudioUnitGetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            &dataSize
+    private func fallbackInputSnapshot() -> StreamingMicInputSnapshot {
+        let defaultDeviceID = audioDeviceInspector.defaultInputDeviceID()
+        return StreamingMicInputSnapshot(
+            requestedDeviceID: preferredInputDeviceID,
+            actualDeviceID: defaultDeviceID,
+            sampleRate: defaultDeviceID.flatMap {
+                audioDeviceInspector.nominalSampleRate(for: $0)
+            } ?? 0,
+            channelCount: 0
         )
-        guard status == noErr, deviceID != AudioObjectID(kAudioObjectUnknown) else {
-            return preferredInputDeviceID
+    }
+
+    private func currentRouteObservationOnEngineQueue() throws -> RouteObservation {
+        let inputState = MuesliAudioGraphReadInputState(engine)
+        if let error = inputState.error {
+            throw error
         }
-        return deviceID
+        guard let outputFormat = inputState.outputFormat,
+              inputState.inputFormat != nil else {
+            throw Self.runtimeError(code: 17, message: "The microphone input format is unavailable")
+        }
+        let actualDeviceID = inputState.hasCurrentDevice
+            ? inputState.currentDeviceID
+            : nil
+        let actualDeviceIsAvailable = actualDeviceID.map {
+            audioDeviceInspector.isDeviceAvailable($0)
+        } ?? false
+        let nominalSampleRate = actualDeviceID.flatMap {
+            audioDeviceInspector.nominalSampleRate(for: $0)
+        }
+        return RouteObservation(
+            fingerprint: StreamingMicRouteFingerprint(
+                requestedDeviceID: preferredInputDeviceID,
+                defaultInputDeviceID: audioDeviceInspector.defaultInputDeviceID(),
+                actualDeviceID: actualDeviceID,
+                actualDeviceIsAvailable: actualDeviceIsAvailable,
+                actualDeviceIsSystemDefaultAggregate: actualDeviceID.map {
+                    audioDeviceInspector.isSystemDefaultAggregateDevice($0)
+                } ?? false,
+                actualNominalSampleRate: nominalSampleRate,
+                inputFormat: StreamingMicAudioFormatFingerprint(inputState.inputDescription),
+                outputFormat: StreamingMicAudioFormatFingerprint(inputState.outputDescription)
+            ),
+            outputFormat: outputFormat
+        )
     }
 
     private func takeCurrentFile() -> FileState {

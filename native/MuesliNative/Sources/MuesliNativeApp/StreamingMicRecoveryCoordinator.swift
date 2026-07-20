@@ -453,6 +453,30 @@ struct StreamingMicRecoveryCoordinator {
         return .startGraph
     }
 
+    /// Route discovery is deliberately outside the graph-start retry budget.
+    /// Bluetooth devices can remain transient for seconds without any graph
+    /// mutation being attempted. Rewind the provisional attempt allocated by
+    /// `settlementElapsed` and return to settlement with the same generation.
+    mutating func routeStillSettling(
+        for request: RestartRequest
+    ) -> RecoveryFailureDecision {
+        guard case .rebuilding(let run, var cycle, let token) = phase,
+              token == request.captureToken,
+              request.settlementToken.recordingID == run.recordingID,
+              request.settlementToken.recoveryGeneration == cycle.generation,
+              cycle.attemptCount > 0 else {
+            return .ignored
+        }
+
+        cycle.attemptCount -= 1
+        diagnostics.graphRestartAttemptCount = max(0, diagnostics.graphRestartAttemptCount - 1)
+        phase = .settling(run, cycle, nil)
+        return .retry(
+            settlementToken(for: run, cycle: cycle),
+            delay: policy.settlementDelay
+        )
+    }
+
     mutating func recoveryGraphStarted(
         for request: RestartRequest,
         input: StreamingMicInputSnapshot
