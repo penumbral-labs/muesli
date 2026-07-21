@@ -27,6 +27,22 @@ protocol PausableStreamingDictationRecording: AnyObject {
     func resume()
 }
 
+struct StreamingMicRecorderRunState: Equatable {
+    private(set) var isRunning = false
+
+    mutating func markStarted() {
+        isRunning = true
+    }
+
+    mutating func markStopped() {
+        isRunning = false
+    }
+
+    mutating func markConfigurationChangeRestartFailed() {
+        isRunning = false
+    }
+}
+
 final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictationLatencyReporting, PausableStreamingDictationRecording {
     /// Called with 4096-sample Float chunks (256ms at 16kHz) for VAD processing.
     var onAudioBuffer: (([Float]) -> Void)?
@@ -43,7 +59,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
     private let lock = OSAllocatedUnfairLock(initialState: FileState())
     private let failureLock = OSAllocatedUnfairLock(initialState: FailureState())
     private let failureCallbackQueue = DispatchQueue(label: "com.muesli.streaming-mic-recorder-failures")
-    private var isRunning = false
+    private var runState = StreamingMicRecorderRunState()
     private var tapInstalled = false
     private var graphPreparedInputDeviceID: AudioObjectID?
     private var isGraphPrepared = false
@@ -132,7 +148,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         graphLock.lock()
         defer { graphLock.unlock() }
 
-        guard !isRunning else { return }
+        guard !runState.isRunning else { return }
         try prepareLocked()
         let recordingID = UUID()
         failureLock.withLock {
@@ -146,7 +162,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         installConfigurationChangeObserverIfNeeded(recordingID: recordingID)
         do {
             try startEngineWithTapLocked(recordingID: recordingID)
-            isRunning = true
+            runState.markStarted()
         } catch {
             removeTapIfNeeded()
             stopEngineSafely()
@@ -335,7 +351,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         graphLock.lock()
         defer { graphLock.unlock() }
 
-        guard isRunning else { return }
+        guard runState.isRunning else { return }
         let mayRestart = failureLock.withLock {
             $0.activeRecordingID == recordingID && !$0.hasReportedFailure
         }
@@ -362,13 +378,14 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
             removeTapIfNeeded()
             stopEngineSafely()
             removeConfigurationChangeObserverIfNeeded()
+            runState.markConfigurationChangeRestartFailed()
             reportRecordingFailure(error, recordingID: recordingID)
         }
     }
 
     /// Rotate to a new file. Returns the completed WAV URL. No audio gap.
     func rotateFile() -> URL? {
-        guard isRunning else { return nil }
+        guard runState.isRunning else { return nil }
 
         let newState: FileState
         do {
@@ -392,8 +409,8 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         graphLock.lock()
         defer { graphLock.unlock() }
 
-        guard isRunning else { return nil }
-        isRunning = false
+        guard runState.isRunning else { return nil }
+        runState.markStopped()
         clearFailureState()
         removeConfigurationChangeObserverIfNeeded()
 
@@ -410,7 +427,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
     }
 
     func pause() {
-        guard isRunning else { return }
+        guard runState.isRunning else { return }
         lock.withLock { state in
             state.isPaused = true
             state.latestPowerDB = -160
@@ -418,7 +435,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
     }
 
     func resume() {
-        guard isRunning else { return }
+        guard runState.isRunning else { return }
         lock.withLock { state in
             state.isPaused = false
         }
@@ -428,7 +445,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         graphLock.lock()
         defer { graphLock.unlock() }
 
-        isRunning = false
+        runState.markStopped()
         clearFailureState()
         removeConfigurationChangeObserverIfNeeded()
         removeTapIfNeeded()

@@ -127,6 +127,7 @@ final class RouteAwareMeetingMicRecorder: MeetingMicRecording {
         let deviceID: AudioObjectID?
     }
     typealias RecorderFactory = () -> MeetingMicRecording
+    typealias HandoffTimeoutScheduler = (TimeInterval, DispatchWorkItem) -> Void
 
     var preferredInputDeviceID: AudioObjectID? {
         get { lock.withLock { $0.preferredInputDeviceIDStorage } }
@@ -164,6 +165,7 @@ final class RouteAwareMeetingMicRecorder: MeetingMicRecording {
     private let handoffWorkerQueue: DispatchQueue
     private let cleanupQueue: DispatchQueue
     private let handoffTimeout: TimeInterval
+    private let scheduleHandoffTimeout: HandoffTimeoutScheduler
     private let lock = OSAllocatedUnfairLock(initialState: State())
 
     private struct State {
@@ -200,7 +202,8 @@ final class RouteAwareMeetingMicRecorder: MeetingMicRecording {
             label: "com.muesli.route-aware-meeting-mic-recorder-cleanup",
             attributes: .concurrent
         ),
-        handoffTimeout: TimeInterval = 2
+        handoffTimeout: TimeInterval = 2,
+        handoffTimeoutScheduler: HandoffTimeoutScheduler? = nil
     ) {
         self.seededSystemDefaultRecorder = systemDefaultRecorder
         self.seededAppScopedRecorder = appScopedRecorder
@@ -211,6 +214,9 @@ final class RouteAwareMeetingMicRecorder: MeetingMicRecording {
         self.handoffWorkerQueue = handoffWorkerQueue
         self.cleanupQueue = cleanupQueue
         self.handoffTimeout = handoffTimeout
+        self.scheduleHandoffTimeout = handoffTimeoutScheduler ?? { delay, workItem in
+            lifecycleQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
+        }
     }
 
     func activeRecorderKindForDebug() -> ActiveRecorderKind {
@@ -372,15 +378,18 @@ final class RouteAwareMeetingMicRecorder: MeetingMicRecording {
         // Schedule the wall-clock deadline before starting the graph. CoreAudio
         // can block inside AudioQueueStart, so a timeout scheduled afterward is
         // not a real bound and can also hold stop/discard behind it.
-        lifecycleQueue.asyncAfter(deadline: .now() + handoffTimeout) { [weak self] in
-            self?.failPendingHandoff(
-                candidateID: candidate.id,
-                generation: generation,
-                error: NSError(domain: "MeetingMicrophoneRoute", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "The selected microphone did not produce audio."
-                ])
-            )
-        }
+        scheduleHandoffTimeout(
+            handoffTimeout,
+            DispatchWorkItem { [weak self] in
+                self?.failPendingHandoff(
+                    candidateID: candidate.id,
+                    generation: generation,
+                    error: NSError(domain: "MeetingMicrophoneRoute", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "The selected microphone did not produce audio."
+                    ])
+                )
+            }
+        )
         handoffWorkerQueue.async { [weak self] in
             do {
                 try candidate.recorder.prepare()
