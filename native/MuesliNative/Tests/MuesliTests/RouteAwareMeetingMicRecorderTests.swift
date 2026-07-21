@@ -62,6 +62,8 @@ struct RouteAwareMeetingMicRecorderTests {
     func lifecycleDelegatesToActiveRecorderAndCancelsInactiveRecorderOnStop() throws {
         let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
         let appScoped = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let inactiveCancelled = DispatchSemaphore(value: 0)
+        system.onCancel = { inactiveCancelled.signal() }
         let recorder = RouteAwareMeetingMicRecorder(systemDefaultRecorder: system, appScopedRecorder: appScoped)
         recorder.preferredInputDeviceID = 91
 
@@ -74,7 +76,7 @@ struct RouteAwareMeetingMicRecorderTests {
         #expect(appScoped.pauseCalls == 1)
         #expect(appScoped.resumeCalls == 1)
         #expect(appScoped.stopCalls == 1)
-        #expect(system.cancelCalls >= 1)
+        #expect(inactiveCancelled.wait(timeout: .now() + 1) == .success)
     }
 
     @Test("diagnostics include active recorder kind and route snapshot")
@@ -158,6 +160,163 @@ struct RouteAwareMeetingMicRecorderTests {
         #expect(samples == [[7]])
     }
 
+    @Test("active recorder failure rebuilds the same route and recovers on first buffer")
+    func activeFailureRebuildsSameRoute() async throws {
+        let failed = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let replacement = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: failed,
+            appScopedRecorder: FakeMeetingMicRecorder(kind: .appScopedAudioQueue),
+            systemDefaultRecorderFactory: { replacement },
+            handoffTimeout: 1
+        )
+        var failures = 0
+        var samples: [[Int16]] = []
+        recorder.onRecordingFailed = { _ in failures += 1 }
+        recorder.onRawPCMSamples = { samples.append($0) }
+
+        try recorder.start()
+        failed.onRecordingFailed?(NSError(domain: "test", code: 2))
+
+        try await waitUntil { replacement.startCalls == 1 }
+        #expect(recorder.isTerminallyFailedForDebug())
+        #expect(failures == 1)
+
+        replacement.onRawPCMSamples?([8, 9])
+        try await waitUntil { !recorder.isTerminallyFailedForDebug() }
+
+        #expect(samples == [[8, 9]])
+        #expect(failed.stopCalls == 1)
+    }
+
+    @Test("same route can retry after a terminal recovery failure")
+    func sameRouteRetriesAfterTerminalFailure() async throws {
+        let initial = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let failedReplacement = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        failedReplacement.startError = NSError(domain: "test", code: 3)
+        let recoveredReplacement = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        var replacements = [failedReplacement, recoveredReplacement]
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: initial,
+            appScopedRecorder: FakeMeetingMicRecorder(kind: .appScopedAudioQueue),
+            systemDefaultRecorderFactory: { replacements.removeFirst() },
+            handoffTimeout: 1
+        )
+
+        try recorder.start()
+        initial.onRecordingFailed?(NSError(domain: "test", code: 2))
+        try await waitUntil { failedReplacement.cancelCalls == 1 }
+
+        #expect(recorder.isTerminallyFailedForDebug())
+        recorder.preferredInputDeviceID = nil
+        try await waitUntil { recoveredReplacement.startCalls == 1 }
+        recoveredReplacement.onRawPCMSamples?([3, 2, 0])
+        try await waitUntil { !recorder.isTerminallyFailedForDebug() }
+
+        #expect(recoveredReplacement.startCalls == 1)
+        #expect(initial.stopCalls == 1)
+    }
+
+    @Test("discard returns while a replacement start is blocked")
+    func discardDoesNotWaitForBlockedReplacementStart() throws {
+        let startEntered = DispatchSemaphore(value: 0)
+        let allowStart = DispatchSemaphore(value: 0)
+        let replacementCancelled = DispatchSemaphore(value: 0)
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let replacement = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        replacement.onStart = {
+            startEntered.signal()
+            _ = allowStart.wait(timeout: .now() + 2)
+        }
+        replacement.onCancel = { replacementCancelled.signal() }
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: replacement,
+            handoffTimeout: 1
+        )
+        var deliveredSamples: [[Int16]] = []
+        recorder.onRawPCMSamples = { deliveredSamples.append($0) }
+
+        try recorder.start()
+        recorder.preferredInputDeviceID = 91
+        #expect(startEntered.wait(timeout: .now() + 1) == .success)
+
+        let startedAt = Date()
+        recorder.cancel()
+        let elapsed = Date().timeIntervalSince(startedAt)
+        allowStart.signal()
+
+        #expect(elapsed < 0.2)
+        #expect(replacementCancelled.wait(timeout: .now() + 1) == .success)
+        replacement.onRawPCMSamples?([4, 2])
+        #expect(deliveredSamples.isEmpty)
+    }
+
+    @Test("stop returns while a replacement start is blocked")
+    func stopDoesNotWaitForBlockedReplacementStart() throws {
+        let startEntered = DispatchSemaphore(value: 0)
+        let allowStart = DispatchSemaphore(value: 0)
+        let replacementCancelled = DispatchSemaphore(value: 0)
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let replacement = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        replacement.onStart = {
+            startEntered.signal()
+            _ = allowStart.wait(timeout: .now() + 2)
+        }
+        replacement.onCancel = { replacementCancelled.signal() }
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: replacement,
+            handoffTimeout: 1
+        )
+
+        try recorder.start()
+        recorder.preferredInputDeviceID = 93
+        #expect(startEntered.wait(timeout: .now() + 1) == .success)
+
+        let startedAt = Date()
+        _ = recorder.stop()
+        let elapsed = Date().timeIntervalSince(startedAt)
+        allowStart.signal()
+
+        #expect(elapsed < 0.2)
+        #expect(system.stopCalls == 1)
+        #expect(replacementCancelled.wait(timeout: .now() + 1) == .success)
+    }
+
+    @Test("handoff timeout runs while replacement start is blocked")
+    func handoffTimeoutBoundsBlockedReplacementStart() throws {
+        let startEntered = DispatchSemaphore(value: 0)
+        let allowStart = DispatchSemaphore(value: 0)
+        let replacementCancelled = DispatchSemaphore(value: 0)
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let replacement = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        replacement.onStart = {
+            startEntered.signal()
+            _ = allowStart.wait(timeout: .now() + 2)
+        }
+        replacement.onCancel = { replacementCancelled.signal() }
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: replacement,
+            handoffTimeout: 0.05
+        )
+        var samples: [[Int16]] = []
+        recorder.onRawPCMSamples = { samples.append($0) }
+
+        try recorder.start()
+        recorder.preferredInputDeviceID = 92
+        #expect(startEntered.wait(timeout: .now() + 1) == .success)
+        #expect(replacementCancelled.wait(timeout: .now() + 1) == .success)
+
+        system.onRawPCMSamples?([7])
+        allowStart.signal()
+        replacement.onRawPCMSamples?([9])
+
+        #expect(samples == [[7]])
+        #expect(recorder.activeRecorderKindForDebug() == .systemDefault)
+    }
+
     private func waitUntil(
         timeout: Duration = .seconds(1),
         condition: @escaping () -> Bool
@@ -187,6 +346,8 @@ private final class FakeMeetingMicRecorder: MeetingMicRecording {
     var stopCalls = 0
     var cancelCalls = 0
     var startError: Error?
+    var onStart: (() -> Void)?
+    var onCancel: (() -> Void)?
 
     init(kind: MeetingMicRecorderKind) {
         self.kind = kind
@@ -198,6 +359,7 @@ private final class FakeMeetingMicRecorder: MeetingMicRecording {
 
     func start() throws {
         startCalls += 1
+        onStart?()
         if let startError { throw startError }
     }
 
@@ -216,6 +378,7 @@ private final class FakeMeetingMicRecorder: MeetingMicRecording {
 
     func cancel() {
         cancelCalls += 1
+        onCancel?()
     }
 
     func currentPower() -> Float {

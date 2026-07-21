@@ -27,3 +27,20 @@ The active branch now preserves contributor history but reverses the broad lifec
 ## Validation target
 
 Run focused route, config, and diagnostic suites, then the complete Swift package test suite. Real-world validation should start a meeting on the built-in microphone, connect and disconnect AirPods, change only the Meetings selector while macOS remains on its existing input, and verify local speech before and after each transition.
+
+## Follow-up hardening
+
+The focused branch now closes three meeting-only lifecycle gaps without restoring the broad `6d515c45` implementation:
+
+- An active microphone failure enters a terminal failed state and immediately rebuilds the same selected route. A later same-route selection can retry if the first recovery fails. The replacement becomes active only after its first non-empty buffer.
+- Replacement preparation and startup run on a dedicated worker lane. Its wall-clock timeout is scheduled before startup, and stop or discard detaches pending work without waiting for a blocked CoreAudio start or disposal.
+- Meeting-enabled `StreamingMicRecorder` reads the input format and selects an explicit input device through the Objective-C exception bridge. Dictation retains its existing default path.
+
+Deterministic coverage now includes active failure recovery, failed same-route retry, blocked-start timeout, stop during blocked startup, discard during blocked startup, stale callback rejection, and protected AVFAudio input reads and routing.
+
+Validation on 21 July 2026:
+
+- `RouteAwareMeetingMicRecorderTests`: 12 passed.
+- `AudioGraphExceptionBridgeTests`: 2 passed.
+- Complete Swift package: 1,421 tests in 139 suites passed.
+- The eSSD sparse-bundle cache was not mounted, so validation reused `/private/tmp/muesli-spm-pr333-greploop` instead of creating a new local build cache.

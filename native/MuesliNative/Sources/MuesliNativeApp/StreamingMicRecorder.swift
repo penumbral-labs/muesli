@@ -96,15 +96,21 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         }
 
         emitLatency("app_scoped_prepare_begin")
-        AudioInputDeviceSelection.applyPreferredInputDeviceID(
-            preferredInputDeviceID,
-            to: engine,
-            logPrefix: "streaming-mic"
-        )
+        if recoversFromInputConfigurationChanges {
+            if let preferredInputDeviceID,
+               let error = MuesliAudioGraphSetInputDevice(engine, preferredInputDeviceID) {
+                throw error
+            }
+        } else {
+            AudioInputDeviceSelection.applyPreferredInputDeviceID(
+                preferredInputDeviceID,
+                to: engine,
+                logPrefix: "streaming-mic"
+            )
+        }
         emitLatency("app_scoped_preferred_input_applied")
 
-        let inputNode = engine.inputNode
-        let hwFormat = inputNode.outputFormat(forBus: 0)
+        let hwFormat = try inputFormatLocked()
         guard hwFormat.sampleRate > 0 else {
             isGraphPrepared = false
             graphPreparedInputDeviceID = nil
@@ -162,8 +168,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
     /// Callers hold `graphLock`. Shared by `start()` and the configuration-change
     /// restart path, so the tap keeps appending to the current file.
     private func startEngineWithTapLocked(recordingID: UUID) throws {
-        let inputNode = engine.inputNode
-        let hwFormat = inputNode.outputFormat(forBus: 0)
+        let hwFormat = try inputFormatLocked()
 
         // Target format: 16kHz mono Float32
         guard let targetFormat = AVAudioFormat(
@@ -272,7 +277,7 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
                 throw tapError
             }
         } else {
-            inputNode.installTap(onBus: 0, bufferSize: Self.bufferSize, format: nil, block: tapBlock)
+            engine.inputNode.installTap(onBus: 0, bufferSize: Self.bufferSize, format: nil, block: tapBlock)
         }
         tapInstalled = true
         emitLatency("app_scoped_tap_install_end")
@@ -284,6 +289,18 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
             try engine.start()
         }
         emitLatency("app_scoped_engine_start_end")
+    }
+
+    private func inputFormatLocked() throws -> AVAudioFormat {
+        if recoversFromInputConfigurationChanges {
+            let state = MuesliAudioGraphReadInputState(engine)
+            if let error = state.error { throw error }
+            guard let format = state.outputFormat else {
+                throw Self.runtimeError(code: 6, message: "Microphone input format is unavailable")
+            }
+            return format
+        }
+        return engine.inputNode.outputFormat(forBus: 0)
     }
 
     // MARK: - Input Configuration Changes
