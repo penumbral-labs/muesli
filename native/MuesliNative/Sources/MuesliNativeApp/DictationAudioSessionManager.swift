@@ -360,37 +360,6 @@ final class DictationAudioSessionManager: @unchecked Sendable {
         }
     }
 
-    /// Establishes a hard handoff from dictation capture to meeting capture.
-    ///
-    /// Unlike the fire-and-forget cancellation APIs used by UI interactions,
-    /// this transition resumes only after every earlier manager operation and
-    /// the recorder's own serialized teardown have completed. It also tears
-    /// down idle/prewarmed graphs, which do not have an active session to cancel.
-    func quiesceForMeeting() async {
-        await withCheckedContinuation { continuation in
-            queue.async { [self] in
-                let sessionID = stateStorage.sessionID
-                let hadSession = sessionID != nil || externalSessionActive
-
-                cancelPendingRouteRefreshLocked()
-                recorder.keepsAudioGraphWarm = false
-                recorder.cancel()
-                activeRecorderRunID = nil
-                recorder.preferredInputDeviceID = nil
-                stateStorage = .idle
-                externalSessionActive = false
-                clearSessionHint(nil)
-                setExternalSessionHint(false)
-                emitLatency("quiesced_for_meeting")
-                if hadSession {
-                    restoreSessionAudioState()
-                    emit(.cancelled(sessionID, reason: "meeting-active"))
-                }
-                continuation.resume()
-            }
-        }
-    }
-
     func refreshRoute(intent: DictationWarmupIntent, delay: TimeInterval = 0, canWarmUp: Bool) {
         routingController.refreshRouteCache()
         queue.async { [self] in

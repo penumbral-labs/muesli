@@ -6,7 +6,6 @@ enum MeetingMicHealthState: String, Codable, Equatable {
     case waitingForAudio
     case micCallbacksMissing
     case micAllZeroWhileSystemActive
-    case captureFailed
 
     var userMessage: String? {
         switch self {
@@ -16,8 +15,6 @@ enum MeetingMicHealthState: String, Codable, Equatable {
             return "Microphone audio is not reaching Muesli. This meeting transcript may miss your side."
         case .micAllZeroWhileSystemActive:
             return "Microphone audio is silent. This meeting transcript may miss your side."
-        case .captureFailed:
-            return "Muesli could not resume microphone capture. This meeting transcript may miss your side."
         }
     }
 }
@@ -86,7 +83,7 @@ final class MeetingMicHealthTracker {
             let hasSignal = stats.peak > Self.nonZeroMicPeakThreshold
                 || zeroRatio < Self.zeroRatioThreshold
             state.lastRawMicWasEffectivelyZero = !hasSignal
-            if hasSignal, state.healthState != .captureFailed {
+            if hasSignal {
                 state.firstNonZeroMicAt = state.firstNonZeroMicAt ?? now
                 state.lastNonZeroMicAt = now
                 state.activeSystemSamplesWhileMicMissing = 0
@@ -107,12 +104,6 @@ final class MeetingMicHealthTracker {
 
             state.firstSystemAudioAt = state.firstSystemAudioAt ?? now
             state.lastSystemAudioAt = now
-            // A typed recorder failure is authoritative. System activity can
-            // refine heuristic missing/zero diagnoses, but it must not
-            // downgrade a known failed graph before a real recovery event.
-            guard state.healthState != .captureFailed else {
-                return snapshotLocked(state)
-            }
 
             if state.lastRawMicCallbackAt == nil {
                 state.activeSystemSamplesWhileMicMissing += samples.count
@@ -140,22 +131,6 @@ final class MeetingMicHealthTracker {
 
     func snapshot() -> MeetingMicHealthSnapshot {
         lock.withLock { snapshotLocked($0) }
-    }
-
-    func noteCaptureFailure(reason: String, now: Date = Date()) -> MeetingMicHealthSnapshot {
-        lock.withLock { state in
-            transitionLocked(&state, to: .captureFailed, reason: reason, now: now)
-            return snapshotLocked(state)
-        }
-    }
-
-    func noteCaptureRecovered(now: Date = Date()) -> MeetingMicHealthSnapshot {
-        lock.withLock { state in
-            state.activeSystemSamplesWhileMicMissing = 0
-            state.activeSystemSamplesWhileMicZero = 0
-            transitionLocked(&state, to: .waitingForAudio, reason: "microphone_capture_recovered", now: now)
-            return snapshotLocked(state)
-        }
     }
 
     private func transitionLocked(

@@ -38,99 +38,12 @@ final class MeetingRecordingWriter {
         }
     }
 
-    private struct SourceSpan {
-        enum Payload {
-            case audio([Int16])
-            case missing
-        }
-
-        let start: Int64
-        let end: Int64
-        let payload: Payload
-
-        func sample(at position: Int64) -> Int16? {
-            guard position >= start, position < end else { return nil }
-            switch payload {
-            case .audio(let samples):
-                return samples[Int(position - start)]
-            case .missing:
-                return nil
-            }
-        }
-    }
-
-    /// A source-local logical clock. Spans are kept in capture order so a
-    /// microphone outage cannot be accidentally moved across recovered audio
-    /// while the other source is catching up.
-    private struct SourceTimeline {
-        var frontier: Int64 = 0
-        private var spans: [SourceSpan] = []
-        private var firstSpanIndex = 0
-
-        mutating func appendAudio(_ samples: [Int16]) {
-            guard !samples.isEmpty, frontier < Int64.max else { return }
-            let acceptedCount = Int(min(Int64(samples.count), Int64.max - frontier))
-            guard acceptedCount > 0 else { return }
-
-            let acceptedSamples = acceptedCount == samples.count
-                ? samples
-                : Array(samples.prefix(acceptedCount))
-            let end = frontier + Int64(acceptedCount)
-            spans.append(SourceSpan(start: frontier, end: end, payload: .audio(acceptedSamples)))
-            frontier = end
-        }
-
-        mutating func appendMissing(sampleCount: Int64) {
-            let acceptedCount = min(max(0, sampleCount), Int64.max - frontier)
-            guard acceptedCount > 0 else { return }
-
-            let end = frontier + acceptedCount
-            if let lastSpanIndex = spans.indices.last,
-               lastSpanIndex >= firstSpanIndex,
-               case .missing = spans[lastSpanIndex].payload,
-               spans[lastSpanIndex].end == frontier {
-                let previous = spans.removeLast()
-                spans.append(SourceSpan(start: previous.start, end: end, payload: .missing))
-            } else {
-                spans.append(SourceSpan(start: frontier, end: end, payload: .missing))
-            }
-            frontier = end
-        }
-
-        func span(containing position: Int64) -> SourceSpan? {
-            guard firstSpanIndex < spans.count else { return nil }
-            let span = spans[firstSpanIndex]
-            return position >= span.start && position < span.end ? span : nil
-        }
-
-        mutating func discardSpans(endingAtOrBefore position: Int64) {
-            while firstSpanIndex < spans.count, spans[firstSpanIndex].end <= position {
-                firstSpanIndex += 1
-            }
-
-            if firstSpanIndex == spans.count {
-                spans.removeAll(keepingCapacity: true)
-                firstSpanIndex = 0
-            } else if firstSpanIndex >= 64, firstSpanIndex * 2 >= spans.count {
-                spans.removeFirst(firstSpanIndex)
-                firstSpanIndex = 0
-            }
-        }
-
-        mutating func rebase(at position: Int64) {
-            frontier = position
-            spans.removeAll(keepingCapacity: true)
-            firstSpanIndex = 0
-        }
-    }
-
     private struct State {
         var fileHandle: FileHandle?
         var fileURL: URL?
         var bytesWritten: Int = 0
-        var outputCursor: Int64 = 0
-        var mic = SourceTimeline()
-        var system = SourceTimeline()
+        var pendingMic: [Int16] = []
+        var pendingSystem: [Int16] = []
     }
 
     private let lock = OSAllocatedUnfairLock(initialState: State())
@@ -164,7 +77,7 @@ final class MeetingRecordingWriter {
 
     func stop() -> URL? {
         lock.withLock { state in
-            writeAvailableSamples(state: &state, flushAll: true)
+            writeMixedSamples(state: &state, flushAll: true)
             guard let fileHandle = state.fileHandle, let fileURL = state.fileURL else { return nil }
 
             fileHandle.seek(toFileOffset: 0)
@@ -184,19 +97,7 @@ final class MeetingRecordingWriter {
 
     func markPauseBoundary() {
         lock.withLock { state in
-            writeAvailableSamples(state: &state, flushAll: true)
-            state.mic.rebase(at: state.outputCursor)
-            state.system.rebase(at: state.outputCursor)
-        }
-    }
-
-    /// Advance only the microphone's logical clock for an observed outage.
-    /// Keeping the gap in the source timeline preserves its ordering relative
-    /// to recovered mic audio, even if older system callbacks arrive later.
-    func markMicDiscontinuity(missingSampleCount: Int64) {
-        lock.withLock { state in
-            state.mic.appendMissing(sampleCount: missingSampleCount)
-            writeAvailableSamples(state: &state, flushAll: false)
+            writeMixedSamples(state: &state, flushAll: true)
         }
     }
 
@@ -251,68 +152,28 @@ final class MeetingRecordingWriter {
         guard !samples.isEmpty else { return }
         lock.withLock { state in
             if toMic {
-                state.mic.appendAudio(samples)
+                state.pendingMic.append(contentsOf: samples)
             } else {
-                state.system.appendAudio(samples)
+                state.pendingSystem.append(contentsOf: samples)
             }
-            writeAvailableSamples(state: &state, flushAll: false)
+            writeMixedSamples(state: &state, flushAll: false)
         }
     }
 
-    private func writeAvailableSamples(state: inout State, flushAll: Bool) {
-        let target = flushAll
-            ? max(state.mic.frontier, state.system.frontier)
-            : min(state.mic.frontier, state.system.frontier)
-        guard target > state.outputCursor else { return }
+    private func writeMixedSamples(state: inout State, flushAll: Bool) {
+        let availableCount = flushAll
+            ? max(state.pendingMic.count, state.pendingSystem.count)
+            : min(state.pendingMic.count, state.pendingSystem.count)
+        guard availableCount > 0 else { return }
 
-        // Bound allocations when one source is absent for a long time.
-        let maximumWriteSampleCount: Int64 = 16_000
-        while state.outputCursor < target {
-            state.mic.discardSpans(endingAtOrBefore: state.outputCursor)
-            state.system.discardSpans(endingAtOrBefore: state.outputCursor)
+        let mixedSamples = Self.mix(
+            mic: Array(state.pendingMic.prefix(availableCount)),
+            system: Array(state.pendingSystem.prefix(availableCount))
+        )
+        state.pendingMic.removeFirst(min(availableCount, state.pendingMic.count))
+        state.pendingSystem.removeFirst(min(availableCount, state.pendingSystem.count))
 
-            let micSpan = state.mic.span(containing: state.outputCursor)
-            let systemSpan = state.system.span(containing: state.outputCursor)
-            let micBoundary = micSpan?.end ?? target
-            let systemBoundary = systemSpan?.end ?? target
-            let boundedWriteEnd = state.outputCursor > Int64.max - maximumWriteSampleCount
-                ? Int64.max
-                : state.outputCursor + maximumWriteSampleCount
-            let segmentEnd = min(
-                target,
-                boundedWriteEnd,
-                micBoundary,
-                systemBoundary
-            )
-            guard segmentEnd > state.outputCursor else { break }
-
-            let count = Int(segmentEnd - state.outputCursor)
-            var mixedSamples = [Int16]()
-            mixedSamples.reserveCapacity(count)
-            for offset in 0..<count {
-                let position = state.outputCursor + Int64(offset)
-                let micSample = micSpan?.sample(at: position)
-                let systemSample = systemSpan?.sample(at: position)
-                switch (micSample, systemSample) {
-                case let (.some(mic), .some(system)):
-                    mixedSamples.append(Int16(clamping: (Int(mic) + Int(system)) / 2))
-                case let (.some(mic), .none):
-                    mixedSamples.append(mic)
-                case let (.none, .some(system)):
-                    mixedSamples.append(system)
-                case (.none, .none):
-                    mixedSamples.append(0)
-                }
-            }
-
-            writeSamples(mixedSamples, state: &state)
-            state.outputCursor = segmentEnd
-        }
-    }
-
-    private func writeSamples(_ samples: [Int16], state: inout State) {
-        guard !samples.isEmpty else { return }
-        let pcmData = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+        let pcmData = mixedSamples.withUnsafeBufferPointer { Data(buffer: $0) }
         state.fileHandle?.write(pcmData)
         state.bytesWritten += pcmData.count
     }
@@ -333,6 +194,24 @@ final class MeetingRecordingWriter {
             .lowercased()
 
         return slug.isEmpty ? timestamp : "\(timestamp)-\(slug)"
+    }
+
+    private static func mix(mic: [Int16], system: [Int16]) -> [Int16] {
+        let maxCount = max(mic.count, system.count)
+        var output = [Int16]()
+        output.reserveCapacity(maxCount)
+
+        for index in 0..<maxCount {
+            let hasMic = index < mic.count
+            let hasSystem = index < system.count
+            let micValue = hasMic ? Int(mic[index]) : 0
+            let systemValue = hasSystem ? Int(system[index]) : 0
+            let contributors = (hasMic ? 1 : 0) + (hasSystem ? 1 : 0)
+            let averaged = contributors == 0 ? 0 : (micValue + systemValue) / contributors
+            output.append(Int16(clamping: averaged))
+        }
+
+        return output
     }
 
     private static func transcodeWAVToM4AAsync(sourceURL: URL, destinationURL: URL) async throws {

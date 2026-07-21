@@ -10,12 +10,9 @@ import os
 /// serially rather than spawning overlapping Tasks that race the same state.
 final class StreamingVadController: @unchecked Sendable {
     /// Called when VAD detects a natural chunk boundary.
-    ///
-    /// The generation is a revocable ticket for this boundary decision. A
-    /// handler that forwards the decision across another asynchronous queue
-    /// must revalidate it there with `isBoundaryGenerationCurrent(_:)` before
-    /// mutating timeline state.
-    var onChunkBoundary: ((Int) -> Void)?
+    /// Delivery is not main-thread guaranteed; handlers must dispatch before
+    /// touching queue- or actor-isolated state.
+    var onChunkBoundary: (() -> Void)?
 
     private struct State {
         var generation = 0
@@ -30,7 +27,6 @@ final class StreamingVadController: @unchecked Sendable {
     private let lock = OSAllocatedUnfairLock(initialState: State())
     private let makeInitialState: @Sendable () async -> VadStreamState
     private let processStreamChunk: @Sendable ([Float], VadStreamState) async throws -> VadStreamResult
-    private let scheduleBoundary: @Sendable (@escaping @Sendable () -> Void) -> Void
     private let logger = Logger(subsystem: "com.muesli.native", category: "StreamingVadController")
 
     /// Minimum chunk duration before allowing rotation (prevents rapid flipping).
@@ -55,16 +51,12 @@ final class StreamingVadController: @unchecked Sendable {
         minChunkDuration: TimeInterval,
         maxChunkDuration: TimeInterval,
         makeInitialState: @escaping @Sendable () async -> VadStreamState,
-        processStreamChunk: @escaping @Sendable ([Float], VadStreamState) async throws -> VadStreamResult,
-        scheduleBoundary: @escaping @Sendable (@escaping @Sendable () -> Void) -> Void = { work in
-            DispatchQueue.main.async(execute: work)
-        }
+        processStreamChunk: @escaping @Sendable ([Float], VadStreamState) async throws -> VadStreamResult
     ) {
         self.minChunkDuration = minChunkDuration
         self.maxChunkDuration = maxChunkDuration
         self.makeInitialState = makeInitialState
         self.processStreamChunk = processStreamChunk
-        self.scheduleBoundary = scheduleBoundary
     }
 
     func start() {
@@ -118,42 +110,6 @@ final class StreamingVadController: @unchecked Sendable {
         }
     }
 
-    /// Reset streaming inference at a microphone timeline discontinuity while
-    /// keeping the controller active. Generation and drainer-epoch bumps make
-    /// queued or in-flight pre-gap results unable to mutate the new stream.
-    func resetForDiscontinuity() {
-        let resetGeneration = lock.withLock { state -> Int? in
-            guard state.isActive else { return nil }
-            state.generation += 1
-            state.drainerEpoch += 1
-            state.isDraining = false
-            state.pendingChunks.removeAll(keepingCapacity: true)
-            state.streamState = nil
-            state.lastRotationTime = Date()
-            return state.generation
-        }
-        guard let resetGeneration else { return }
-
-        Task { [weak self] in
-            guard let self else { return }
-            let initialState = await self.makeInitialState()
-            let shouldKickDrain = self.lock.withLock { state in
-                guard state.isActive, state.generation == resetGeneration else { return false }
-                state.streamState = initialState
-                return !state.pendingChunks.isEmpty
-            }
-            if shouldKickDrain {
-                self.startDrainIfNeeded()
-            }
-        }
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            guard self.lock.withLock({ $0.isActive && $0.generation == resetGeneration }) else { return }
-            self.maxDurationTimer?.fireDate = Date().addingTimeInterval(self.maxChunkDuration)
-        }
-    }
-
     /// Feed a chunk of Float audio samples (typically 4096 samples = 256ms at 16kHz).
     func processAudio(_ samples: [Float]) {
         guard !samples.isEmpty else { return }
@@ -171,29 +127,29 @@ final class StreamingVadController: @unchecked Sendable {
 
     /// Notify that an external rotation just happened.
     func notifyRotation() {
-        let generation = lock.withLock { state -> Int? in
-            guard state.isActive else { return nil }
+        lock.withLock { state in
             state.lastRotationTime = Date()
-            return state.generation
         }
-        guard let generation else { return }
-        resetMaxDurationTimer(for: generation)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.maxDurationTimer?.fireDate = Date().addingTimeInterval(self.maxChunkDuration)
+        }
     }
 
-    /// Kept internal so the max-duration path can be exercised without relying
-    /// on wall-clock timer scheduling in deterministic tests.
-    func handleMaxDurationTimer() {
-        let boundaryGeneration = lock.withLock { state -> Int? in
-            guard state.isActive else { return nil }
+    private func handleMaxDurationTimer() {
+        let shouldRotate = lock.withLock { state in
+            guard state.isActive else { return false }
             let now = Date()
             let elapsed = now.timeIntervalSince(state.lastRotationTime ?? now)
-            guard elapsed >= self.minChunkDuration else { return nil }
+            guard elapsed >= self.minChunkDuration else { return false }
             state.lastRotationTime = now
-            return state.generation
+            return true
         }
-        guard let boundaryGeneration else { return }
+        guard shouldRotate else { return }
         fputs("[vad] max chunk duration reached, forcing rotation\n", stderr)
-        scheduleBoundaryDelivery(generation: boundaryGeneration)
+        DispatchQueue.main.async { [weak self] in
+            self?.onChunkBoundary?()
+        }
     }
 
     private func startDrainIfNeeded() {
@@ -237,55 +193,33 @@ final class StreamingVadController: @unchecked Sendable {
             do {
                 let result = try await processStreamChunk(next.chunk, next.streamState)
 
-                let boundaryGeneration = lock.withLock { state -> Int? in
-                    guard state.isActive, state.generation == next.generation else { return nil }
+                let shouldRotate = lock.withLock { state in
+                    guard state.isActive, state.generation == next.generation else { return false }
                     state.streamState = result.state
 
                     guard let event = result.event, event.kind == .speechEnd else {
-                        return nil
+                        return false
                     }
 
                     let now = Date()
                     let elapsed = now.timeIntervalSince(state.lastRotationTime ?? now)
-                    guard elapsed >= self.minChunkDuration else { return nil }
+                    guard elapsed >= self.minChunkDuration else { return false }
                     state.lastRotationTime = now
-                    return state.generation
+                    return true
                 }
 
-                if let boundaryGeneration {
+                if shouldRotate {
                     fputs("[vad] speech end detected, rotating chunk\n", stderr)
-                    scheduleBoundaryDelivery(generation: boundaryGeneration)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        self.onChunkBoundary?()
+                        self.maxDurationTimer?.fireDate = Date().addingTimeInterval(self.maxChunkDuration)
+                    }
                 }
             } catch {
                 logger.error("streaming VAD chunk failed: \(String(describing: error), privacy: .public)")
                 fputs("[vad] streaming chunk failed: \(error)\n", stderr)
             }
-        }
-    }
-
-    /// Revalidation for consumers that forward a boundary over another queue.
-    /// This closes the window where discontinuity reset or stop/restart occurs
-    /// after controller delivery but before the consumer mutates its timeline.
-    func isBoundaryGenerationCurrent(_ generation: Int) -> Bool {
-        lock.withLock { state in
-            state.isActive && state.generation == generation
-        }
-    }
-
-    private func scheduleBoundaryDelivery(generation: Int) {
-        scheduleBoundary { [weak self] in
-            guard let self,
-                  self.isBoundaryGenerationCurrent(generation) else { return }
-            self.onChunkBoundary?(generation)
-            self.resetMaxDurationTimer(for: generation)
-        }
-    }
-
-    private func resetMaxDurationTimer(for generation: Int) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self,
-                  self.isBoundaryGenerationCurrent(generation) else { return }
-            self.maxDurationTimer?.fireDate = Date().addingTimeInterval(self.maxChunkDuration)
         }
     }
 }

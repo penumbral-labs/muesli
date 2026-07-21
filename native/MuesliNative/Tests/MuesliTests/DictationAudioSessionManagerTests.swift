@@ -606,56 +606,6 @@ struct DictationAudioSessionManagerTests {
         #expect(harness.recorder.cancelCalls == 1)
         #expect(!harness.recorder.keepsAudioGraphWarm)
     }
-
-    @Test("meeting quiesce waits for idle prewarm teardown")
-    func meetingQuiesceWaitsForIdlePrewarmTeardown() {
-        let harness = Harness(routeKind: .speakerLike)
-        harness.manager.refreshRoute(intent: .idlePrewarm(.routeChange), canWarmUp: true)
-        harness.wait()
-        #expect(harness.recorder.warmUpCalls == 1)
-
-        let cancelEntered = DispatchSemaphore(value: 0)
-        let allowCancel = DispatchSemaphore(value: 0)
-        let quiesceFinished = DispatchSemaphore(value: 0)
-        harness.recorder.cancelEntered = cancelEntered
-        harness.recorder.allowCancel = allowCancel
-        let manager = harness.manager
-
-        Task.detached {
-            await manager.quiesceForMeeting()
-            quiesceFinished.signal()
-        }
-
-        #expect(cancelEntered.wait(timeout: .now() + 1) == .success)
-        #expect(quiesceFinished.wait(timeout: .now() + 0.02) == .timedOut)
-        allowCancel.signal()
-        #expect(quiesceFinished.wait(timeout: .now() + 1) == .success)
-
-        #expect(harness.recorder.cancelCalls == 1)
-        #expect(!harness.recorder.keepsAudioGraphWarm)
-        #expect(harness.recorder.preferredInputDeviceID == nil)
-        #expect(harness.manager.currentState == .idle)
-        #expect(harness.ducking.restoreCalls == 0)
-        #expect(harness.media.restoreCalls == 0)
-    }
-
-    @Test("meeting quiesce tears down an active dictation session")
-    func meetingQuiesceTearsDownActiveSession() async {
-        let harness = Harness(routeKind: .speakerLike)
-        harness.manager.beginRecording(mode: "toggle", duckingEnabled: true, mediaPauseEnabled: true)
-        harness.wait()
-        #expect(harness.manager.hasActiveSession)
-
-        await harness.manager.quiesceForMeeting()
-        harness.wait()
-
-        #expect(harness.recorder.cancelCalls == 1)
-        #expect(!harness.recorder.keepsAudioGraphWarm)
-        #expect(harness.manager.currentState == .idle)
-        #expect(!harness.manager.hasActiveSession)
-        #expect(harness.ducking.restoreCalls == 1)
-        #expect(harness.media.restoreCalls == 1)
-    }
 }
 
 private final class Harness {
@@ -716,8 +666,6 @@ private final class FakeDictationRecorder: DictationAudioRecording {
     var activeRecordingID: UUID?
     var warmUpDelay: TimeInterval = 0
     var activateError: Error?
-    var cancelEntered: DispatchSemaphore?
-    var allowCancel: DispatchSemaphore?
 
     func prepare() throws {
         prepareCalls += 1
@@ -763,8 +711,6 @@ private final class FakeDictationRecorder: DictationAudioRecording {
 
     func cancel() {
         cancelCalls += 1
-        cancelEntered?.signal()
-        allowCancel?.wait()
         activeRecordingID = nil
     }
 

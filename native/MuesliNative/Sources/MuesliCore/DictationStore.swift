@@ -1743,15 +1743,7 @@ public final class DictationStore {
         }
     }
 
-    /// Appends crash-recovery transcript text only while the meeting is still
-    /// capturing or finalizing. The eligibility check and inserts share one
-    /// immediate transaction, so a late chunk callback cannot recreate rows
-    /// after successful completion deleted them.
-    @discardableResult
-    public func appendLiveTranscriptCheckpoints(
-        meetingID: Int64,
-        entries: [LiveTranscriptCheckpointEntry]
-    ) throws -> Bool {
+    public func appendLiveTranscriptCheckpoints(meetingID: Int64, entries: [LiveTranscriptCheckpointEntry]) throws {
         let trimmedEntries = entries.compactMap { entry -> LiveTranscriptCheckpointEntry? in
             let text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
@@ -1763,57 +1755,15 @@ public final class DictationStore {
                 text: text
             )
         }
-        guard !trimmedEntries.isEmpty else { return false }
+        guard !trimmedEntries.isEmpty else { return }
 
         let db = try openDatabase()
         defer { sqlite3_close(db) }
-        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+        guard sqlite3_exec(db, "BEGIN TRANSACTION", nil, nil, nil) == SQLITE_OK else {
             throw lastError(db)
         }
 
         do {
-            let eligibilitySQL = """
-            SELECT 1
-            FROM meetings
-            WHERE id = ?
-              AND deleted_at IS NULL
-              AND meeting_status IN (?, ?)
-            LIMIT 1
-            """
-            var eligibilityStatement: OpaquePointer?
-            guard sqlite3_prepare_v2(db, eligibilitySQL, -1, &eligibilityStatement, nil) == SQLITE_OK else {
-                throw lastError(db)
-            }
-            sqlite3_bind_int64(eligibilityStatement, 1, meetingID)
-            sqlite3_bind_text(
-                eligibilityStatement,
-                2,
-                (MeetingStatus.recording.rawValue as NSString).utf8String,
-                -1,
-                nil
-            )
-            sqlite3_bind_text(
-                eligibilityStatement,
-                3,
-                (MeetingStatus.processing.rawValue as NSString).utf8String,
-                -1,
-                nil
-            )
-            let eligibilityResult = sqlite3_step(eligibilityStatement)
-            guard eligibilityResult == SQLITE_ROW || eligibilityResult == SQLITE_DONE else {
-                let error = lastError(db)
-                sqlite3_finalize(eligibilityStatement)
-                throw error
-            }
-            sqlite3_finalize(eligibilityStatement)
-            let acceptsCheckpoint = eligibilityResult == SQLITE_ROW
-            guard acceptsCheckpoint else {
-                guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
-                    throw lastError(db)
-                }
-                return false
-            }
-
             let sql = """
             INSERT INTO meeting_transcript_checkpoints
             (meeting_id, timestamp_label, speaker, start_seconds, end_seconds, text)
@@ -1842,7 +1792,6 @@ public final class DictationStore {
             guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
                 throw lastError(db)
             }
-            return true
         } catch {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             throw error

@@ -80,8 +80,6 @@ struct MeetingAecDiagnosticsSnapshot: Codable {
     let bufferedSystemSamples: Int
     let bufferedMicSamples: Int
     let currentDelayMs: Int
-    let micDiscontinuityCount: Int
-    let missingMicTimelineSamples: Int
     let delayHistory: [MeetingAecDelayObservation]
     let delaySkipHistory: [MeetingAecDelaySkip]
 }

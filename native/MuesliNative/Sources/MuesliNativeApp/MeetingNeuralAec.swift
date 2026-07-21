@@ -123,8 +123,6 @@ final class MeetingNeuralAec {
     private let delayEstimator = MeetingAecDelayEstimator()
     private var currentDelaySamples = 0
     private var nextDelayEstimateSample = 8_000
-    private var micDiscontinuityCount = 0
-    private var missingMicTimelineSamples = 0
     private var recentDelayResults: [MeetingAecDelayEstimator.Result] = []
     private var delayHistory: [MeetingAecDelayObservation] = []
     private var delaySkipHistory: [MeetingAecDelaySkip] = []
@@ -190,32 +188,10 @@ final class MeetingNeuralAec {
         missingReferenceFrames = 0
         currentDelaySamples = 0
         nextDelayEstimateSample = sampleRate / 2
-        micDiscontinuityCount = 0
-        missingMicTimelineSamples = 0
         recentDelayResults.removeAll(keepingCapacity: true)
         delayHistory.removeAll(keepingCapacity: true)
         delaySkipHistory.removeAll(keepingCapacity: true)
         lastProcessingError = nil
-    }
-
-    /// Start a new adaptive mic segment at an advanced absolute position while
-    /// retaining the continuous system-audio history. Callers flush pending mic
-    /// frames first. This prevents post-route-change mic audio from being paired
-    /// with far-end samples captured during the missing interval.
-    func noteMicDiscontinuity(missingSampleCount: Int) {
-        let gap = max(0, missingSampleCount)
-        processor?.reset()
-        pendingMicSamples.removeAll(keepingCapacity: true)
-        micSamplesReceived += gap
-        pendingMicStartSample = micSamplesReceived
-        micHistory.removeAll(keepingCapacity: true)
-        micHistoryStartSample = micSamplesReceived
-        currentDelaySamples = 0
-        nextDelayEstimateSample = micSamplesReceived + sampleRate / 2
-        recentDelayResults.removeAll(keepingCapacity: true)
-        micDiscontinuityCount += 1
-        missingMicTimelineSamples += gap
-        trimHistoryBuffersIfNeeded()
     }
 
     /// Buffer system audio samples indexed by absolute position.
@@ -545,8 +521,6 @@ final class MeetingNeuralAec {
             bufferedSystemSamples: systemHistory.count,
             bufferedMicSamples: pendingMicSamples.count,
             currentDelayMs: Int(round(Double(currentDelaySamples) * 1000.0 / Double(sampleRate))),
-            micDiscontinuityCount: micDiscontinuityCount,
-            missingMicTimelineSamples: missingMicTimelineSamples,
             delayHistory: delayHistory,
             delaySkipHistory: delaySkipHistory
         )

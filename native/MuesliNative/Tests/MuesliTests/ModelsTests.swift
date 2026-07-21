@@ -564,9 +564,6 @@ struct AppConfigTests {
         let config = AppConfig()
         #expect(config.sttBackend == BackendOption.whisper.backend)
         #expect(config.sttModel == BackendOption.whisper.model)
-        #expect(config.dictationInputDeviceUID == nil)
-        #expect(config.meetingInputDeviceUID == nil)
-        #expect(config.meetingInputDeviceSelectionMigrationApplied == true)
         #expect(config.cohereLanguage == CohereTranscribeLanguage.defaultLanguage.rawValue)
         #expect(config.indicASRLanguage == IndicASRLanguage.defaultLanguage.rawValue)
         #expect(config.meetingTranscriptionBackend == BackendOption.whisper.backend)
@@ -757,8 +754,6 @@ struct AppConfigTests {
     @Test("JSON encode/decode round-trip")
     func jsonRoundTrip() throws {
         var config = AppConfig()
-        config.dictationInputDeviceUID = "dictation-microphone-uid"
-        config.meetingInputDeviceUID = "meeting-microphone-uid"
         config.openAIAPIKey = "sk-test-key-123"
         config.userName = "Test User"
         config.hasCompletedOnboarding = true
@@ -839,9 +834,6 @@ struct AppConfigTests {
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(AppConfig.self, from: data)
 
-        #expect(decoded.dictationInputDeviceUID == "dictation-microphone-uid")
-        #expect(decoded.meetingInputDeviceUID == "meeting-microphone-uid")
-        #expect(decoded.meetingInputDeviceSelectionMigrationApplied == true)
         #expect(decoded.openAIAPIKey == "sk-test-key-123")
         #expect(decoded.userName == "Test User")
         #expect(decoded.hasCompletedOnboarding == true)
@@ -922,8 +914,6 @@ struct AppConfigTests {
     @Test("JSON coding keys use snake_case")
     func snakeCaseKeys() throws {
         var config = AppConfig()
-        config.dictationInputDeviceUID = "dictation-microphone-uid"
-        config.meetingInputDeviceUID = "meeting-microphone-uid"
         config.contributionPromptNextWordCount = 1_000
         config.contributionPromptNextMeetingCount = 25
         let data = try JSONEncoder().encode(config)
@@ -931,9 +921,6 @@ struct AppConfigTests {
 
         #expect(json["stt_backend"] != nil)
         #expect(json["stt_model"] != nil)
-        #expect(json["dictation_input_device_uid"] as? String == "dictation-microphone-uid")
-        #expect(json["meeting_input_device_uid"] as? String == "meeting-microphone-uid")
-        #expect(json["meeting_input_device_selection_migration_applied"] as? Bool == true)
         #expect(json["computer_use_hotkey"] != nil)
         #expect(json["enable_computer_use_hotkey"] != nil)
         #expect(json["computer_use_hotkey_default_disabled_migration_applied"] != nil)
@@ -991,34 +978,6 @@ struct AppConfigTests {
         #expect(json["enable_dictation_ocr_context"] != nil)
         #expect(json["enable_live_streaming_partials"] != nil)
         #expect(json["show_meeting_transcript_on_indicator_hover"] != nil)
-    }
-
-    @Test("legacy dictation microphone selection migrates to meetings once")
-    func legacyDictationMicrophoneSelectionMigratesToMeetingsOnce() throws {
-        let json = #"{"dictation_input_device_uid":"legacy-microphone-uid"}"#
-
-        let config = try JSONDecoder().decode(AppConfig.self, from: Data(json.utf8))
-
-        #expect(config.dictationInputDeviceUID == "legacy-microphone-uid")
-        #expect(config.meetingInputDeviceUID == "legacy-microphone-uid")
-        #expect(config.meetingInputDeviceSelectionMigrationApplied == true)
-    }
-
-    @Test("explicit Automatic meeting microphone survives round-trip")
-    func explicitAutomaticMeetingMicrophoneSurvivesRoundTrip() throws {
-        var config = AppConfig()
-        config.dictationInputDeviceUID = "dictation-microphone-uid"
-        config.meetingInputDeviceUID = nil
-
-        let encoded = try JSONEncoder().encode(config)
-        let json = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
-        let decoded = try JSONDecoder().decode(AppConfig.self, from: encoded)
-
-        #expect(json["meeting_input_device_uid"] == nil)
-        #expect(json["meeting_input_device_selection_migration_applied"] as? Bool == true)
-        #expect(decoded.dictationInputDeviceUID == "dictation-microphone-uid")
-        #expect(decoded.meetingInputDeviceUID == nil)
-        #expect(decoded.meetingInputDeviceSelectionMigrationApplied == true)
     }
 
     @Test("decodes screen context flags from snake_case")

@@ -1356,60 +1356,6 @@ struct DictationStoreTests {
         #expect(try store.recoverLiveMeetingFromTranscriptCheckpoints(id: id) == false)
     }
 
-    @Test("late transcript checkpoints cannot reappear after meeting completion")
-    func completedMeetingRejectsLateTranscriptCheckpoints() throws {
-        let store = try makeStore()
-        let start = Date()
-        let id = try store.createLiveMeeting(title: "Draft", calendarEventID: nil, startTime: start)
-        try store.completeLiveMeeting(
-            id: id,
-            title: "Complete",
-            calendarEventID: nil,
-            startTime: start,
-            endTime: start.addingTimeInterval(30),
-            rawTranscript: "Final transcript",
-            formattedNotes: "## Summary\nDone",
-            micAudioPath: nil,
-            systemAudioPath: nil
-        )
-
-        let appended = try store.appendLiveTranscriptCheckpoints(meetingID: id, entries: [
-            LiveTranscriptCheckpointEntry(
-                timestampLabel: "10:00:31",
-                speaker: "You",
-                startSeconds: 31,
-                endSeconds: 32,
-                text: "Late callback"
-            )
-        ])
-
-        #expect(!appended)
-        #expect(try store.liveTranscriptCheckpointText(meetingID: id) == nil)
-    }
-
-    @Test("processing meeting continues accepting late final chunk checkpoints")
-    func processingMeetingAcceptsTranscriptCheckpoints() throws {
-        let store = try makeStore()
-        let id = try store.createLiveMeeting(title: "Processing", calendarEventID: nil, startTime: Date())
-        try store.updateMeetingStatus(id: id, status: .processing)
-
-        let appended = try store.appendLiveTranscriptCheckpoints(meetingID: id, entries: [
-            LiveTranscriptCheckpointEntry(
-                timestampLabel: "10:00:01",
-                speaker: "Others",
-                startSeconds: 1,
-                endSeconds: 2,
-                text: "Retired final chunk"
-            )
-        ])
-
-        #expect(appended)
-        #expect(
-            try store.liveTranscriptCheckpointText(meetingID: id)
-                == "[10:00:01] Others: Retired final chunk"
-        )
-    }
-
     @Test("note-only status updates word count from manual notes")
     func noteOnlyStatusCountsManualNotes() throws {
         let store = try makeStore()
@@ -1956,11 +1902,17 @@ struct DictationStoreTests {
     func deleteMeetingRemovesLiveTranscriptCheckpoints() throws {
         let store = try makeStore()
         let now = Date()
-        let meetingID = try store.createLiveMeeting(
+        try store.insertMeeting(
             title: "Delete Checkpoints",
             calendarEventID: nil,
-            startTime: now
+            startTime: now,
+            endTime: now.addingTimeInterval(60),
+            rawTranscript: "",
+            formattedNotes: "",
+            micAudioPath: nil,
+            systemAudioPath: nil
         )
+        let meetingID = try #require(try store.recentMeetings(limit: 1).first?.id)
         try store.appendLiveTranscriptCheckpoints(meetingID: meetingID, entries: [
             LiveTranscriptCheckpointEntry(
                 timestampLabel: "10:00:01",

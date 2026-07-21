@@ -3,186 +3,11 @@ import CoreAudio
 import Foundation
 import os
 
-struct AudioQueueProcessingAdmissionTicket: Equatable, Sendable {
-    let captureGeneration: UInt64
-    let pauseEpoch: UInt64
-}
-
-/// Generation state shared by AudioQueue callback admission and the processing
-/// queue. Kept independent from CoreAudio so pause/stop invalidation semantics
-/// can be exercised deterministically without opening a hardware device.
-struct AudioQueueProcessingAdmissionState: Equatable, Sendable {
-    private(set) var captureGeneration: UInt64 = 0
-    private(set) var pauseEpoch: UInt64 = 0
-
-    mutating func beginCapture() {
-        captureGeneration &+= 1
-        pauseEpoch &+= 1
-    }
-
-    mutating func invalidateCapture() {
-        captureGeneration &+= 1
-        pauseEpoch &+= 1
-    }
-
-    mutating func invalidateCapture(ifCurrent generation: UInt64) {
-        guard captureGeneration == generation else { return }
-        invalidateCapture()
-    }
-
-    mutating func advancePauseBoundary() {
-        pauseEpoch &+= 1
-    }
-
-    var ticket: AudioQueueProcessingAdmissionTicket {
-        AudioQueueProcessingAdmissionTicket(
-            captureGeneration: captureGeneration,
-            pauseEpoch: pauseEpoch
-        )
-    }
-
-    func accepts(_ ticket: AudioQueueProcessingAdmissionTicket) -> Bool {
-        ticket.captureGeneration == captureGeneration
-            && ticket.pauseEpoch == pauseEpoch
-    }
-}
-
-struct AudioQueueTeardownState: Equatable, Sendable {
-    enum Transition: Equatable, Sendable {
-        case idle
-        case preparing
-        case starting
-        case stopping
-        case cancelling
-    }
-
-    enum PreparationCompletion: Equatable, Sendable {
-        case install
-        case discard
-    }
-
-    enum StartCompletion: Equatable, Sendable {
-        case active
-        case tearDown
-    }
-
-    private(set) var transition: Transition = .idle
-    private(set) var cancelRequestedDuringStop = false
-    private var teardownRequestedDuringPreparation = false
-    private var teardownRequestedDuringStart = false
-
-    var permitsGraphMutation: Bool { transition == .idle }
-    var permitsStartCall: Bool {
-        transition == .starting && !teardownRequestedDuringStart
-    }
-
-    mutating func beginPreparation() -> Bool {
-        guard transition == .idle else { return false }
-        transition = .preparing
-        teardownRequestedDuringPreparation = false
-        return true
-    }
-
-    /// The preparation owner remains responsible for disposing its local graph.
-    /// A racing stop/cancel only records intent and never seizes that graph.
-    mutating func finishPreparation(succeeded: Bool) -> PreparationCompletion {
-        guard transition == .preparing else { return .discard }
-        let shouldInstall = succeeded && !teardownRequestedDuringPreparation
-        transition = shouldInstall ? .idle : .cancelling
-        teardownRequestedDuringPreparation = false
-        return shouldInstall ? .install : .discard
-    }
-
-    mutating func beginStart() -> Bool {
-        guard transition == .idle else { return false }
-        transition = .starting
-        teardownRequestedDuringStart = false
-        return true
-    }
-
-    /// AudioQueueStart runs without the state lock. Its owner resolves every
-    /// stop/cancel request that arrived meanwhile before reopening admission.
-    mutating func finishStart(succeeded: Bool) -> StartCompletion {
-        guard transition == .starting else { return .tearDown }
-        let shouldRemainActive = succeeded && !teardownRequestedDuringStart
-        transition = shouldRemainActive ? .idle : .cancelling
-        teardownRequestedDuringStart = false
-        return shouldRemainActive ? .active : .tearDown
-    }
-
-    mutating func beginStop() -> Bool {
-        switch transition {
-        case .idle:
-            transition = .stopping
-            cancelRequestedDuringStop = false
-            return true
-        case .preparing:
-            teardownRequestedDuringPreparation = true
-            return false
-        case .starting:
-            teardownRequestedDuringStart = true
-            return false
-        case .stopping, .cancelling:
-            return false
-        }
-    }
-
-    mutating func beginCancel() -> Bool {
-        switch transition {
-        case .idle:
-            transition = .cancelling
-            cancelRequestedDuringStop = false
-            return true
-        case .preparing:
-            teardownRequestedDuringPreparation = true
-            return false
-        case .starting:
-            teardownRequestedDuringStart = true
-            return false
-        case .stopping:
-            cancelRequestedDuringStop = true
-            return false
-        case .cancelling:
-            return false
-        }
-    }
-
-    /// Returns whether a cancel raced with stop. In that case ownership moves
-    /// directly to a cancel transition so the prepared CoreAudio graph is also
-    /// disposed before a later start is admitted.
-    mutating func finishStop() -> Bool {
-        guard transition == .stopping else { return false }
-        let shouldCancel = cancelRequestedDuringStop
-        transition = shouldCancel ? .cancelling : .idle
-        cancelRequestedDuringStop = false
-        return shouldCancel
-    }
-
-    mutating func finishCancel() {
-        guard transition == .cancelling else { return }
-        transition = .idle
-        cancelRequestedDuringStop = false
-        teardownRequestedDuringPreparation = false
-        teardownRequestedDuringStart = false
-    }
-}
-
 final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDictationLatencyReporting, PausableStreamingDictationRecording {
     var onAudioBuffer: (([Float]) -> Void)?
     var onRecordingFailed: ((Error) -> Void)?
     var onLatencyEvent: ((String, Date) -> Void)?
-    var preferredInputDeviceID: AudioObjectID? {
-        get {
-            queueLock.lock()
-            defer { queueLock.unlock() }
-            return preferredInputDeviceIDStorage
-        }
-        set {
-            queueLock.lock()
-            preferredInputDeviceIDStorage = newValue
-            queueLock.unlock()
-        }
-    }
+    var preferredInputDeviceID: AudioObjectID?
 
     private static let sampleRate: Double = 16_000
     private static let framesPerBuffer: UInt32 = 4096
@@ -192,21 +17,16 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
     private let queueLock = NSRecursiveLock()
     private let stateLock = OSAllocatedUnfairLock(initialState: FileState())
     private let processingQueue = DispatchQueue(label: "com.muesli.audio-queue-input-recorder-processing")
-    private let processingQueueKey = DispatchSpecificKey<UInt8>()
     private let failureCallbackQueue = DispatchQueue(label: "com.muesli.audio-queue-input-recorder-failures")
 
     private var audioQueue: AudioQueueRef?
     private var queueCallbackUserData: UnsafeMutableRawPointer?
     private var buffers: [AudioQueueBufferRef] = []
-    private var preferredInputDeviceIDStorage: AudioObjectID?
     private var preparedInputDeviceID: AudioObjectID?
     private var isPrepared = false
     private var isRunning = false
     private var isPaused = false
-    private var processingAdmission = AudioQueueProcessingAdmissionState()
-    private var teardownState = AudioQueueTeardownState()
-    private var pauseTransitionGeneration: UInt64?
-    private var resumeRequestedForPauseGeneration: UInt64?
+    private var captureGeneration: UInt64 = 0
 
     private struct FileState {
         var fileHandle: FileHandle?
@@ -215,21 +35,8 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
         var latestPowerDB: Float = -160
     }
 
-    private struct PreparedQueueGraph {
-        let queue: AudioQueueRef
-        let callbackUserData: UnsafeMutableRawPointer
-        let buffers: [AudioQueueBufferRef]
-        let inputDeviceID: AudioObjectID?
-    }
-
-    private struct DetachedQueueGraph {
-        let queue: AudioQueueRef?
-        let callbackUserData: UnsafeMutableRawPointer?
-    }
-
     init(directoryName: String = "muesli-native-dictation") {
         self.directoryName = directoryName
-        processingQueue.setSpecific(key: processingQueueKey, value: 1)
     }
 
     deinit {
@@ -238,164 +45,56 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
 
     func prepare() throws {
         queueLock.lock()
-        guard teardownState.permitsGraphMutation else {
-            queueLock.unlock()
-            throw Self.runtimeError(code: 10, message: "Microphone teardown is still completing")
-        }
-        let preferredInputDeviceID = preferredInputDeviceIDStorage
-        if isPrepared, preparedInputDeviceID == preferredInputDeviceID {
-            queueLock.unlock()
-            emitLatency("audio_queue_prepare_reused")
-            return
-        }
-        guard !isRunning, teardownState.beginPreparation() else {
-            queueLock.unlock()
-            throw Self.runtimeError(code: 10, message: "Microphone lifecycle transition is already in progress")
-        }
-        let previousGraph = detachQueueLocked(invalidateCapture: false)
-        queueLock.unlock()
+        defer { queueLock.unlock() }
 
-        // CoreAudio can synchronously wait for its callback while disposing a
-        // queue. The callback also needs `queueLock`, so graph ownership is
-        // always detached under the lock and destroyed only after unlocking.
-        disposeDetachedGraph(previousGraph, stopFirst: false)
-        emitLatency("audio_queue_prepare_begin")
-
-        let graph: PreparedQueueGraph
-        do {
-            graph = try makePreparedQueueGraph(preferredInputDeviceID: preferredInputDeviceID)
-        } catch {
-            queueLock.lock()
-            _ = teardownState.finishPreparation(succeeded: false)
-            teardownState.finishCancel()
-            queueLock.unlock()
-            throw error
-        }
-
-        queueLock.lock()
-        let completion = teardownState.finishPreparation(succeeded: true)
-        if completion == .install {
-            installPreparedGraphLocked(graph)
-            queueLock.unlock()
-            emitLatency("audio_queue_prepare_end")
-            return
-        }
-        queueLock.unlock()
-
-        disposePreparedGraph(graph)
-        queueLock.lock()
-        teardownState.finishCancel()
-        queueLock.unlock()
-        throw Self.runtimeError(code: 11, message: "Microphone preparation was cancelled")
+        try prepareLocked()
     }
 
     func start() throws {
         queueLock.lock()
-        if isRunning {
-            queueLock.unlock()
-            return
-        }
-        queueLock.unlock()
+        defer { queueLock.unlock() }
 
-        try prepare()
+        guard !isRunning else { return }
+        try prepareLocked()
 
-        queueLock.lock()
-        guard !isRunning else {
-            queueLock.unlock()
-            return
-        }
-        guard teardownState.beginStart() else {
-            queueLock.unlock()
-            throw Self.runtimeError(code: 10, message: "Microphone lifecycle transition is already in progress")
-        }
         guard let audioQueue else {
-            _ = teardownState.finishStart(succeeded: false)
-            teardownState.finishCancel()
-            queueLock.unlock()
             throw Self.runtimeError(code: 1, message: "Audio queue was not initialized")
         }
-        let buffers = buffers
-        queueLock.unlock()
 
-        let fileState: FileState
-        do {
-            fileState = try createNewFile()
-        } catch {
-            tearDownFailedStart(queueMayHaveStarted: false)
-            throw error
-        }
+        stateLock.withLock { $0 = FileState() }
+        let fileState = try createNewFile()
         stateLock.withLock { $0 = fileState }
+        isPaused = false
 
         for buffer in buffers {
             let status = AudioQueueEnqueueBuffer(audioQueue, buffer, 0, nil)
             guard status == noErr else {
-                tearDownFailedStart(queueMayHaveStarted: false)
+                cleanupAfterStartFailure()
                 throw Self.runtimeError(code: 2, message: "AudioQueueEnqueueBuffer failed: \(status)")
             }
         }
 
-        queueLock.lock()
-        guard teardownState.permitsStartCall else {
-            _ = teardownState.finishStart(succeeded: false)
-            isRunning = false
-            processingAdmission.invalidateCapture()
-            let graph = detachQueueLocked(invalidateCapture: false)
-            queueLock.unlock()
-            finishCancelledStart(graph: graph, queueMayHaveStarted: false)
-            throw Self.runtimeError(code: 11, message: "Microphone startup was cancelled")
-        }
-        processingAdmission.beginCapture()
-        pauseTransitionGeneration = nil
-        resumeRequestedForPauseGeneration = nil
-        isPaused = false
+        captureGeneration &+= 1
         isRunning = true
-        queueLock.unlock()
-
         emitLatency("audio_queue_start_begin")
         let status = AudioQueueStart(audioQueue, nil)
         emitLatency("audio_queue_start_end")
-
-        queueLock.lock()
-        let completion = teardownState.finishStart(succeeded: status == noErr)
-        if completion == .active {
-            queueLock.unlock()
-            return
-        }
-        isRunning = false
-        processingAdmission.invalidateCapture()
-        pauseTransitionGeneration = nil
-        resumeRequestedForPauseGeneration = nil
-        let graph = detachQueueLocked(invalidateCapture: false)
-        queueLock.unlock()
-
-        finishCancelledStart(graph: graph, queueMayHaveStarted: true)
         guard status == noErr else {
+            isRunning = false
+            captureGeneration &+= 1
+            cleanupAfterStartFailure()
             throw Self.runtimeError(code: 3, message: "AudioQueueStart failed: \(status)")
         }
-        throw Self.runtimeError(code: 11, message: "Microphone startup was cancelled")
     }
 
     func stop() -> URL? {
         queueLock.lock()
-        if teardownState.transition == .preparing || teardownState.transition == .starting {
-            let interruptedStart = teardownState.transition == .starting
-            _ = teardownState.beginStop()
-            if interruptedStart {
-                isRunning = false
-                isPaused = false
-                processingAdmission.invalidateCapture()
-                pauseTransitionGeneration = nil
-                resumeRequestedForPauseGeneration = nil
-            }
-            queueLock.unlock()
-            return nil
-        }
-        guard isRunning, teardownState.beginStop() else {
+        guard isRunning else {
             queueLock.unlock()
             return nil
         }
         isRunning = false
-        let generationToFinish = processingAdmission.captureGeneration
+        let generationToFinish = captureGeneration
         let queueToStop = audioQueue
         queueLock.unlock()
 
@@ -406,16 +105,14 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
         }
 
         emitLatency("audio_queue_processing_drain_begin")
-        let drainedSynchronously = drainProcessingQueue()
+        processingQueue.sync {}
         emitLatency("audio_queue_processing_drain_end")
 
         queueLock.lock()
-        processingAdmission.invalidateCapture(ifCurrent: generationToFinish)
-        isPaused = false
-        if pauseTransitionGeneration == generationToFinish {
-            pauseTransitionGeneration = nil
-            resumeRequestedForPauseGeneration = nil
+        if captureGeneration == generationToFinish {
+            captureGeneration &+= 1
         }
+        isPaused = false
         queueLock.unlock()
 
         emitLatency("audio_queue_finalize_begin")
@@ -426,46 +123,41 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
         }
         let url = finalizeFile(finalState)
         emitLatency("audio_queue_finalize_end")
-
-        if !drainedSynchronously {
-            // A callback cannot wait for its own queue. Keep teardown owned
-            // until that callback and all older work return, then honor any
-            // cancel that raced with this stop.
-            processingQueue.async { [self] in
-                _ = finishStopTransition(outputURL: url)
-            }
-            return url
-        }
-        return finishStopTransition(outputURL: url) ? nil : url
+        return url
     }
 
     func cancel() {
         queueLock.lock()
-        let interruptedTransition = teardownState.transition
-        guard teardownState.beginCancel() else {
-            if interruptedTransition == .starting {
-                isRunning = false
-                isPaused = false
-                processingAdmission.invalidateCapture()
-                pauseTransitionGeneration = nil
-                resumeRequestedForPauseGeneration = nil
-            }
-            queueLock.unlock()
-            return
-        }
         isRunning = false
         isPaused = false
-        processingAdmission.invalidateCapture()
-        pauseTransitionGeneration = nil
-        resumeRequestedForPauseGeneration = nil
-        let graph = detachQueueLocked(invalidateCapture: false)
+        captureGeneration &+= 1
+        let queueToDispose = audioQueue
+        let callbackUserDataToRelease = queueCallbackUserData
+        audioQueue = nil
+        queueCallbackUserData = nil
+        buffers.removeAll()
+        preparedInputDeviceID = nil
+        isPrepared = false
         queueLock.unlock()
 
-        disposeDetachedGraph(graph, stopFirst: true, latencyPrefix: "audio_queue_cancel")
+        if let queueToDispose {
+            emitLatency("audio_queue_cancel_stop_begin")
+            AudioQueueStop(queueToDispose, true)
+            emitLatency("audio_queue_cancel_stop_end")
+            AudioQueueDispose(queueToDispose, true)
+        }
+        Self.releaseCallbackUserData(callbackUserDataToRelease)
 
-        let drainedSynchronously = drainProcessingQueue()
-        discardCurrentFile()
-        finishCancelTransition(afterSynchronousDrain: drainedSynchronously)
+        processingQueue.sync {}
+
+        let state = stateLock.withLock { state -> FileState in
+            let old = state
+            state = FileState()
+            return old
+        }
+        if let url = state.fileURL {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     func currentPower() -> Float {
@@ -473,58 +165,19 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
     }
 
     func pause() {
-        let isReentrant = DispatchQueue.getSpecific(key: processingQueueKey) != nil
         queueLock.lock()
-        let pauseGeneration = processingAdmission.captureGeneration
-        guard isRunning,
-              teardownState.permitsGraphMutation,
-              pauseTransitionGeneration != pauseGeneration else {
+        guard isRunning else {
             queueLock.unlock()
             return
         }
-        pauseTransitionGeneration = pauseGeneration
-        resumeRequestedForPauseGeneration = nil
         isPaused = true
-        if isReentrant {
-            processingAdmission.advancePauseBoundary()
-        }
-        queueLock.unlock()
-        // Every data block admitted before the paused flag was installed is
-        // already queued while holding queueLock. Drain those blocks before
-        // exposing the meeting-level pause boundary.
-        if !isReentrant {
-            drainProcessingQueue()
-            queueLock.lock()
-            if processingAdmission.captureGeneration == pauseGeneration,
-               pauseTransitionGeneration == pauseGeneration {
-                // No new work can be admitted while paused. Advancing after
-                // the drain makes the completed boundary explicit for resume.
-                processingAdmission.advancePauseBoundary()
-            }
-            queueLock.unlock()
-        }
-        queueLock.lock()
-        if pauseTransitionGeneration == pauseGeneration {
-            if processingAdmission.captureGeneration == pauseGeneration,
-               resumeRequestedForPauseGeneration == pauseGeneration {
-                isPaused = false
-            }
-            pauseTransitionGeneration = nil
-            resumeRequestedForPauseGeneration = nil
-        }
         queueLock.unlock()
         stateLock.withLock { $0.latestPowerDB = -160 }
     }
 
     func resume() {
         queueLock.lock()
-        guard isRunning, teardownState.permitsGraphMutation else {
-            queueLock.unlock()
-            return
-        }
-        let generation = processingAdmission.captureGeneration
-        if pauseTransitionGeneration == generation {
-            resumeRequestedForPauseGeneration = generation
+        guard isRunning else {
             queueLock.unlock()
             return
         }
@@ -532,9 +185,15 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
         queueLock.unlock()
     }
 
-    private func makePreparedQueueGraph(
-        preferredInputDeviceID: AudioObjectID?
-    ) throws -> PreparedQueueGraph {
+    private func prepareLocked() throws {
+        if isPrepared, preparedInputDeviceID == preferredInputDeviceID {
+            emitLatency("audio_queue_prepare_reused")
+            return
+        }
+
+        disposeQueueLocked()
+        emitLatency("audio_queue_prepare_begin")
+
         var format = AudioStreamBasicDescription(
             mSampleRate: Self.sampleRate,
             mFormatID: kAudioFormatLinearPCM,
@@ -564,8 +223,9 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
             Self.releaseCallbackUserData(callbackUserData)
             throw Self.runtimeError(code: 4, message: "AudioQueueNewInput failed: \(newInputStatus)")
         }
+        audioQueue = queue
+        queueCallbackUserData = callbackUserData
 
-        var allocatedBuffers: [AudioQueueBufferRef] = []
         do {
             if let preferredInputDeviceID {
                 try applyPreferredInputDeviceID(preferredInputDeviceID, to: queue)
@@ -581,23 +241,17 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
                 guard status == noErr, let buffer else {
                     throw Self.runtimeError(code: 5, message: "AudioQueueAllocateBuffer failed: \(status)")
                 }
-                allocatedBuffers.append(buffer)
+                buffers.append(buffer)
             }
             emitLatency("audio_queue_allocate_buffers_end")
         } catch {
-            // This queue is still local to the preparation owner; no other
-            // lifecycle method can observe or seize it.
-            AudioQueueDispose(queue, true)
-            Self.releaseCallbackUserData(callbackUserData)
+            disposeQueueLocked()
             throw error
         }
 
-        return PreparedQueueGraph(
-            queue: queue,
-            callbackUserData: callbackUserData,
-            buffers: allocatedBuffers,
-            inputDeviceID: preferredInputDeviceID
-        )
+        preparedInputDeviceID = preferredInputDeviceID
+        isPrepared = true
+        emitLatency("audio_queue_prepare_end")
     }
 
     private func applyPreferredInputDeviceID(_ deviceID: AudioObjectID, to queue: AudioQueueRef) throws {
@@ -631,6 +285,7 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
     private func handleInputBuffer(queue: AudioQueueRef, buffer: AudioQueueBufferRef) {
         queueLock.lock()
         let shouldProcess = isRunning
+        let generation = captureGeneration
         queueLock.unlock()
         guard shouldProcess else { return }
 
@@ -647,28 +302,14 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
             return
         }
 
-        queueLock.lock()
-        guard isRunning, !isPaused else {
-            queueLock.unlock()
-            return
-        }
-        let admissionTicket = processingAdmission.ticket
-        // Queue admission linearizes with pause while the same lock is held.
         processingQueue.async { [weak self] in
-            self?.processAudioData(
-                audioData,
-                admissionTicket: admissionTicket
-            )
+            self?.processAudioData(audioData, generation: generation)
         }
-        queueLock.unlock()
     }
 
-    private func processAudioData(
-        _ data: Data,
-        admissionTicket: AudioQueueProcessingAdmissionTicket
-    ) {
+    private func processAudioData(_ data: Data, generation: UInt64) {
         queueLock.lock()
-        let shouldProcess = processingAdmission.accepts(admissionTicket)
+        let shouldProcess = captureGeneration == generation && !isPaused
         queueLock.unlock()
         guard shouldProcess else { return }
 
@@ -706,150 +347,38 @@ final class AudioQueueInputRecorder: StreamingDictationRecording, StreamingDicta
         onAudioBuffer?(samples)
     }
 
-    private func installPreparedGraphLocked(_ graph: PreparedQueueGraph) {
-        audioQueue = graph.queue
-        queueCallbackUserData = graph.callbackUserData
-        buffers = graph.buffers
-        preparedInputDeviceID = graph.inputDeviceID
-        isPrepared = true
-    }
-
-    /// Removes every shared reference to a queue while `queueLock` is held.
-    /// The returned graph must be stopped/disposed only after unlocking.
-    private func detachQueueLocked(invalidateCapture: Bool) -> DetachedQueueGraph? {
-        let graph = DetachedQueueGraph(
-            queue: audioQueue,
-            callbackUserData: queueCallbackUserData
-        )
-        if invalidateCapture {
-            processingAdmission.invalidateCapture()
-        }
-        isRunning = false
-        isPaused = false
-        audioQueue = nil
-        queueCallbackUserData = nil
-        buffers.removeAll()
-        preparedInputDeviceID = nil
-        isPrepared = false
-        guard graph.queue != nil || graph.callbackUserData != nil else { return nil }
-        return graph
-    }
-
-    private func disposePreparedGraph(_ graph: PreparedQueueGraph) {
-        disposeDetachedGraph(
-            DetachedQueueGraph(
-                queue: graph.queue,
-                callbackUserData: graph.callbackUserData
-            ),
-            stopFirst: false
-        )
-    }
-
-    private func disposeDetachedGraph(
-        _ graph: DetachedQueueGraph?,
-        stopFirst: Bool,
-        latencyPrefix: String? = nil
-    ) {
-        guard let graph else { return }
-        if let queue = graph.queue {
-            if stopFirst {
-                if let latencyPrefix {
-                    emitLatency("\(latencyPrefix)_stop_begin")
-                }
-                AudioQueueStop(queue, true)
-                if let latencyPrefix {
-                    emitLatency("\(latencyPrefix)_stop_end")
-                }
-            }
-            AudioQueueDispose(queue, true)
-        }
-        Self.releaseCallbackUserData(graph.callbackUserData)
-    }
-
-    private func tearDownFailedStart(queueMayHaveStarted: Bool) {
-        queueLock.lock()
-        _ = teardownState.finishStart(succeeded: false)
-        processingAdmission.invalidateCapture()
-        isRunning = false
-        isPaused = false
-        pauseTransitionGeneration = nil
-        resumeRequestedForPauseGeneration = nil
-        let graph = detachQueueLocked(invalidateCapture: false)
-        queueLock.unlock()
-        finishCancelledStart(graph: graph, queueMayHaveStarted: queueMayHaveStarted)
-    }
-
-    private func finishCancelledStart(
-        graph: DetachedQueueGraph?,
-        queueMayHaveStarted: Bool
-    ) {
-        disposeDetachedGraph(
-            graph,
-            stopFirst: queueMayHaveStarted,
-            latencyPrefix: "audio_queue_start_cleanup"
-        )
-        let drainedSynchronously = drainProcessingQueue()
-        discardCurrentFile()
-        finishCancelTransition(afterSynchronousDrain: drainedSynchronously)
-    }
-
-    private func discardCurrentFile() {
+    private func cleanupAfterStartFailure() {
+        disposeQueueLocked()
         let state = stateLock.withLock { state -> FileState in
             let old = state
             state = FileState()
             return old
         }
-        state.fileHandle?.closeFile()
         if let url = state.fileURL {
             try? FileManager.default.removeItem(at: url)
         }
     }
 
-    private func finishCancelTransition(afterSynchronousDrain drainedSynchronously: Bool) {
-        if drainedSynchronously {
-            queueLock.lock()
-            teardownState.finishCancel()
-            queueLock.unlock()
-        } else {
-            processingQueue.async { [self] in
-                queueLock.lock()
-                teardownState.finishCancel()
-                queueLock.unlock()
-            }
+    private func disposeQueueLocked() {
+        let callbackUserDataToRelease = queueCallbackUserData
+        if let audioQueue {
+            captureGeneration &+= 1
+            isPaused = false
+            AudioQueueStop(audioQueue, true)
+            AudioQueueDispose(audioQueue, true)
         }
+        audioQueue = nil
+        queueCallbackUserData = nil
+        buffers.removeAll()
+        preparedInputDeviceID = nil
+        isPrepared = false
+        Self.releaseCallbackUserData(callbackUserDataToRelease)
     }
 
     private func reportFailure(_ error: Error) {
         failureCallbackQueue.async { [onRecordingFailed] in
             onRecordingFailed?(error)
         }
-    }
-
-    @discardableResult
-    private func drainProcessingQueue() -> Bool {
-        guard DispatchQueue.getSpecific(key: processingQueueKey) == nil else { return false }
-        processingQueue.sync {}
-        return true
-    }
-
-    /// Completes a stop transition after its processing-queue barrier. Returns
-    /// true when a concurrent cancel took ownership and discarded the output.
-    private func finishStopTransition(outputURL: URL?) -> Bool {
-        queueLock.lock()
-        let shouldCancel = teardownState.finishStop()
-        let graph = shouldCancel ? detachQueueLocked(invalidateCapture: false) : nil
-        queueLock.unlock()
-        guard shouldCancel else { return false }
-
-        // The normal stop owner already stopped this queue before its drain.
-        disposeDetachedGraph(graph, stopFirst: false)
-        if let outputURL {
-            try? FileManager.default.removeItem(at: outputURL)
-        }
-        queueLock.lock()
-        teardownState.finishCancel()
-        queueLock.unlock()
-        return true
     }
 
     private func emitLatency(_ event: String, at date: Date = Date()) {

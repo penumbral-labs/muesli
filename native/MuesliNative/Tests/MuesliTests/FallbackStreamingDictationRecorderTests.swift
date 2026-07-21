@@ -126,136 +126,6 @@ struct FallbackStreamingDictationRecorderTests {
         #expect(failureCount == 0)
     }
 
-    @Test("capture recovery events and diagnostics follow the selected recorder")
-    func captureRecoveryFollowsSelectedRecorder() throws {
-        let prepareError = NSError(domain: "FallbackStreamingDictationRecorderTests", code: 30)
-        let primary = FakeFallbackStreamingRecorder()
-        primary.prepareResults = [.failure(prepareError)]
-        let fallback = FakeFallbackStreamingRecorder()
-        let recorder = FallbackStreamingDictationRecorder(primary: primary, fallback: fallback)
-        var events: [StreamingMicCaptureEvent] = []
-        recorder.onCaptureEvent = { events.append($0) }
-
-        try recorder.prepare()
-        let input = StreamingMicInputSnapshot(
-            requestedDeviceID: nil,
-            actualDeviceID: 42,
-            sampleRate: 16_000,
-            channelCount: 1
-        )
-        let discontinuity = StreamingMicDiscontinuity(
-            generation: 1,
-            reason: .inputConfigurationChanged,
-            missingSampleCount: 320,
-            downtimeSeconds: 0.02,
-            restartAttemptCount: 1,
-            previousInput: input,
-            currentInput: input
-        )
-        fallback.recoveryDiagnostics = StreamingMicRecoveryDiagnosticsSnapshot(
-            configurationChangeCount: 1,
-            coalescedConfigurationChangeCount: 0,
-            graphRestartAttemptCount: 1,
-            successfulRecoveryCount: 1,
-            failedRecoveryCount: 0,
-            discontinuities: [discontinuity],
-            failures: []
-        )
-
-        primary.onCaptureEvent?(.recovered(discontinuity))
-        fallback.onCaptureEvent?(.recovered(discontinuity))
-
-        #expect(events == [.recovered(discontinuity)])
-        #expect(recorder.captureRecoveryDiagnostics == fallback.recoveryDiagnostics)
-    }
-
-    @Test("typed fallback failures preserve the legacy failure callback")
-    func typedFailureBridgesToLegacyCaller() throws {
-        let prepareError = NSError(domain: "FallbackStreamingDictationRecorderTests", code: 31)
-        let primary = FakeFallbackStreamingRecorder()
-        primary.prepareResults = [.failure(prepareError)]
-        let fallback = FakeFallbackStreamingRecorder()
-        let recorder = FallbackStreamingDictationRecorder(primary: primary, fallback: fallback)
-        var deliveredError: Error?
-        recorder.onRecordingFailed = { deliveredError = $0 }
-
-        try recorder.prepare()
-        let input = StreamingMicInputSnapshot(
-            requestedDeviceID: nil,
-            actualDeviceID: 42,
-            sampleRate: 16_000,
-            channelCount: 1
-        )
-        let failure = StreamingMicCaptureFailure(
-            generation: 7,
-            reason: .inputConfigurationChanged,
-            restartAttemptCount: 2,
-            previousInput: input,
-            message: "replacement graph failed"
-        )
-
-        fallback.onCaptureEvent?(.failed(failure))
-
-        #expect((deliveredError as NSError?)?.domain == "StreamingMicRecorder.Recovery")
-        #expect(deliveredError?.localizedDescription == "replacement graph failed")
-    }
-
-    @Test("typed capture consumers receive each event without duplicate legacy failures")
-    func typedConsumerSuppressesLegacyDuplicate() throws {
-        let primary = FakeFallbackStreamingRecorder()
-        let recorder = FallbackStreamingDictationRecorder(
-            primary: primary,
-            fallback: FakeFallbackStreamingRecorder()
-        )
-        var events: [StreamingMicCaptureEvent] = []
-        var legacyFailureCount = 0
-        recorder.onCaptureEvent = { events.append($0) }
-        recorder.onRecordingFailed = { _ in legacyFailureCount += 1 }
-        try recorder.prepare()
-
-        let (recovered, failed) = captureEvents()
-        primary.onCaptureEvent?(recovered)
-        primary.onCaptureEvent?(failed)
-
-        #expect(events == [recovered, failed])
-        #expect(legacyFailureCount == 0)
-    }
-
-    @Test("nested route adapter and fallback chain delivers typed events exactly once")
-    func nestedTypedCaptureChainIsExactlyOnce() throws {
-        let selectedChild = FakeFallbackStreamingRecorder()
-        let fallback = FallbackStreamingDictationRecorder(
-            primary: selectedChild,
-            fallback: FakeFallbackStreamingRecorder()
-        )
-        let selectedAdapter = StreamingMeetingMicRecorderAdapter(
-            recorder: fallback,
-            kind: .systemDefaultStreaming
-        )
-        let inactiveChild = FakeFallbackStreamingRecorder()
-        let inactiveAdapter = StreamingMeetingMicRecorderAdapter(
-            recorder: inactiveChild,
-            kind: .appScopedAudioQueue
-        )
-        let route = RouteAwareMeetingMicRecorder(
-            systemDefaultRecorder: selectedAdapter,
-            appScopedRecorder: inactiveAdapter
-        )
-        var events: [StreamingMicCaptureEvent] = []
-        var legacyFailureCount = 0
-        route.onCaptureEvent = { events.append($0) }
-        route.onRecordingFailed = { _ in legacyFailureCount += 1 }
-        try route.start()
-        selectedChild.onAudioBuffer?([0.1])
-
-        let (_, failure) = captureEvents()
-        inactiveChild.onCaptureEvent?(failure)
-        selectedChild.onCaptureEvent?(failure)
-
-        #expect(events == [failure])
-        #expect(legacyFailureCount == 0)
-    }
-
     @Test("pause and resume delegate to active recorder")
     func pauseAndResumeDelegateToActiveRecorder() throws {
         let error = NSError(domain: "FallbackStreamingDictationRecorderTests", code: 5)
@@ -273,160 +143,11 @@ struct FallbackStreamingDictationRecorderTests {
         #expect(fallback.pauseCalls == 1)
         #expect(fallback.resumeCalls == 1)
     }
-
-    @Test("child start can synchronously wait for a forwarded callback")
-    func childStartDoesNotRunUnderWrapperLock() throws {
-        let primary = FakeFallbackStreamingRecorder()
-        let fallback = FakeFallbackStreamingRecorder()
-        let recorder = FallbackStreamingDictationRecorder(primary: primary, fallback: fallback)
-        let callbackReturned = DispatchSemaphore(value: 0)
-        var deliveredBufferCount = 0
-        recorder.onAudioBuffer = { _ in
-            deliveredBufferCount += 1
-        }
-        primary.onStartStarted = {
-            DispatchQueue.global(qos: .userInitiated).async {
-                primary.onAudioBuffer?([0.25])
-                callbackReturned.signal()
-            }
-            guard callbackReturned.wait(timeout: .now() + 1) == .success else {
-                throw NSError(
-                    domain: "FallbackStreamingDictationRecorderTests.CallbackRoundTrip",
-                    code: 1
-                )
-            }
-        }
-
-        try recorder.prepare()
-        try recorder.start()
-
-        #expect(primary.startCalls == 1)
-        #expect(fallback.startCalls == 0)
-        #expect(deliveredBufferCount == 1)
-    }
-
-    @Test("child prepare can synchronously wait for a forwarded callback")
-    func childPrepareDoesNotRunUnderWrapperLock() throws {
-        let primary = FakeFallbackStreamingRecorder()
-        let fallback = FakeFallbackStreamingRecorder()
-        let recorder = FallbackStreamingDictationRecorder(primary: primary, fallback: fallback)
-        let callbackReturned = DispatchSemaphore(value: 0)
-        var deliveredBufferCount = 0
-        recorder.onAudioBuffer = { _ in
-            deliveredBufferCount += 1
-        }
-        primary.onPrepareStarted = {
-            DispatchQueue.global(qos: .userInitiated).async {
-                primary.onAudioBuffer?([0.125])
-                callbackReturned.signal()
-            }
-            guard callbackReturned.wait(timeout: .now() + 1) == .success else {
-                throw NSError(
-                    domain: "FallbackStreamingDictationRecorderTests.CallbackRoundTrip",
-                    code: 2
-                )
-            }
-        }
-
-        try recorder.prepare()
-
-        #expect(primary.prepareCalls == 1)
-        #expect(fallback.prepareCalls == 0)
-        #expect(deliveredBufferCount == 1)
-    }
-
-    @Test("child cancel can synchronously wait for a forwarded callback")
-    func childCancelDoesNotRunUnderWrapperLock() throws {
-        let prepareError = NSError(domain: "FallbackStreamingDictationRecorderTests", code: 40)
-        let primary = FakeFallbackStreamingRecorder()
-        primary.prepareResults = [.failure(prepareError)]
-        let fallback = FakeFallbackStreamingRecorder()
-        let recorder = FallbackStreamingDictationRecorder(primary: primary, fallback: fallback)
-        let callbackReturned = DispatchSemaphore(value: 0)
-        recorder.onAudioBuffer = { _ in }
-        primary.onCancel = {
-            DispatchQueue.global(qos: .userInitiated).async {
-                primary.onAudioBuffer?([0.5])
-                callbackReturned.signal()
-            }
-            return callbackReturned.wait(timeout: .now() + 1) == .success
-        }
-
-        try recorder.prepare()
-
-        #expect(primary.cancelCallbackRoundTripSucceeded == true)
-        #expect(fallback.prepareCalls == 1)
-    }
-
-    @Test("cancel interrupts blocked startup without starting fallback")
-    func cancelInterruptsBlockedStartupWithoutFallback() throws {
-        let primary = FakeFallbackStreamingRecorder()
-        let fallback = FakeFallbackStreamingRecorder()
-        let recorder = FallbackStreamingDictationRecorder(primary: primary, fallback: fallback)
-        let startEntered = DispatchSemaphore(value: 0)
-        let releaseStart = DispatchSemaphore(value: 0)
-        let cancelReturned = DispatchSemaphore(value: 0)
-        let startReturned = DispatchSemaphore(value: 0)
-        primary.onStartStarted = {
-            startEntered.signal()
-            releaseStart.wait()
-        }
-
-        try recorder.prepare()
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = try? recorder.start()
-            startReturned.signal()
-        }
-
-        #expect(startEntered.wait(timeout: .now() + 1) == .success)
-        DispatchQueue.global(qos: .userInitiated).async {
-            recorder.cancel()
-            cancelReturned.signal()
-        }
-
-        #expect(cancelReturned.wait(timeout: .now() + 1) == .success)
-        #expect(startReturned.wait(timeout: .now() + 0.05) == .timedOut)
-        releaseStart.signal()
-        #expect(startReturned.wait(timeout: .now() + 1) == .success)
-        #expect(fallback.prepareCalls == 0)
-        #expect(fallback.startCalls == 0)
-        #expect(primary.cancelCalls >= 1)
-    }
-
-
-    private func captureEvents() -> (StreamingMicCaptureEvent, StreamingMicCaptureEvent) {
-        let input = StreamingMicInputSnapshot(
-            requestedDeviceID: nil,
-            actualDeviceID: 42,
-            sampleRate: 16_000,
-            channelCount: 1
-        )
-        let discontinuity = StreamingMicDiscontinuity(
-            generation: 11,
-            reason: .inputConfigurationChanged,
-            missingSampleCount: 160,
-            downtimeSeconds: 0.01,
-            restartAttemptCount: 1,
-            previousInput: input,
-            currentInput: input
-        )
-        let failure = StreamingMicCaptureFailure(
-            generation: 12,
-            reason: .inputConfigurationChanged,
-            restartAttemptCount: 2,
-            previousInput: input,
-            message: "replacement graph failed"
-        )
-        return (.recovered(discontinuity), .failed(failure))
-    }
 }
 
-private final class FakeFallbackStreamingRecorder: StreamingDictationRecording, PausableStreamingDictationRecording, StreamingMicCaptureEventReporting {
+private final class FakeFallbackStreamingRecorder: StreamingDictationRecording, PausableStreamingDictationRecording {
     var onAudioBuffer: (([Float]) -> Void)?
     var onRecordingFailed: ((Error) -> Void)?
-    var onCaptureEvent: ((StreamingMicCaptureEvent) -> Void)?
-    var recoveryDiagnostics = StreamingMicRecoveryDiagnosticsSnapshot.empty
-    var captureRecoveryDiagnostics: StreamingMicRecoveryDiagnosticsSnapshot { recoveryDiagnostics }
     var preferredInputDeviceID: AudioObjectID?
 
     var prepareResults: [Result<Void, Error>] = []
@@ -440,15 +161,10 @@ private final class FakeFallbackStreamingRecorder: StreamingDictationRecording, 
     var pauseCalls = 0
     var resumeCalls = 0
     var clearsCallbacksOnCancel = false
-    var onPrepareStarted: (() throws -> Void)?
-    var onStartStarted: (() throws -> Void)?
-    var onCancel: (() -> Bool)?
-    var cancelCallbackRoundTripSucceeded: Bool?
 
     func prepare() throws {
         prepareCalls += 1
         preparedInputDeviceIDs.append(preferredInputDeviceID)
-        try onPrepareStarted?()
         if !prepareResults.isEmpty {
             try prepareResults.removeFirst().get()
         }
@@ -457,7 +173,6 @@ private final class FakeFallbackStreamingRecorder: StreamingDictationRecording, 
     func start() throws {
         startCalls += 1
         startedInputDeviceID = preferredInputDeviceID
-        try onStartStarted?()
         if !startResults.isEmpty {
             try startResults.removeFirst().get()
         }
@@ -470,7 +185,6 @@ private final class FakeFallbackStreamingRecorder: StreamingDictationRecording, 
 
     func cancel() {
         cancelCalls += 1
-        cancelCallbackRoundTripSucceeded = onCancel?()
         if clearsCallbacksOnCancel {
             onAudioBuffer = nil
             onRecordingFailed = nil

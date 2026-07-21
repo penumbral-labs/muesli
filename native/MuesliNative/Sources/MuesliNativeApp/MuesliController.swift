@@ -329,7 +329,6 @@ final class MuesliController: NSObject {
     private weak var preparingMeetingSession: MeetingSession?
     private var activeMeetingID: Int64?
     private var liveMeetingTranscriptGeneration: UUID?
-    private var meetingCheckpointGenerations = MeetingTranscriptCheckpointGenerationTracker()
     private var activeMeetingAudioWarning: ActiveMeetingAudioWarning?
     private var liveMeetingTitleCache: [Int64: String] = [:]
     private var liveManualNotesCache: [Int64: String] = [:]
@@ -381,12 +380,9 @@ final class MuesliController: NSObject {
     private let meetingAutoStopGracePeriod: TimeInterval = 20
     private var meetingActivity: NSObjectProtocol?
     private var isStoppingMeetingRecording = false
-    private var meetingCaptureLifecycle = MeetingCaptureLifecycleCoordinator()
-    private var meetingCaptureLease: MeetingCaptureLifecycleCoordinator.Lease?
     private var isPresentingMeetingTerminationConfirmation = false
     private var isTerminatingAfterMeetingConfirmation = false
-    private var meetingFinalizations = MeetingFinalizationTracker()
-    private var backgroundMeetingProcessingCount: Int { meetingFinalizations.count }
+    private var backgroundMeetingProcessingCount = 0
     private var pendingMeetingCompletionNotification: PendingMeetingCompletionNotification?
     private var contributionMilestonePromptDismissedThisLaunch = false
     private var contributionMilestonePromptSeenIDsThisLaunch: Set<String> = []
@@ -441,7 +437,6 @@ final class MuesliController: NSObject {
         self.audioDuckingController = audioDuckingController
         self.dictationAudioRoutingController = dictationAudioRoutingController
         self.dictationAudioRoutingController.selectedInputDeviceUID = loadedConfig.dictationInputDeviceUID
-        self.dictationAudioRoutingController.selectedMeetingInputDeviceUID = loadedConfig.meetingInputDeviceUID
         self.config = loadedConfig
         if loadedConfig.recordingColorHex != "1e1e2e" {
             MuesliTheme.accentOverrideHex = loadedConfig.recordingColorHex
@@ -478,11 +473,6 @@ final class MuesliController: NSObject {
                     intent: .idlePrewarm(.routeChange),
                     delay: DictationAudioRouteTiming.stabilizationDelay
                 )
-            }
-        }
-        dictationAudioRoutingController.onMeetingPreferredInputDeviceChanged = { [weak self] selection in
-            Task { @MainActor [weak self] in
-                self?.applyMeetingInputRouteSelection(selection)
             }
         }
     }
@@ -792,19 +782,7 @@ final class MuesliController: NSObject {
         dismissPresentedMeetingDetection()
         meetingNotification.close()
         dictationCorrectionMonitor.cancel()
-        if let session = activeMeetingSession {
-            let ownsTerminationTeardown: Bool
-            if let meetingCaptureLease {
-                ownsTerminationTeardown = meetingCaptureLifecycle.beginQuiescing(meetingCaptureLease) == .acquired
-            } else {
-                // Defensive fallback for a legacy/untracked session. Tracked
-                // sessions must acquire the single teardown claim above.
-                ownsTerminationTeardown = true
-            }
-            if ownsTerminationTeardown {
-                session.discardForTermination()
-            }
-        }
+        activeMeetingSession?.discard()
         activeMeetingSession = nil
         if let activeMeetingID {
             resolveLiveMeetingAfterStopFailure(id: activeMeetingID)
@@ -1244,8 +1222,6 @@ final class MuesliController: NSObject {
 
     func updateConfig(_ mutate: (inout AppConfig) -> Void) {
         let wasICloudSyncEnabled = config.iCloudSyncEnabled
-        let previousDictationInputDeviceUID = config.dictationInputDeviceUID
-        let previousMeetingInputDeviceUID = config.meetingInputDeviceUID
         let previousHotkeyTriggerThresholdMS = config.hotkeyTriggerThresholdMS
         let previousComputerUseHotkeyTriggerThresholdMS = config.computerUseHotkeyTriggerThresholdMS
         let previousMeetingRecordingHotkeyTriggerThresholdMS = config.meetingRecordingHotkeyTriggerThresholdMS
@@ -1302,18 +1278,11 @@ final class MuesliController: NSObject {
         selectedPostProcessorBackend = TranscriptCleanupBackendOption.resolved(config.postProcessorBackend)
         applyConfigRuntimeSideEffects(
             wasICloudSyncEnabled: wasICloudSyncEnabled,
-            hotkeyTriggerThresholdChanged: hotkeyTriggerThresholdChanged,
-            dictationInputDeviceChanged: previousDictationInputDeviceUID != config.dictationInputDeviceUID,
-            meetingInputDeviceChanged: previousMeetingInputDeviceUID != config.meetingInputDeviceUID
+            hotkeyTriggerThresholdChanged: hotkeyTriggerThresholdChanged
         )
     }
 
-    private func applyConfigRuntimeSideEffects(
-        wasICloudSyncEnabled: Bool,
-        hotkeyTriggerThresholdChanged: Bool,
-        dictationInputDeviceChanged: Bool = false,
-        meetingInputDeviceChanged: Bool = false
-    ) {
+    private func applyConfigRuntimeSideEffects(wasICloudSyncEnabled: Bool, hotkeyTriggerThresholdChanged: Bool) {
         statusBarController?.refresh()
         statusBarController?.refreshIcon()
         indicator.refreshIcon()
@@ -1322,18 +1291,7 @@ final class MuesliController: NSObject {
         if hotkeyTriggerThresholdChanged {
             configureHotkeyMonitorTiming()
         }
-        if dictationInputDeviceChanged {
-            dictationAudioRoutingController.selectedInputDeviceUID = config.dictationInputDeviceUID
-        }
-        if meetingInputDeviceChanged {
-            dictationAudioRoutingController.selectedMeetingInputDeviceUID = config.meetingInputDeviceUID
-            // Selection resolution is already updated in the controller's
-            // lock-protected cache. Apply it immediately so a wedged CoreAudio
-            // inventory refresh cannot delay the user's active-meeting choice.
-            applyMeetingInputRouteSelection(
-                dictationAudioRoutingController.meetingInputRouteSelection()
-            )
-        }
+        dictationAudioRoutingController.selectedInputDeviceUID = config.dictationInputDeviceUID
         historyWindowController?.updateBackendLabel()
         refreshIndicatorVisibility()
         appState.selectedBackend = selectedBackend
@@ -1378,63 +1336,6 @@ final class MuesliController: NSObject {
     private func isCurrentLiveMeetingTranscriptSession(ownerID: Int64, generation: UUID) -> Bool {
         appState.liveMeetingTranscriptOwnerID == ownerID
             && liveMeetingTranscriptGeneration == generation
-    }
-
-    /// Advances durable checkpoint ownership before a capture generation can
-    /// emit callbacks. Resume calls this before reopening its existing row, so
-    /// a queued callback from the completed generation cannot pass an ABA
-    /// `completed -> recording` status transition.
-    @discardableResult
-    func advanceLiveMeetingCheckpointGeneration(
-        meetingID: Int64,
-        generation: UUID = UUID()
-    ) -> UUID {
-        meetingCheckpointGenerations.replaceGeneration(for: meetingID, with: generation)
-        return generation
-    }
-
-    /// Durably checkpoints transcript text for the capture that produced it.
-    /// Display ownership is deliberately checked only after persistence: a new
-    /// meeting may own the captions UI while an older capture still has queued
-    /// final chunk callbacks that must remain recoverable after a crash.
-    @discardableResult
-    func deliverLiveMeetingTranscriptCheckpointEntries(
-        _ entries: [LiveTranscriptCheckpointEntry],
-        meetingID: Int64,
-        generation: UUID
-    ) -> Bool {
-        guard !entries.isEmpty else { return false }
-        guard meetingCheckpointGenerations.accepts(
-            meetingID: meetingID,
-            generation: generation
-        ) else { return false }
-        let didPersist: Bool
-        do {
-            didPersist = try dictationStore.appendLiveTranscriptCheckpoints(
-                meetingID: meetingID,
-                entries: entries
-            )
-        } catch {
-            fputs("[muesli-native] failed to checkpoint live transcript for meeting \(meetingID): \(error)\n", stderr)
-            return false
-        }
-        guard didPersist else { return false }
-
-        guard isCurrentLiveMeetingTranscriptSession(
-            ownerID: meetingID,
-            generation: generation
-        ) else { return false }
-
-        // Live view is arrival-order closed captions. Recovery reads checkpoints
-        // sorted by segment timestamps, so the durable fallback stays ordered.
-        let lines = entries.map { "[\($0.timestampLabel)] \($0.speaker): \($0.text)" }
-        appState.liveMeetingTranscript += lines.joined(separator: "\n") + "\n"
-        indicator.updateMeetingTranscript(
-            transcript: appState.liveMeetingTranscript,
-            partialYou: appState.liveMeetingPartialYou,
-            partialOthers: appState.liveMeetingPartialOthers
-        )
-        return true
     }
 
     private func refreshContributionMilestonePrompt(totalWords: Int, totalMeetings: Int) {
@@ -2018,17 +1919,6 @@ final class MuesliController: NSObject {
 
     func selectDictationInputDeviceUID(_ uid: String?) {
         updateConfig { $0.dictationInputDeviceUID = uid }
-    }
-
-    func selectMeetingInputDeviceUID(_ uid: String?) {
-        updateConfig { $0.meetingInputDeviceUID = uid }
-    }
-
-    private func applyMeetingInputRouteSelection(_ selection: MeetingInputRouteSelection) {
-        preparingMeetingSession?.requestMicrophoneRouteChange(selection)
-        if activeMeetingSession !== preparingMeetingSession {
-            activeMeetingSession?.requestMicrophoneRouteChange(selection)
-        }
     }
 
     func updateUpcomingMeetingsWindow(dayCount: Int) {
@@ -4643,7 +4533,7 @@ final class MuesliController: NSObject {
                 guard let self else { return }
                 self.isPresentingMeetingTerminationConfirmation = false
                 guard response == .alertSecondButtonReturn else { return }
-                await self.discardMeetingStateForTermination()
+                self.discardMeetingStateForTermination()
                 self.isTerminatingAfterMeetingConfirmation = true
                 NSApp.terminate(nil)
             }
@@ -4655,39 +4545,20 @@ final class MuesliController: NSObject {
         return false
     }
 
-    private func discardMeetingStateForTermination() async {
+    private func discardMeetingStateForTermination() {
+        activeMeetingSession?.discard()
+        activeMeetingSession = nil
+        preparingMeetingSession?.discard()
+        preparingMeetingSession = nil
         clearLiveMeetingTranscript()
         disarmMeetingAutoStop()
-
-        if let meetingStartMeetingID, let meetingStartTask {
+        if let meetingStartMeetingID {
             canceledMeetingStartIDs.insert(meetingStartMeetingID)
-            if let meetingCaptureLease {
-                meetingCaptureLifecycle.beginQuiescing(meetingCaptureLease)
-            }
-            meetingStartTask.cancel()
-            preparingMeetingSession?.stopStreamingPartials()
-            // Startup owns system-tap construction. Let its normal cancellation
-            // path serialize and await cleanup instead of racing a forced stop
-            // against CoreAudio aggregate/tap creation.
-            await meetingStartTask.value
-        } else if let session = activeMeetingSession,
-                  let lease = meetingCaptureLease,
-                  meetingCaptureLifecycle.beginQuiescing(lease) == .acquired {
-            let meetingID = activeMeetingID
-            isStoppingMeetingRecording = true
-            await session.discard()
-            if completeMeetingCaptureQuiescence(
-                session: session,
-                lease: lease,
-                meetingID: meetingID
-            ), let meetingID {
-                resolveLiveMeetingAfterStopFailure(id: meetingID)
-            }
+            resolveLiveMeetingAfterStartFailure(id: meetingStartMeetingID)
         }
-
+        meetingStartTask?.cancel()
         meetingStartTask = nil
         meetingStartMeetingID = nil
-        preparingMeetingSession = nil
         isStartingMeetingRecording = false
         isStoppingMeetingRecording = false
         updateMeetingStartStatus(nil)
@@ -4803,8 +4674,6 @@ final class MuesliController: NSObject {
             )
             return false
         }
-        guard let captureLease = meetingCaptureLifecycle.beginCapture() else { return false }
-        meetingCaptureLease = captureLease
         let templateSnapshot = defaultMeetingTemplate()
         let meetingID: Int64
         do {
@@ -4826,9 +4695,6 @@ final class MuesliController: NSObject {
                 showMeetingDocument(id: meetingID)
             }
         } catch {
-            meetingCaptureLifecycle.beginQuiescing(captureLease)
-            _ = meetingCaptureLifecycle.completeQuiescence(captureLease)
-            meetingCaptureLease = nil
             fputs("[muesli-native] failed to create live meeting: \(error)\n", stderr)
             recordDiagnosticIncident(
                 kind: .meetingStartFailed,
@@ -4839,7 +4705,6 @@ final class MuesliController: NSObject {
             presentErrorAlert(title: "Meeting failed to start", message: error.localizedDescription)
             return false
         }
-        meetingFinalizations.relinquishUIOwnership()
         armMeetingAutoStop(
             source: startOrigin.signalLossSource(
                 explicitSource: autoStopSource,
@@ -4851,6 +4716,7 @@ final class MuesliController: NSObject {
         // Keep this after backend normalization and live-meeting creation so
         // a failed meeting start does not silently cancel an active dictation.
         cancelDictationAudioSessionForMeetingRecordingIfNeeded()
+        syncDictationRecorderWarmup(intent: .idlePrewarm(.meetingStateChanged))
         meetingStartMeetingID = meetingID
         updateMeetingStartStatus("Meeting transcription will start shortly.")
         indicator.setState(.preparing, config: config)
@@ -4870,12 +4736,10 @@ final class MuesliController: NSObject {
                     backend: meetingBackend,
                     templateSnapshot: templateSnapshot,
                     endDate: endDate,
-                    captureLease: captureLease,
                     previousMeetingNotes: previousMeetingNotes
                 )
             } catch is CancellationError {
                 if self.meetingStartMeetingID == meetingID {
-                    self.finishFailedMeetingCaptureStart(captureLease)
                     self.disarmMeetingAutoStop()
                     self.resolveLiveMeetingAfterStartFailure(id: meetingID)
                     self.cancelMeetingRecordingHotkeyToggleAfterFailedStart(meetingID: meetingID)
@@ -4889,7 +4753,6 @@ final class MuesliController: NSObject {
                 }
             } catch {
                 if self.meetingStartMeetingID == meetingID {
-                    self.finishFailedMeetingCaptureStart(captureLease)
                     fputs("[muesli-native] failed to start meeting: \(error)\n", stderr)
                     _ = self.recordDiagnosticIncident(
                         kind: .meetingStartFailed,
@@ -4979,18 +4842,11 @@ final class MuesliController: NSObject {
             )
             return
         }
-        guard let captureLease = meetingCaptureLifecycle.beginCapture() else { return }
-        meetingCaptureLease = captureLease
-
-        // Invalidate the completed capture synchronously before this same row
-        // transitions back to `.recording` below.
-        advanceLiveMeetingCheckpointGeneration(meetingID: meetingID)
 
         let priorTranscript: String
         do {
             priorTranscript = try dictationStore.prepareMeetingForResume(id: meetingID)
         } catch {
-            finishFailedMeetingCaptureStart(captureLease)
             fputs("[muesli-native] failed to prepare meeting resume \(meetingID): \(error)\n", stderr)
             presentErrorAlert(title: "Resume failed", message: error.localizedDescription)
             return
@@ -5003,7 +4859,6 @@ final class MuesliController: NSObject {
         // REUSE the existing row — do NOT call createLiveMeeting.
         activeMeetingID = meetingID
         activeMeetingAudioWarning = nil
-        meetingFinalizations.relinquishUIOwnership()
         syncAppState()
 
         armMeetingAutoStop(
@@ -5015,6 +4870,7 @@ final class MuesliController: NSObject {
         )
         isStartingMeetingRecording = true
         cancelDictationAudioSessionForMeetingRecordingIfNeeded()
+        syncDictationRecorderWarmup(intent: .idlePrewarm(.meetingStateChanged))
         meetingStartMeetingID = meetingID
         updateMeetingStartStatus("Resuming meeting recording…")
         indicator.setState(.preparing, config: config)
@@ -5034,12 +4890,10 @@ final class MuesliController: NSObject {
                     backend: meetingBackend,
                     templateSnapshot: self.meetingTemplateSnapshot(for: meeting),
                     endDate: nil,
-                    captureLease: captureLease,
                     previousMeetingNotes: previousMeetingNotes
                 )
             } catch is CancellationError {
                 if self.meetingStartMeetingID == meetingID {
-                    self.finishFailedMeetingCaptureStart(captureLease)
                     self.disarmMeetingAutoStop()
                     self.resolveLiveMeetingAfterStartFailure(id: meetingID)
                     self.cancelMeetingRecordingHotkeyToggleAfterFailedStart(meetingID: meetingID)
@@ -5053,7 +4907,6 @@ final class MuesliController: NSObject {
                 }
             } catch {
                 if self.meetingStartMeetingID == meetingID {
-                    self.finishFailedMeetingCaptureStart(captureLease)
                     fputs("[muesli-native] failed to resume meeting: \(error)\n", stderr)
                     self.disarmMeetingAutoStop()
                     self.resolveLiveMeetingAfterStartFailure(id: meetingID)
@@ -5244,22 +5097,18 @@ final class MuesliController: NSObject {
         guard isStartingMeetingRecording, activeMeetingSession == nil else { return }
 
         if let meetingID = meetingStartMeetingID {
-            // Keep the capture lease and preparation state until the startup
-            // task has unwound and its MeetingSession has released both audio
-            // sources. Exposing idle earlier permits a new graph to overlap the
-            // canceled CoreAudio start/cleanup.
+            // Live meeting start cancellation
             canceledMeetingStartIDs.insert(meetingID)
-            if let meetingCaptureLease {
-                meetingCaptureLifecycle.beginQuiescing(meetingCaptureLease)
-            }
             meetingStartTask?.cancel()
             preparingMeetingSession?.stopStreamingPartials()
             clearLiveMeetingTranscript(ownerID: meetingID)
-            updateMeetingStartStatus("Stopping meeting transcription…")
-            statusBarController?.setStatus("Stopping meeting transcription…")
-            statusBarController?.refresh()
-            syncAppState()
-            return
+            resolveLiveMeetingAfterStartFailure(id: meetingID)
+            cancelMeetingRecordingHotkeyToggleAfterFailedStart(meetingID: meetingID)
+            meetingMonitor.resumeAfterCooldown()
+            meetingMonitor.refreshState()
+            meetingStartTask = nil
+            meetingStartMeetingID = nil
+            syncDictationRecorderWarmup(intent: .idlePrewarm(.meetingStateChanged))
         } else {
             // Audio import cancellation
             importTask?.cancel()
@@ -5281,22 +5130,9 @@ final class MuesliController: NSObject {
         syncAppState()
     }
 
-    private func finishFailedMeetingCaptureStart(
-        _ lease: MeetingCaptureLifecycleCoordinator.Lease
-    ) {
-        meetingCaptureLifecycle.beginQuiescing(lease)
-        guard meetingCaptureLifecycle.completeQuiescence(lease) else { return }
-        if meetingCaptureLease == lease {
-            meetingCaptureLease = nil
-        }
-    }
-
     private func finishMeetingStartAttempt(meetingID: Int64) {
         guard meetingStartMeetingID == meetingID else { return }
         let didStartActiveSession = activeMeetingID == meetingID && activeMeetingSession != nil
-        if !didStartActiveSession, let meetingCaptureLease {
-            finishFailedMeetingCaptureStart(meetingCaptureLease)
-        }
         canceledMeetingStartIDs.remove(meetingID)
         meetingStartTask = nil
         meetingStartMeetingID = nil
@@ -5323,19 +5159,12 @@ final class MuesliController: NSObject {
         backend: BackendOption,
         templateSnapshot: MeetingTemplateSnapshot,
         endDate: Date?,
-        captureLease: MeetingCaptureLifecycleCoordinator.Lease,
         previousMeetingNotes: String? = nil
     ) async throws {
         var shouldRetryAfterPermissionRequest = config.useCoreAudioTap
         statusBarController?.setStatus("Meeting transcription will start shortly.")
         statusBarController?.refresh()
         try Task.checkCancellation()
-        // Meeting capture never races a prepared or active dictation graph. This
-        // awaited handoff includes idle prewarm teardown and the recorder's own
-        // serialized child-queue cleanup for both new and resumed meetings.
-        await dictationAudioSessionManager.quiesceForMeeting()
-        try Task.checkCancellation()
-        try checkMeetingStartStillCurrent(meetingID)
         try await transcriptionCoordinator.preloadRequired(
             backend: backend,
             enablePostProcessor: false,
@@ -5347,14 +5176,11 @@ final class MuesliController: NSObject {
         while true {
             try Task.checkCancellation()
             try checkMeetingStartStillCurrent(meetingID)
-            let routeSelection = dictationAudioRoutingController.meetingInputRouteSelection()
-            let meetingRouteController = dictationAudioRoutingController
+            let routeSnapshot = dictationAudioRoutingController.meetingInputRouteSnapshot()
             let meetingMicRecorder = RouteAwareMeetingMicRecorder(
-                routeSnapshotProvider: {
-                    meetingRouteController.meetingInputRouteSnapshot()
-                }
+                routeSnapshotProvider: { routeSnapshot }
             )
-            meetingMicRecorder.requestInputRouteChange(routeSelection)
+            meetingMicRecorder.preferredInputDeviceID = routeSnapshot.preferredInputDeviceID
             let meetingSession = MeetingSession(
                 title: title,
                 calendarEventID: calendarEventID,
@@ -5365,16 +5191,11 @@ final class MuesliController: NSObject {
                 transcriptionCoordinator: transcriptionCoordinator,
                 meetingMicRecorder: meetingMicRecorder
             )
-            let transcriptGeneration = advanceLiveMeetingCheckpointGeneration(meetingID: meetingID)
+            let transcriptGeneration = UUID()
             meetingSession.previousMeetingNotes = previousMeetingNotes
 
             do {
                 preparingMeetingSession = meetingSession
-                // Close the cache-snapshot/startup race: a device can connect
-                // after the recorder is created but before its graph starts.
-                meetingSession.requestMicrophoneRouteChange(
-                    dictationAudioRoutingController.meetingInputRouteSelection()
-                )
                 defer {
                     if preparingMeetingSession === meetingSession {
                         preparingMeetingSession = nil
@@ -5393,12 +5214,13 @@ final class MuesliController: NSObject {
                     }
                 }
                 meetingSession.onChunkTranscribed = { [weak self, weak meetingSession] segments, speaker in
-                    // Capture the old session's immutable time base before its
-                    // delayed MainActor delivery. Transcript finalization may
-                    // outlive active-session UI ownership and release it first.
-                    let liveTranscriptStart = meetingSession?.startTime ?? Date()
-                    Task { @MainActor [weak self] in
+                    Task { @MainActor [weak self, weak meetingSession] in
                         guard let self else { return }
+                        guard self.isCurrentLiveMeetingTranscriptSession(
+                            ownerID: meetingID,
+                            generation: transcriptGeneration
+                        ) else { return }
+                        let liveTranscriptStart = meetingSession?.startTime ?? Date()
                         let liveTranscriptCalendar = Calendar(identifier: .gregorian)
                         let entries = segments.compactMap { segment -> LiveTranscriptCheckpointEntry? in
                             let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5420,10 +5242,19 @@ final class MuesliController: NSObject {
                             )
                         }
                         guard !entries.isEmpty else { return }
-                        self.deliverLiveMeetingTranscriptCheckpointEntries(
-                            entries,
-                            meetingID: meetingID,
-                            generation: transcriptGeneration
+                        do {
+                            try self.dictationStore.appendLiveTranscriptCheckpoints(meetingID: meetingID, entries: entries)
+                        } catch {
+                            fputs("[muesli-native] failed to checkpoint live transcript for meeting \(meetingID): \(error)\n", stderr)
+                        }
+                        // Live view is arrival-order closed captions. Recovery reads checkpoints sorted
+                        // by segment timestamps, so the durable fallback stays temporally ordered.
+                        let lines = entries.map { "[\($0.timestampLabel)] \($0.speaker): \($0.text)" }
+                        self.appState.liveMeetingTranscript += lines.joined(separator: "\n") + "\n"
+                        self.indicator.updateMeetingTranscript(
+                            transcript: self.appState.liveMeetingTranscript,
+                            partialYou: self.appState.liveMeetingPartialYou,
+                            partialOthers: self.appState.liveMeetingPartialOthers
                         )
                     }
                 }
@@ -5477,13 +5308,7 @@ final class MuesliController: NSObject {
                 if Task.isCancelled || canceledMeetingStartIDs.contains(meetingID) {
                     throw CancellationError()
                 }
-                guard meetingCaptureLifecycle.markActive(captureLease) else {
-                    throw CancellationError()
-                }
                 activeMeetingSession = meetingSession
-                meetingSession.requestMicrophoneRouteChange(
-                    dictationAudioRoutingController.meetingInputRouteSelection()
-                )
                 activeMeetingID = meetingID
                 activeMeetingAutoStop.markRecordingStarted(now: Date())
                 meetingMonitor.suppressWhileActive()
@@ -5499,7 +5324,7 @@ final class MuesliController: NSObject {
                 return
             } catch {
                 clearLiveMeetingTranscript(ownerID: meetingID, generation: transcriptGeneration)
-                await meetingSession.discard()
+                meetingSession.discard()
                 guard shouldRetryAfterPermissionRequest,
                       case .tapCreationFailed = error as? CoreAudioSystemRecorder.RecorderError else {
                     throw error
@@ -5695,7 +5520,6 @@ final class MuesliController: NSObject {
 
     private func discardMeetingRecording(resolution: MeetingDiscardResolution = .discardRecording) {
         meetingRecordingHotkeyMonitor.cancelToggleMode()
-        guard !isStoppingMeetingRecording else { return }
         clearLiveMeetingTranscript()
         guard let sessionToDiscard = activeMeetingSession else {
             // Fallback recovery: reset indicator if session is nil
@@ -5713,63 +5537,19 @@ final class MuesliController: NSObject {
             }
             return
         }
-        guard let captureLease = meetingCaptureLease,
-              meetingCaptureLifecycle.beginQuiescing(captureLease) == .acquired else {
-            fputs("[meeting] refusing discard without the active capture lease\n", stderr)
-            return
-        }
-        isStoppingMeetingRecording = true
+        sessionToDiscard.discard()
         disarmMeetingAutoStop()
-        meetingEndTimer?.invalidate()
-        meetingEndTimer = nil
+        self.activeMeetingSession = nil
         indicator.setMeetingRecording(false, config: config)
-        statusBarController?.setStatus("Stopping meeting transcription…")
-        statusBarController?.refresh()
-        let liveMeetingID = activeMeetingID
-        syncAppState()
-
-        Task { @MainActor [weak self, sessionToDiscard] in
-            await sessionToDiscard.discard()
-            guard let self else { return }
-            guard self.completeMeetingCaptureQuiescence(
-                session: sessionToDiscard,
-                lease: captureLease,
-                meetingID: liveMeetingID
-            ) else { return }
-
-            if let liveMeetingID {
-                self.resolveLiveMeetingAfterDiscard(id: liveMeetingID, resolution: resolution)
-            } else {
-                self.finishDiscardMeetingRecording()
-            }
-        }
-    }
-
-    @discardableResult
-    private func completeMeetingCaptureQuiescence(
-        session: MeetingSession,
-        lease: MeetingCaptureLifecycleCoordinator.Lease,
-        meetingID: Int64?
-    ) -> Bool {
-        guard activeMeetingSession === session else { return false }
-        guard meetingCaptureLifecycle.completeQuiescence(lease) else { return false }
-        if meetingCaptureLease == lease {
-            meetingCaptureLease = nil
-        }
-
-        activeMeetingSession = nil
-        if activeMeetingID == meetingID {
+        if let meetingID = activeMeetingID {
             activeMeetingID = nil
+            if activeMeetingAudioWarning?.meetingID == meetingID {
+                activeMeetingAudioWarning = nil
+            }
+            resolveLiveMeetingAfterDiscard(id: meetingID, resolution: resolution)
+        } else {
+            finishDiscardMeetingRecording()
         }
-        if let meetingID, activeMeetingAudioWarning?.meetingID == meetingID {
-            activeMeetingAudioWarning = nil
-        }
-        isStoppingMeetingRecording = false
-        meetingMonitor.resumeAfterCooldown()
-        meetingMonitor.refreshState()
-        syncDictationRecorderWarmup(intent: .idlePrewarm(.meetingStateChanged))
-        syncAppState()
-        return true
     }
 
     private func finishDiscardMeetingRecording() {
@@ -6017,8 +5797,6 @@ final class MuesliController: NSObject {
             setState(.idle)
             return
         }
-        guard let captureLease = meetingCaptureLease,
-              meetingCaptureLifecycle.beginQuiescing(captureLease) == .acquired else { return }
         isStoppingMeetingRecording = true
         disarmMeetingAutoStop()
         meetingEndTimer?.invalidate()
@@ -6034,22 +5812,28 @@ final class MuesliController: NSObject {
         indicator.setMeetingRecording(false, config: config)
         indicator.setTranscribingTitle("Transcribing", config: config)
         setState(.transcribing)
-        let processingToken = meetingFinalizations.begin(designateAsUIOwner: true)
+        let processingGeneration = backgroundMeetingProcessingCount + 1
         sessionToStop.onProgress = { [weak self] stage in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard MeetingFinalizationUIUpdatePolicy.canPublishProgress(
-                    isUIOwner: self.meetingFinalizations.isUIOwner(processingToken),
-                    isMeetingRecording: self.isMeetingRecording(),
-                    isStartingMeeting: self.isStartingMeetingRecording
-                ) else { return }
+                guard let self,
+                      !self.isMeetingRecording(),
+                      !self.isStartingMeetingRecording,
+                      self.backgroundMeetingProcessingCount == processingGeneration else { return }
                 self.setMeetingProcessingStage(stage)
             }
         }
 
-        // Transcript work is background processing, but the capture lease stays
-        // occupied until MeetingSession has actually stopped both audio sources.
-        syncAppState()
+        // Unblock new recordings immediately — transcription runs in the background
+        activeMeetingSession = nil
+        activeMeetingID = nil
+        if let liveMeetingID, activeMeetingAudioWarning?.meetingID == liveMeetingID {
+            activeMeetingAudioWarning = nil
+        }
+        isStoppingMeetingRecording = false
+        backgroundMeetingProcessingCount += 1
+        meetingMonitor.resumeAfterCooldown()
+        meetingMonitor.refreshState()
+        syncDictationRecorderWarmup(intent: .idlePrewarm(.meetingStateChanged))
 
         Task { [weak self] in
             guard let self else { return }
@@ -6058,25 +5842,11 @@ final class MuesliController: NSObject {
             var meetingResult: MeetingSessionResult?
             var failedLiveMeetingID: Int64?
             do {
-                let stopped = try await sessionToStop.stop(onCaptureQuiesced: { [weak self, weak sessionToStop] in
-                    await MainActor.run {
-                        guard let self, let sessionToStop else { return }
-                        _ = self.completeMeetingCaptureQuiescence(
-                            session: sessionToStop,
-                            lease: captureLease,
-                            meetingID: liveMeetingID
-                        )
-                    }
-                })
+                let stopped = try await sessionToStop.stop()
                 let result = await self.mergedResumeResult(for: stopped, meetingID: liveMeetingID)
                 meetingResult = result
                 meetingTitle = result.title
                 await MainActor.run {
-                    guard MeetingFinalizationUIUpdatePolicy.canPublishProgress(
-                        isUIOwner: self.meetingFinalizations.isUIOwner(processingToken),
-                        isMeetingRecording: self.isMeetingRecording(),
-                        isStartingMeeting: self.isStartingMeetingRecording
-                    ) else { return }
                     self.setMeetingProcessingStatus("Finalizing")
                 }
                 let recordingSaveDecision = await self.recordingSaveDecision(for: result)
@@ -6125,20 +5895,14 @@ final class MuesliController: NSObject {
                 }
             }
             await MainActor.run {
-                let ownedUIBeforeCompletion = self.meetingFinalizations.isUIOwner(processingToken)
-                self.meetingFinalizations.complete(processingToken)
+                self.backgroundMeetingProcessingCount -= 1
                 if let failedLiveMeetingID {
                     self.resolveLiveMeetingAfterStopFailure(id: failedLiveMeetingID)
                 } else if let liveMeetingID {
                     // Resume merged + persisted successfully — drop the prior-transcript marker.
                     self.pendingResumePriorTranscript[liveMeetingID] = nil
                 }
-                if MeetingFinalizationUIUpdatePolicy.canRestoreIdle(
-                    ownedUIBeforeCompletion: ownedUIBeforeCompletion,
-                    isMeetingRecording: self.isMeetingRecording(),
-                    isStartingMeeting: self.isStartingMeetingRecording,
-                    activeFinalizationCount: self.backgroundMeetingProcessingCount
-                ) {
+                if !self.isMeetingRecording() && !self.isStartingMeetingRecording && self.backgroundMeetingProcessingCount == 0 {
                     self.setState(.idle)
                     self.statusBarController?.refresh()
                 }
@@ -6798,8 +6562,6 @@ final class MuesliController: NSObject {
 
     private func endMeetingActivity() {
         guard backgroundMeetingProcessingCount == 0,
-              !meetingCaptureLifecycle.isCaptureOccupied,
-              !isStartingMeetingRecording,
               activeMeetingSession?.isRecording != true else { return }
         guard let activity = meetingActivity else { return }
         ProcessInfo.processInfo.endActivity(activity)
@@ -7099,7 +6861,6 @@ final class MuesliController: NSObject {
 
     private func handleComputerUsePrepare() {
         guard canPrepareComputerUseCommand else { return }
-        meetingFinalizations.relinquishUIOwnership()
         fputs("[cua] prepare\n", stderr)
         meetingMonitor.suppressWhileActive()
         meetingMonitor.refreshState()
@@ -7118,7 +6879,6 @@ final class MuesliController: NSObject {
 
     private func handleComputerUseStart() {
         guard canStartComputerUseCommand else { return }
-        meetingFinalizations.relinquishUIOwnership()
         fputs("[cua] recording start\n", stderr)
         meetingMonitor.suppressWhileActive()
         computerUseRecorder.preferredInputDeviceID = nil
@@ -7261,10 +7021,7 @@ final class MuesliController: NSObject {
             && dictationStartedAt == nil
             && computerUseCommandStartedAt == nil
             && !isNemotron35Streaming
-            && ForegroundActivityUIClaimPolicy.canBeginCapture(
-                sharedState: dictationState,
-                meetingFinalizationOwnsUI: meetingFinalizations.uiOwner != nil
-            )
+            && dictationState == .idle
     }
 
     private var canStartComputerUseCommand: Bool {
@@ -7273,11 +7030,7 @@ final class MuesliController: NSObject {
             && dictationStartedAt == nil
             && computerUseCommandStartedAt == nil
             && !isNemotron35Streaming
-            && ForegroundActivityUIClaimPolicy.canBeginCapture(
-                sharedState: dictationState,
-                meetingFinalizationOwnsUI: meetingFinalizations.uiOwner != nil,
-                allowsPreparedState: true
-            )
+            && (dictationState == .idle || dictationState == .preparing)
     }
 
     @MainActor
@@ -7534,15 +7287,15 @@ final class MuesliController: NSObject {
             beginDictationLatencyTrace(reason: "prepare")
         }
         markDictationLatency("prepare_requested")
-        guard ForegroundActivityUIClaimPolicy.dictationPrepareClaimsUI(
-            isStreamingBackend: isStreamingDictationBackend,
-            hasActiveAudioSession: dictationAudioSessionManager.hasActiveSession
-        ) else { return }
-        meetingFinalizations.relinquishUIOwnership()
-        meetingMonitor.suppressWhileActive()
-        meetingMonitor.refreshState()
-        setState(.preparing)
-        dictationAudioSessionManager.arm(source: "hotkey_prepare")
+        guard !isStreamingDictationBackend else {
+            return
+        }
+        if !dictationAudioSessionManager.hasActiveSession {
+            meetingMonitor.suppressWhileActive()
+            meetingMonitor.refreshState()
+            setState(.preparing)
+            dictationAudioSessionManager.arm(source: "hotkey_prepare")
+        }
     }
 
     private func handleArm() {
@@ -7552,10 +7305,7 @@ final class MuesliController: NSObject {
         if dictationLatencyTraceID == nil {
             beginDictationLatencyTrace(reason: "hotkey")
         }
-        if ForegroundActivityUIClaimPolicy.dictationArmClaimsUI(
-            isStreamingBackend: isStreamingDictationBackend
-        ) {
-            meetingFinalizations.relinquishUIOwnership()
+        if !isStreamingDictationBackend {
             setState(.preparing)
             meetingMonitor.suppressWhileActive()
             meetingMonitor.refreshState()
@@ -7836,7 +7586,6 @@ final class MuesliController: NSObject {
         guard ensureDictationBackendReady() else { return }
         if isMeetingRecording() { return }
         if blockDictationForMeetingActivityIfNeeded() { return }
-        meetingFinalizations.relinquishUIOwnership()
 
         // Nemotron backends support hold-to-talk (record → transcribe on release) in
         // addition to double-tap handsfree streaming. The hold path uses the normal
@@ -8011,7 +7760,6 @@ final class MuesliController: NSObject {
         guard ensureDictationBackendReady() else { return }
         if isMeetingRecording() { return }
         if blockDictationForMeetingActivityIfNeeded() { return }
-        meetingFinalizations.relinquishUIOwnership()
         fputs("[muesli-native] toggle dictation start\n", stderr)
         if dictationLatencyTraceID == nil {
             beginDictationLatencyTrace(reason: "toggle")
@@ -8064,10 +7812,7 @@ final class MuesliController: NSObject {
     func toggleVoiceNoteRecording() {
         if dictationStartedAt != nil || dictationAudioSessionManager.hasActiveSession || isNemotron35Streaming {
             handleToggleStop()
-        } else if ForegroundActivityUIClaimPolicy.canBeginCapture(
-            sharedState: dictationState,
-            meetingFinalizationOwnsUI: meetingFinalizations.uiOwner != nil
-        ) {
+        } else if dictationState == .idle {
             handleToggleStart(outputMode: .voiceNote)
         }
     }
