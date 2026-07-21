@@ -564,6 +564,7 @@ struct AppConfigTests {
         let config = AppConfig()
         #expect(config.sttBackend == BackendOption.whisper.backend)
         #expect(config.sttModel == BackendOption.whisper.model)
+        #expect(config.meetingInputDeviceUID == nil)
         #expect(config.cohereLanguage == CohereTranscribeLanguage.defaultLanguage.rawValue)
         #expect(config.indicASRLanguage == IndicASRLanguage.defaultLanguage.rawValue)
         #expect(config.meetingTranscriptionBackend == BackendOption.whisper.backend)
@@ -816,6 +817,7 @@ struct AppConfigTests {
         config.enableScreenContext = true
         config.enableDictationOCRContext = true
         config.enableLiveStreamingPartials = true
+        config.meetingInputDeviceUID = "meeting-mic"
         config.enableAutomaticDiagnosticIssuePrompts = true
         config.meetingLiveCaptionBackend = MeetingLiveCaptionBackend.nemotron35.rawValue
         config.showMeetingTranscriptOnIndicatorHover = false
@@ -891,6 +893,7 @@ struct AppConfigTests {
         #expect(decoded.enableScreenContext == true)
         #expect(decoded.enableDictationOCRContext == true)
         #expect(decoded.enableLiveStreamingPartials == true)
+        #expect(decoded.meetingInputDeviceUID == "meeting-mic")
         #expect(decoded.enableAutomaticDiagnosticIssuePrompts == true)
         #expect(decoded.resolvedMeetingLiveCaptionBackend == .nemotron35)
         #expect(decoded.showMeetingTranscriptOnIndicatorHover == false)

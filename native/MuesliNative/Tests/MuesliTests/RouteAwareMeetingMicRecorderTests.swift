@@ -106,6 +106,72 @@ struct RouteAwareMeetingMicRecorderTests {
         #expect(diagnostics.preferredInputDeviceID == 82)
         #expect(diagnostics.route == route)
     }
+
+    @Test("live route change keeps old recorder until replacement produces audio")
+    func liveRouteChangeWaitsForFirstBuffer() async throws {
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let appScoped = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: appScoped,
+            handoffTimeout: 1
+        )
+        var samples: [[Int16]] = []
+        recorder.onRawPCMSamples = { samples.append($0) }
+
+        try recorder.start()
+        recorder.preferredInputDeviceID = 91
+        try await waitUntil { appScoped.startCalls == 1 }
+
+        system.onRawPCMSamples?([1])
+        #expect(recorder.activeRecorderKindForDebug() == .systemDefault)
+        #expect(system.stopCalls == 0)
+
+        appScoped.onRawPCMSamples?([2])
+        try await waitUntil { recorder.activeRecorderKindForDebug() == .appScoped }
+
+        #expect(samples == [[1], [2]])
+        #expect(system.stopCalls == 1)
+        #expect(system.cancelCalls == 1)
+    }
+
+    @Test("failed live route change preserves current capture")
+    func failedLiveRouteChangePreservesCurrentCapture() async throws {
+        let system = FakeMeetingMicRecorder(kind: .systemDefaultStreaming)
+        let appScoped = FakeMeetingMicRecorder(kind: .appScopedAudioQueue)
+        appScoped.startError = NSError(domain: "test", code: 1)
+        let recorder = RouteAwareMeetingMicRecorder(
+            systemDefaultRecorder: system,
+            appScopedRecorder: appScoped,
+            handoffTimeout: 1
+        )
+        var samples: [[Int16]] = []
+        recorder.onRawPCMSamples = { samples.append($0) }
+
+        try recorder.start()
+        recorder.preferredInputDeviceID = 91
+        try await waitUntil { appScoped.cancelCalls == 1 }
+        system.onRawPCMSamples?([7])
+
+        #expect(recorder.activeRecorderKindForDebug() == .systemDefault)
+        #expect(system.stopCalls == 0)
+        #expect(samples == [[7]])
+    }
+
+    private func waitUntil(
+        timeout: Duration = .seconds(1),
+        condition: @escaping () -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !condition() {
+            guard clock.now < deadline else {
+                Issue.record("Timed out waiting for asynchronous recorder state")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
 }
 
 private final class FakeMeetingMicRecorder: MeetingMicRecording {
@@ -120,6 +186,7 @@ private final class FakeMeetingMicRecorder: MeetingMicRecording {
     var resumeCalls = 0
     var stopCalls = 0
     var cancelCalls = 0
+    var startError: Error?
 
     init(kind: MeetingMicRecorderKind) {
         self.kind = kind
@@ -131,6 +198,7 @@ private final class FakeMeetingMicRecorder: MeetingMicRecording {
 
     func start() throws {
         startCalls += 1
+        if let startError { throw startError }
     }
 
     func pause() {
