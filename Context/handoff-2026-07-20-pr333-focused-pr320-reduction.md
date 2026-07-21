@@ -38,6 +38,8 @@ The focused branch now closes three meeting-only lifecycle gaps without restorin
 
 Deterministic coverage now includes active failure recovery, failed same-route retry, blocked-start timeout, stop during blocked startup, discard during blocked startup, rapid A to B to C route changes, pause during a pending handoff, active failure during a pending handoff, stop and discard racing with first-buffer promotion, repeated timeouts without stale promotion, failed AVAudioEngine restart state, stale callback rejection, and protected AVFAudio input reads and routing.
 
+The route-aware recorder suite is serialized at the suite level because several cases intentionally block dedicated dispatch workers to prove stop, discard, and timeout behavior. Concurrency remains inside each test, while unrelated race harnesses no longer starve one another on smaller CI runners.
+
 The four suites that exercise this work are now part of the required meetings CI shard:
 
 - `AudioGraphExceptionBridgeTests`

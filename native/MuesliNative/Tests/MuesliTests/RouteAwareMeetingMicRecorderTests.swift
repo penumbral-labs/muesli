@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import MuesliNativeApp
 
-@Suite("RouteAwareMeetingMicRecorder")
+@Suite("RouteAwareMeetingMicRecorder", .serialized)
 struct RouteAwareMeetingMicRecorderTests {
     @Test("default input uses system default recorder")
     func defaultInputUsesSystemDefaultRecorder() throws {
@@ -132,6 +132,7 @@ struct RouteAwareMeetingMicRecorderTests {
 
         appScoped.onRawPCMSamples?([2])
         try await waitUntil { recorder.activeRecorderKindForDebug() == .appScoped }
+        try await waitUntil { samples == [[1], [2]] }
 
         #expect(samples == [[1], [2]])
         #expect(system.stopCalls == 1)
@@ -187,6 +188,7 @@ struct RouteAwareMeetingMicRecorderTests {
 
         replacement.onRawPCMSamples?([8, 9])
         try await waitUntil { !recorder.isTerminallyFailedForDebug() }
+        try await waitUntil { samples == [[8, 9]] }
 
         #expect(samples == [[8, 9]])
         #expect(failed.stopCalls == 1)
@@ -386,6 +388,7 @@ struct RouteAwareMeetingMicRecorderTests {
         pendingBeforePause.onRawPCMSamples?([2])
         replacementAfterResume.onRawPCMSamples?([3])
         try await waitUntil { recorder.activeRecorderKindForDebug() == .appScoped }
+        try await waitUntil { samples == [[3]] }
 
         #expect(samples == [[3]])
         #expect(system.pauseCalls == 1)
@@ -415,6 +418,7 @@ struct RouteAwareMeetingMicRecorderTests {
         #expect(recorder.isTerminallyFailedForDebug())
         pending.onRawPCMSamples?([8])
         try await waitUntil { !recorder.isTerminallyFailedForDebug() }
+        try await waitUntil { samples == [[8]] }
 
         #expect(failures == 1)
         #expect(samples == [[8]])
@@ -540,6 +544,7 @@ struct RouteAwareMeetingMicRecorderTests {
         system.onRawPCMSamples?([3])
         recovered.onRawPCMSamples?([4])
         try await waitUntil { recorder.diagnosticsSnapshot().preferredInputDeviceID == 93 }
+        try await waitUntil { samples == [[3], [4]] }
 
         #expect(samples == [[3], [4]])
         #expect(recorder.activeRecorderKindForDebug() == .appScoped)
