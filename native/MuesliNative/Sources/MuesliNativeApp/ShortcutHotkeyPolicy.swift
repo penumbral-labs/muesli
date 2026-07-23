@@ -96,9 +96,9 @@ struct ShortcutHotkeyPolicy {
               let modifiers = hotkey.resolvedCombinationModifiers,
               let keyCode = hotkey.combinationKeyCode else { return nil }
 
-        // Global NSEvent monitors can observe Command chords in another app but
-        // cannot consume them, so the focused app will also perform the shortcut.
-        guard modifiers.contains(.command), HotkeyConfig.keyLabel(for: keyCode) != nil else { return nil }
+        // Global NSEvent monitors can observe combination chords in another app
+        // but cannot consume them, so the focused app will also receive the shortcut.
+        guard !modifiers.isEmpty, HotkeyConfig.keyLabel(for: keyCode) != nil else { return nil }
         return commonGlobalShortcutWarning
     }
 

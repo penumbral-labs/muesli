@@ -2291,8 +2291,14 @@ struct HotkeyConfigTests {
         }
 
         #expect(ShortcutHotkeyPolicy.commonGlobalShortcutWarning(for: .default) == nil)
-        let controlOnly = HotkeyConfig.combination(modifiers: [.control], keyCode: 2)
-        #expect(ShortcutHotkeyPolicy.commonGlobalShortcutWarning(for: controlOnly) == nil)
+
+        for keyCode: UInt16 in [8, 6, 2] {
+            let terminalChord = HotkeyConfig.combination(modifiers: [.control], keyCode: keyCode)
+            #expect(ShortcutHotkeyPolicy.commonGlobalShortcutWarning(for: terminalChord) == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+        }
+
+        let optionOnly = HotkeyConfig.combination(modifiers: [.option], keyCode: 2)
+        #expect(ShortcutHotkeyPolicy.commonGlobalShortcutWarning(for: optionOnly) == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
     }
 
     @Test("meeting recording warns for common global app shortcuts")
