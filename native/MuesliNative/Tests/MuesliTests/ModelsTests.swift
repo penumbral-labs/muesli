@@ -2245,6 +2245,16 @@ struct HotkeyConfigTests {
 
         #expect(result.didUpdate)
         #expect(result.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+
+        for modifiers: NSEvent.ModifierFlags in [.command, [.command, .shift]] {
+            let pasteChord = HotkeyConfig.combination(modifiers: modifiers, keyCode: 9)
+            let pasteResult = ShortcutHotkeyPolicy.validateDictationHotkey(
+                pasteChord,
+                computerUseHotkey: .computerUseDefault,
+                isComputerUseEnabled: false
+            )
+            #expect(pasteResult.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+        }
     }
 
     @Test("meeting recording warns for common global app shortcuts")

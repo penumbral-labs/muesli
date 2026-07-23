@@ -99,6 +99,8 @@ struct ShortcutHotkeyPolicy {
         let commonAppShortcuts: Set<HotkeySignature> = [
             HotkeySignature(modifiers: [.command], keyCode: 12), // Cmd+Q
             HotkeySignature(modifiers: [.command], keyCode: 13), // Cmd+W
+            HotkeySignature(modifiers: [.command], keyCode: 9), // Cmd+V
+            HotkeySignature(modifiers: [.command, .shift], keyCode: 9), // Cmd+Shift+V
             HotkeySignature(modifiers: [.command], keyCode: 15), // Cmd+R
             HotkeySignature(modifiers: [.command, .shift], keyCode: 15), // Cmd+Shift+R
         ]
