@@ -1881,8 +1881,10 @@ struct HotkeyMonitorTests {
         let monitor = scheduler.makeMonitor(startDelay: 0.03)
         monitor.configure(HotkeyConfig.combination(modifiers: [.command, .shift], keyCode: 15))
         var toggleStartCount = 0
+        var toggleStopCount = 0
         var cancelCount = 0
         monitor.onToggleStart = { toggleStartCount += 1 }
+        monitor.onToggleStop = { toggleStopCount += 1 }
         monitor.onCancel = { cancelCount += 1 }
 
         monitor.handleCombinationForTests(type: .keyDown, keyCode: 15, flags: [.command, .shift])
@@ -1895,6 +1897,7 @@ struct HotkeyMonitorTests {
 
         #expect(!monitor.isToggleRecording)
         #expect(toggleStartCount == 1)
+        #expect(toggleStopCount == 0)
         #expect(cancelCount == 1)
     }
 
