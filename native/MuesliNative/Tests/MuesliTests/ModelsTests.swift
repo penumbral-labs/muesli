@@ -2231,7 +2231,7 @@ struct HotkeyConfigTests {
             isComputerUseEnabled: false,
             meetingRecordingHotkey: .meetingRecordingDefault,
             isMeetingRecordingEnabled: true
-        ) == .updated)
+        ) == .updated(notice: ShortcutHotkeyPolicy.commonGlobalShortcutWarning))
     }
 
     @Test("non-letter keys like Space are valid combination keys")
@@ -2314,8 +2314,8 @@ struct HotkeyConfigTests {
         #expect(result.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
     }
 
-    @Test("meeting recording does not warn for uncommon global combinations")
-    func meetingRecordingDoesNotWarnForUncommonGlobalCombinations() {
+    @Test("meeting recording warns for all global combinations")
+    func meetingRecordingWarnsForAllGlobalCombinations() {
         let uncommon = HotkeyConfig.combination(modifiers: [.command, .option, .control], keyCode: 46)
         let result = ShortcutHotkeyPolicy.validateMeetingRecordingHotkey(
             uncommon,
@@ -2324,7 +2324,7 @@ struct HotkeyConfigTests {
             isComputerUseEnabled: false
         )
 
-        #expect(result == .updated)
+        #expect(result == .updated(notice: ShortcutHotkeyPolicy.commonGlobalShortcutWarning))
     }
 
     @Test("label for known key codes")
