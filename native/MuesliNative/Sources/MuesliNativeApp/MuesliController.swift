@@ -3415,9 +3415,7 @@ final class MuesliController: NSObject {
     /// impossible to capture a bare modifier and switch a combination back to a
     /// single-modifier hold.
     func pauseHotkeyMonitorsForShortcutRecording() {
-        hotkeyMonitor.stop()
-        computerUseHotkeyMonitor.stop()
-        meetingRecordingHotkeyMonitor.stop()
+        stopHotkeyMonitor()
     }
 
     func resumeHotkeyMonitorsAfterShortcutRecording() {

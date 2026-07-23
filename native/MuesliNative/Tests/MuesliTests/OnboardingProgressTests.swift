@@ -14,7 +14,8 @@ struct OnboardingProgressTests {
           "userName": "Test User",
           "selectedBackendKey": "cohere",
           "selectedModelKey": "phequals/cohere-transcribe-coreml-mixed-precision",
-          "hotkey": { "keyCode": 55, "label": "Left Cmd" },
+          "hotkeyKeyCode": 55,
+          "hotkeyLabel": "Left Cmd",
           "systemAudioRequested": true
         }
         """
@@ -22,6 +23,7 @@ struct OnboardingProgressTests {
         let progress = try JSONDecoder().decode(OnboardingProgress.self, from: Data(json.utf8))
 
         #expect(progress.selectedCohereLanguageCode == CohereTranscribeLanguage.english.rawValue)
+        #expect(progress.hotkey == HotkeyConfig(keyCode: 55, label: "Left Cmd"))
     }
 
     @Test("unsupported Cohere language is normalized")
@@ -34,13 +36,15 @@ struct OnboardingProgressTests {
           "selectedBackendKey": "cohere",
           "selectedModelKey": "phequals/cohere-transcribe-coreml-mixed-precision",
           "selectedCohereLanguageCode": "xx",
-          "hotkey": { "keyCode": 55, "label": "Left Cmd" }
+          "hotkeyKeyCode": 55,
+          "hotkeyLabel": "Left Cmd"
         }
         """
 
         let progress = try JSONDecoder().decode(OnboardingProgress.self, from: Data(json.utf8))
 
         #expect(progress.selectedCohereLanguageCode == CohereTranscribeLanguage.english.rawValue)
+        #expect(progress.hotkey == HotkeyConfig(keyCode: 55, label: "Left Cmd"))
     }
 
     @Test("missing onboarding use case defaults to dictation")
@@ -52,13 +56,15 @@ struct OnboardingProgressTests {
           "userName": "Test User",
           "selectedBackendKey": "fluidaudio",
           "selectedModelKey": "FluidInference/parakeet-tdt-0.6b-v3-coreml",
-          "hotkey": { "keyCode": 55, "label": "Left Cmd" }
+          "hotkeyKeyCode": 55,
+          "hotkeyLabel": "Left Cmd"
         }
         """
 
         let progress = try JSONDecoder().decode(OnboardingProgress.self, from: Data(json.utf8))
 
         #expect(progress.onboardingUseCaseRawValue == OnboardingUseCase.dictation.rawValue)
+        #expect(progress.hotkey == HotkeyConfig(keyCode: 55, label: "Left Cmd"))
     }
 
     @Test("model download display progress round-trips")

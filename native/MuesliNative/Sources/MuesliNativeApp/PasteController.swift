@@ -4,7 +4,7 @@ import Foundation
 import MuesliCore
 
 enum PasteController {
-    /// How long to wait after simulating Cmd+V before restoring the clipboard.
+    /// How long to wait after simulating the selected paste shortcut before restoring the clipboard.
     /// The receiving app must have consumed the paste data within this window.
     private static let clipboardRestoreDelay: TimeInterval = 0.5
     private static let physicalKeyMap: [Character: (CGKeyCode, CGEventFlags)] = [
@@ -35,17 +35,17 @@ enum PasteController {
 
     /// Paste text into the active app via clipboard, then restore the original clipboard contents.
     ///
-    /// Flow: save clipboard → write text → Cmd+V → restore clipboard after delay.
+    /// Flow: save clipboard → write text → selected paste chord → restore clipboard after delay.
     /// If the clipboard cannot be saved (e.g. lazy-provided data), falls back to a simple
     /// paste without restoration.
     static func paste(
         text: String,
         pasteboard: NSPasteboard = .general,
         shortcut: PasteShortcut = .commandV,
-        simulatePasteAction: (() -> Void)? = nil
+        simulatePasteAction: ((PasteShortcut) -> Void)? = nil
     ) {
         guard !text.isEmpty else { return }
-        let simulate = simulatePasteAction ?? { simulatePaste(shortcut: shortcut) }
+        let simulate = simulatePasteAction ?? simulatePaste
 
         // Save current clipboard contents (all types) so we can restore after paste.
         let savedItems = saveClipboard(pasteboard)
@@ -55,7 +55,7 @@ enum PasteController {
         let pasteChangeCount = pasteboard.changeCount
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            simulate()
+            simulate(shortcut)
 
             // Restore the original clipboard contents after the receiving app has consumed the paste.
             DispatchQueue.main.asyncAfter(deadline: .now() + clipboardRestoreDelay) {

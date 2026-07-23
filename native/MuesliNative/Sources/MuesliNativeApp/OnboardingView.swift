@@ -452,9 +452,13 @@ struct OnboardingView: View {
     private var dictationTestSubtitle: AttributedString {
         let markdown: String
         if isSelectedModelReadyForDictationTest {
-            markdown = selectedUseCase.includesVoiceNotes
-                ? "Hold **\(selectedHotkey.label)** to record a voice note, then release.\nYour words should appear below."
-                : "Hold **\(selectedHotkey.label)** and say something, then release.\nYour words should appear below."
+            if selectedHotkey.isCombination {
+                markdown = "Hold **\(selectedHotkey.label)** to start, then invoke it again when done.\nYour words should appear below."
+            } else {
+                markdown = selectedUseCase.includesVoiceNotes
+                    ? "Hold **\(selectedHotkey.label)** to record a voice note, then release.\nYour words should appear below."
+                    : "Hold **\(selectedHotkey.label)** and say something, then release.\nYour words should appear below."
+            }
         } else {
             markdown = dictationTestPreparationSubtitleMarkdown
         }
@@ -1308,7 +1312,9 @@ struct OnboardingView: View {
                         HStack(spacing: 8) {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("Listening... release \(selectedHotkey.label) when done")
+                            Text(selectedHotkey.isCombination
+                                ? "Listening... invoke \(selectedHotkey.label) again when done"
+                                : "Listening... release \(selectedHotkey.label) when done")
                                 .font(MuesliTheme.caption())
                                 .foregroundStyle(MuesliTheme.textSecondary)
                         }

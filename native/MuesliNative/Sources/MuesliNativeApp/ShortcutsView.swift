@@ -61,7 +61,7 @@ struct ShortcutsView: View {
                         .font(MuesliTheme.headline())
                         .foregroundStyle(MuesliTheme.textPrimary)
                     Text(appState.config.dictationHotkey.isCombination
-                        ? "Tap to start, tap again to stop"
+                        ? "Hold to start, invoke again to stop"
                         : "Hold to record, release to transcribe")
                         .font(MuesliTheme.caption())
                         .foregroundStyle(MuesliTheme.textSecondary)

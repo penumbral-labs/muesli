@@ -48,6 +48,25 @@ enum OnboardingPermissionGate {
 struct OnboardingProgress: Codable {
     static let currentSchemaVersion = 5
 
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case currentStep
+        case userName
+        case selectedBackendKey
+        case selectedModelKey
+        case selectedCohereLanguageCode
+        case hotkey
+        case systemAudioRequested
+        case onboardingUseCaseRawValue
+        case modelDownloadProgress
+        case modelDownloadStatus
+    }
+
+    private enum LegacyCodingKeys: String, CodingKey {
+        case hotkeyKeyCode
+        case hotkeyLabel
+    }
+
     var schemaVersion: Int = currentSchemaVersion
     var currentStep: Int
     var userName: String
@@ -96,7 +115,15 @@ struct OnboardingProgress: Codable {
         selectedCohereLanguageCode = CohereTranscribeLanguage.resolvedCode(
             try c.decodeIfPresent(String.self, forKey: .selectedCohereLanguageCode)
         )
-        hotkey = try c.decode(HotkeyConfig.self, forKey: .hotkey)
+        if let savedHotkey = try c.decodeIfPresent(HotkeyConfig.self, forKey: .hotkey) {
+            hotkey = savedHotkey
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            hotkey = HotkeyConfig(
+                keyCode: try legacy.decode(UInt16.self, forKey: .hotkeyKeyCode),
+                label: try legacy.decode(String.self, forKey: .hotkeyLabel)
+            )
+        }
         systemAudioRequested = try c.decodeIfPresent(Bool.self, forKey: .systemAudioRequested) ?? false
         onboardingUseCaseRawValue = OnboardingUseCase.resolved(
             try c.decodeIfPresent(String.self, forKey: .onboardingUseCaseRawValue)
