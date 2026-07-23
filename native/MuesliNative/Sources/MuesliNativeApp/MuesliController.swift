@@ -3414,8 +3414,13 @@ final class MuesliController: NSObject {
     /// modifier (flagsChanged) events the recorder needs, which makes it
     /// impossible to capture a bare modifier and switch a combination back to a
     /// single-modifier hold.
-    func pauseHotkeyMonitorsForShortcutRecording() {
+    @discardableResult
+    func pauseHotkeyMonitorsForShortcutRecording() -> Bool {
+        guard !hotkeyMonitor.hasActiveInputSession,
+              !computerUseHotkeyMonitor.hasActiveInputSession,
+              !meetingRecordingHotkeyMonitor.hasActiveInputSession else { return false }
         stopHotkeyMonitor()
+        return true
     }
 
     func resumeHotkeyMonitorsAfterShortcutRecording() {

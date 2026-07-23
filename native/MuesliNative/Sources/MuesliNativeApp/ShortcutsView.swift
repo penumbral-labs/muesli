@@ -382,10 +382,13 @@ struct ShortcutsView: View {
         stopRecording()
         clearShortcutMessage(for: target)
         pendingModifierKeyCode = nil
-        recordingTarget = target
         // Suspend live hotkey monitors so a combination-mode monitor can't eat
         // the modifier events the recorder needs to capture a bare modifier.
-        controller.pauseHotkeyMonitorsForShortcutRecording()
+        guard controller.pauseHotkeyMonitorsForShortcutRecording() else {
+            setShortcutMessage("Stop the active recording before changing shortcuts.", for: target)
+            return
+        }
+        recordingTarget = target
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [self] event in
             if event.type == .keyDown {
                 if event.keyCode == 53 {

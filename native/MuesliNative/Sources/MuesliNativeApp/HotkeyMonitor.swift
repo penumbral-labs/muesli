@@ -243,6 +243,17 @@ final class HotkeyMonitor {
         globalMonitor != nil || localMonitor != nil
     }
 
+    var hasActiveInputSession: Bool {
+        targetKeyDown
+            || armed
+            || prepared
+            || active
+            || toggleActive
+            || armCancelWorkItem != nil
+            || combinationKeyDown
+            || combinationWorkItem != nil
+    }
+
     var isToggleRecording: Bool {
         toggleActive
     }

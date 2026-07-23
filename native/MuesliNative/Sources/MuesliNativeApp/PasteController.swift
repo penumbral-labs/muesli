@@ -36,8 +36,8 @@ enum PasteController {
     /// Paste text into the active app via clipboard, then restore the original clipboard contents.
     ///
     /// Flow: save clipboard → write text → selected paste chord → restore clipboard after delay.
-    /// If the clipboard cannot be saved (e.g. lazy-provided data), falls back to a simple
-    /// paste without restoration.
+    /// If some clipboard data cannot be saved (for example, lazy-provided data),
+    /// the scheduled restoration may be partial or empty.
     static func paste(
         text: String,
         pasteboard: NSPasteboard = .general,
