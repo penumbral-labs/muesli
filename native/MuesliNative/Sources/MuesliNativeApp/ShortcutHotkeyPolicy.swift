@@ -57,7 +57,7 @@ struct ShortcutHotkeyPolicy {
         if isMeetingRecordingEnabled && hotkeysConflict(hotkey, meetingRecordingHotkey) {
             return .conflict(message: conflictMessage)
         }
-        return .updated
+        return .updated(notice: commonGlobalShortcutWarning(for: hotkey))
     }
 
     static func validateComputerUseHotkey(

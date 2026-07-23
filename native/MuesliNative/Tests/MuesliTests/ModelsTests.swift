@@ -2234,6 +2234,19 @@ struct HotkeyConfigTests {
         #expect(ShortcutHotkeyPolicy.hotkeysConflict(visible, withCapsLock))
     }
 
+    @Test("dictation warns for common global app shortcuts")
+    func dictationWarnsForCommonGlobalAppShortcuts() {
+        let commandQ = HotkeyConfig.combination(modifiers: [.command], keyCode: 12)
+        let result = ShortcutHotkeyPolicy.validateDictationHotkey(
+            commandQ,
+            computerUseHotkey: .computerUseDefault,
+            isComputerUseEnabled: false
+        )
+
+        #expect(result.didUpdate)
+        #expect(result.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+    }
+
     @Test("meeting recording warns for common global app shortcuts")
     func meetingRecordingWarnsForCommonGlobalAppShortcuts() {
         let result = ShortcutHotkeyPolicy.validateMeetingRecordingHotkey(
