@@ -96,17 +96,10 @@ struct ShortcutHotkeyPolicy {
               let modifiers = hotkey.resolvedCombinationModifiers,
               let keyCode = hotkey.combinationKeyCode else { return nil }
 
-        let commonAppShortcuts: Set<HotkeySignature> = [
-            HotkeySignature(modifiers: [.command], keyCode: 12), // Cmd+Q
-            HotkeySignature(modifiers: [.command], keyCode: 13), // Cmd+W
-            HotkeySignature(modifiers: [.command], keyCode: 7), // Cmd+X
-            HotkeySignature(modifiers: [.command], keyCode: 9), // Cmd+V
-            HotkeySignature(modifiers: [.command, .shift], keyCode: 9), // Cmd+Shift+V
-            HotkeySignature(modifiers: [.command], keyCode: 15), // Cmd+R
-            HotkeySignature(modifiers: [.command, .shift], keyCode: 15), // Cmd+Shift+R
-        ]
-        let signature = HotkeySignature(modifiers: modifiers, keyCode: keyCode)
-        return commonAppShortcuts.contains(signature) ? commonGlobalShortcutWarning : nil
+        // Global NSEvent monitors can observe Command chords in another app but
+        // cannot consume them, so the focused app will also perform the shortcut.
+        guard modifiers.contains(.command), HotkeyConfig.keyLabel(for: keyCode) != nil else { return nil }
+        return commonGlobalShortcutWarning
     }
 
     static func resolvedComputerUseHotkeyWhenEnabling(

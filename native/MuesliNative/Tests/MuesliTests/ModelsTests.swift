@@ -2270,13 +2270,15 @@ struct HotkeyConfigTests {
         #expect(result.didUpdate)
         #expect(result.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
 
-        let cutChord = HotkeyConfig.combination(modifiers: [.command], keyCode: 7)
-        let cutResult = ShortcutHotkeyPolicy.validateDictationHotkey(
-            cutChord,
-            computerUseHotkey: .computerUseDefault,
-            isComputerUseEnabled: false
-        )
-        #expect(cutResult.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+        for keyCode: UInt16 in [7, 51] {
+            let destructiveChord = HotkeyConfig.combination(modifiers: [.command], keyCode: keyCode)
+            let destructiveResult = ShortcutHotkeyPolicy.validateDictationHotkey(
+                destructiveChord,
+                computerUseHotkey: .computerUseDefault,
+                isComputerUseEnabled: false
+            )
+            #expect(destructiveResult.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+        }
 
         for modifiers: NSEvent.ModifierFlags in [.command, [.command, .shift]] {
             let pasteChord = HotkeyConfig.combination(modifiers: modifiers, keyCode: 9)
@@ -2287,6 +2289,10 @@ struct HotkeyConfigTests {
             )
             #expect(pasteResult.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
         }
+
+        #expect(ShortcutHotkeyPolicy.commonGlobalShortcutWarning(for: .default) == nil)
+        let controlOnly = HotkeyConfig.combination(modifiers: [.control], keyCode: 2)
+        #expect(ShortcutHotkeyPolicy.commonGlobalShortcutWarning(for: controlOnly) == nil)
     }
 
     @Test("meeting recording warns for common global app shortcuts")

@@ -7811,9 +7811,18 @@ final class MuesliController: NSObject {
     }
 
     private func handleToggleStart(outputMode: DictationOutputMode? = nil) {
-        guard ensureDictationBackendReady() else { return }
-        if isMeetingRecording() { return }
-        if blockDictationForMeetingActivityIfNeeded() { return }
+        guard ensureDictationBackendReady() else {
+            hotkeyMonitor.cancelToggleMode()
+            return
+        }
+        guard !isMeetingRecording() else {
+            hotkeyMonitor.cancelToggleMode()
+            return
+        }
+        if blockDictationForMeetingActivityIfNeeded() {
+            hotkeyMonitor.cancelToggleMode()
+            return
+        }
         fputs("[muesli-native] toggle dictation start\n", stderr)
         if dictationLatencyTraceID == nil {
             beginDictationLatencyTrace(reason: "toggle")
