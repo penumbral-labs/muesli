@@ -293,6 +293,7 @@ final class HotkeyMonitor {
     ) -> Bool {
         if type == .keyDown && keyCode == 53 {
             if toggleActive {
+                cancelCombinationPending(notify: false)
                 toggleActive = false
                 fputs("[hotkey] escape → cancel combination toggle\n", stderr)
                 onCancel?()

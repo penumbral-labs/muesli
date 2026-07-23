@@ -1874,6 +1874,30 @@ struct HotkeyMonitorTests {
         #expect(toggleStartCount == 1)
     }
 
+    @Test("escape cancels an active combination toggle and its pending stop chord")
+    @MainActor
+    func escapeCancelsCombinationToggleAndPendingStopChord() {
+        let scheduler = ManualHotkeyScheduler()
+        let monitor = scheduler.makeMonitor(startDelay: 0.03)
+        monitor.configure(HotkeyConfig.combination(modifiers: [.command, .shift], keyCode: 15))
+        var toggleStartCount = 0
+        var cancelCount = 0
+        monitor.onToggleStart = { toggleStartCount += 1 }
+        monitor.onCancel = { cancelCount += 1 }
+
+        monitor.handleCombinationForTests(type: .keyDown, keyCode: 15, flags: [.command, .shift])
+        scheduler.advance(by: 0.05)
+        #expect(monitor.isToggleRecording)
+
+        monitor.handleCombinationForTests(type: .keyDown, keyCode: 15, flags: [.command, .shift])
+        monitor.handleCombinationForTests(type: .keyDown, keyCode: 53, flags: [])
+        scheduler.advance(by: 0.05)
+
+        #expect(!monitor.isToggleRecording)
+        #expect(toggleStartCount == 1)
+        #expect(cancelCount == 1)
+    }
+
     @Test("combination toggle cancellation resets without firing stop")
     @MainActor
     func combinationToggleCancellationResetsWithoutFiringStop() {
@@ -2245,6 +2269,14 @@ struct HotkeyConfigTests {
 
         #expect(result.didUpdate)
         #expect(result.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+
+        let cutChord = HotkeyConfig.combination(modifiers: [.command], keyCode: 7)
+        let cutResult = ShortcutHotkeyPolicy.validateDictationHotkey(
+            cutChord,
+            computerUseHotkey: .computerUseDefault,
+            isComputerUseEnabled: false
+        )
+        #expect(cutResult.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
 
         for modifiers: NSEvent.ModifierFlags in [.command, [.command, .shift]] {
             let pasteChord = HotkeyConfig.combination(modifiers: modifiers, keyCode: 9)
