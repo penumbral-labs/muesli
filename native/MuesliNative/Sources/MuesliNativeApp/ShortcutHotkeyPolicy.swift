@@ -57,7 +57,7 @@ struct ShortcutHotkeyPolicy {
         if isMeetingRecordingEnabled && hotkeysConflict(hotkey, meetingRecordingHotkey) {
             return .conflict(message: conflictMessage)
         }
-        return .updated
+        return .updated(notice: commonGlobalShortcutWarning(for: hotkey))
     }
 
     static func validateComputerUseHotkey(
@@ -96,14 +96,10 @@ struct ShortcutHotkeyPolicy {
               let modifiers = hotkey.resolvedCombinationModifiers,
               let keyCode = hotkey.combinationKeyCode else { return nil }
 
-        let commonAppShortcuts: Set<HotkeySignature> = [
-            HotkeySignature(modifiers: [.command], keyCode: 12), // Cmd+Q
-            HotkeySignature(modifiers: [.command], keyCode: 13), // Cmd+W
-            HotkeySignature(modifiers: [.command], keyCode: 15), // Cmd+R
-            HotkeySignature(modifiers: [.command, .shift], keyCode: 15), // Cmd+Shift+R
-        ]
-        let signature = HotkeySignature(modifiers: modifiers, keyCode: keyCode)
-        return commonAppShortcuts.contains(signature) ? commonGlobalShortcutWarning : nil
+        // Global NSEvent monitors can observe combination chords in another app
+        // but cannot consume them, so the focused app will also receive the shortcut.
+        guard !modifiers.isEmpty, HotkeyConfig.keyLabel(for: keyCode) != nil else { return nil }
+        return commonGlobalShortcutWarning
     }
 
     static func resolvedComputerUseHotkeyWhenEnabling(

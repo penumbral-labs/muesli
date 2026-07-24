@@ -243,6 +243,17 @@ final class HotkeyMonitor {
         globalMonitor != nil || localMonitor != nil
     }
 
+    var hasActiveInputSession: Bool {
+        targetKeyDown
+            || armed
+            || prepared
+            || active
+            || toggleActive
+            || armCancelWorkItem != nil
+            || combinationKeyDown
+            || combinationWorkItem != nil
+    }
+
     var isToggleRecording: Bool {
         toggleActive
     }
@@ -282,6 +293,7 @@ final class HotkeyMonitor {
     ) -> Bool {
         if type == .keyDown && keyCode == 53 {
             if toggleActive {
+                cancelCombinationPending(notify: false)
                 toggleActive = false
                 fputs("[hotkey] escape → cancel combination toggle\n", stderr)
                 onCancel?()

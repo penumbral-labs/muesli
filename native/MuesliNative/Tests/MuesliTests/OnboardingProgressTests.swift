@@ -23,6 +23,7 @@ struct OnboardingProgressTests {
         let progress = try JSONDecoder().decode(OnboardingProgress.self, from: Data(json.utf8))
 
         #expect(progress.selectedCohereLanguageCode == CohereTranscribeLanguage.english.rawValue)
+        #expect(progress.hotkey == HotkeyConfig(keyCode: 55, label: "Left Cmd"))
     }
 
     @Test("unsupported Cohere language is normalized")
@@ -43,6 +44,7 @@ struct OnboardingProgressTests {
         let progress = try JSONDecoder().decode(OnboardingProgress.self, from: Data(json.utf8))
 
         #expect(progress.selectedCohereLanguageCode == CohereTranscribeLanguage.english.rawValue)
+        #expect(progress.hotkey == HotkeyConfig(keyCode: 55, label: "Left Cmd"))
     }
 
     @Test("missing onboarding use case defaults to dictation")
@@ -62,6 +64,7 @@ struct OnboardingProgressTests {
         let progress = try JSONDecoder().decode(OnboardingProgress.self, from: Data(json.utf8))
 
         #expect(progress.onboardingUseCaseRawValue == OnboardingUseCase.dictation.rawValue)
+        #expect(progress.hotkey == HotkeyConfig(keyCode: 55, label: "Left Cmd"))
     }
 
     @Test("model download display progress round-trips")
@@ -71,8 +74,7 @@ struct OnboardingProgressTests {
             userName: "Test User",
             selectedBackendKey: "fluidaudio",
             selectedModelKey: "FluidInference/parakeet-tdt-0.6b-v3-coreml",
-            hotkeyKeyCode: 55,
-            hotkeyLabel: "Left Cmd",
+            hotkey: HotkeyConfig(keyCode: 55, label: "Left Cmd"),
             modelDownloadProgress: 0.42,
             modelDownloadStatus: "189 MB of 450 MB"
         )
@@ -82,6 +84,25 @@ struct OnboardingProgressTests {
 
         #expect(decoded.modelDownloadProgress == 0.42)
         #expect(decoded.modelDownloadStatus == "189 MB of 450 MB")
+    }
+
+    @Test("combination dictation hotkey round-trips through onboarding progress")
+    func combinationDictationHotkeyRoundTrips() throws {
+        let combo = HotkeyConfig.combination(modifiers: [.command, .option], keyCode: 2)
+        let progress = OnboardingProgress(
+            currentStep: 3,
+            userName: "Test User",
+            selectedBackendKey: "fluidaudio",
+            selectedModelKey: "FluidInference/parakeet-tdt-0.6b-v3-coreml",
+            hotkey: combo
+        )
+
+        let data = try JSONEncoder().encode(progress)
+        let decoded = try JSONDecoder().decode(OnboardingProgress.self, from: data)
+
+        #expect(decoded.hotkey == combo)
+        #expect(decoded.hotkey.isCombination)
+        #expect(decoded.hotkey.combinationKeyCode == 2)
     }
 
     @Test("meeting permissions do not block dictation step resume")

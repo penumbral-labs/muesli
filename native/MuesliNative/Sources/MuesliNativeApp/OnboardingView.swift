@@ -452,9 +452,13 @@ struct OnboardingView: View {
     private var dictationTestSubtitle: AttributedString {
         let markdown: String
         if isSelectedModelReadyForDictationTest {
-            markdown = selectedUseCase.includesVoiceNotes
-                ? "Hold **\(selectedHotkey.label)** to record a voice note, then release.\nYour words should appear below."
-                : "Hold **\(selectedHotkey.label)** and say something, then release.\nYour words should appear below."
+            if selectedHotkey.isCombination {
+                markdown = "Hold **\(selectedHotkey.label)** to start, then invoke it again when done.\nYour words should appear below."
+            } else {
+                markdown = selectedUseCase.includesVoiceNotes
+                    ? "Hold **\(selectedHotkey.label)** to record a voice note, then release.\nYour words should appear below."
+                    : "Hold **\(selectedHotkey.label)** and say something, then release.\nYour words should appear below."
+            }
         } else {
             markdown = dictationTestPreparationSubtitleMarkdown
         }
@@ -1099,8 +1103,7 @@ struct OnboardingView: View {
             selectedBackendKey: selectedBackend.backend,
             selectedModelKey: selectedBackend.model,
             selectedCohereLanguageCode: selectedCohereLanguage.rawValue,
-            hotkeyKeyCode: selectedHotkey.keyCode,
-            hotkeyLabel: selectedHotkey.label,
+            hotkey: selectedHotkey,
             systemAudioRequested: systemAudioGranted,
             onboardingUseCaseRawValue: selectedUseCase.rawValue,
             modelDownloadProgress: modelDownloadProgress,
@@ -1309,7 +1312,9 @@ struct OnboardingView: View {
                         HStack(spacing: 8) {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("Listening... release \(selectedHotkey.label) when done")
+                            Text(selectedHotkey.isCombination
+                                ? "Listening... invoke \(selectedHotkey.label) again when done"
+                                : "Listening... release \(selectedHotkey.label) when done")
                                 .font(MuesliTheme.caption())
                                 .foregroundStyle(MuesliTheme.textSecondary)
                         }
@@ -1576,7 +1581,7 @@ struct OnboardingView: View {
         dictationTestError = nil
         controller.dictationTestBackend = selectedBackend
         controller.dictationTestCohereLanguage = selectedCohereLanguage
-        controller.startHotkeyMonitor(keyCode: selectedHotkey.keyCode)
+        controller.startHotkeyMonitor(hotkey: selectedHotkey)
     }
 
     private func advanceAfterSuccessfulDictationTest(text: String) {

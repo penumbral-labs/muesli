@@ -1874,6 +1874,33 @@ struct HotkeyMonitorTests {
         #expect(toggleStartCount == 1)
     }
 
+    @Test("escape cancels an active combination toggle and its pending stop chord")
+    @MainActor
+    func escapeCancelsCombinationToggleAndPendingStopChord() {
+        let scheduler = ManualHotkeyScheduler()
+        let monitor = scheduler.makeMonitor(startDelay: 0.03)
+        monitor.configure(HotkeyConfig.combination(modifiers: [.command, .shift], keyCode: 15))
+        var toggleStartCount = 0
+        var toggleStopCount = 0
+        var cancelCount = 0
+        monitor.onToggleStart = { toggleStartCount += 1 }
+        monitor.onToggleStop = { toggleStopCount += 1 }
+        monitor.onCancel = { cancelCount += 1 }
+
+        monitor.handleCombinationForTests(type: .keyDown, keyCode: 15, flags: [.command, .shift])
+        scheduler.advance(by: 0.05)
+        #expect(monitor.isToggleRecording)
+
+        monitor.handleCombinationForTests(type: .keyDown, keyCode: 15, flags: [.command, .shift])
+        monitor.handleCombinationForTests(type: .keyDown, keyCode: 53, flags: [])
+        scheduler.advance(by: 0.05)
+
+        #expect(!monitor.isToggleRecording)
+        #expect(toggleStartCount == 1)
+        #expect(toggleStopCount == 0)
+        #expect(cancelCount == 1)
+    }
+
     @Test("combination toggle cancellation resets without firing stop")
     @MainActor
     func combinationToggleCancellationResetsWithoutFiringStop() {
@@ -1898,6 +1925,31 @@ struct HotkeyMonitorTests {
         #expect(!monitor.isToggleRecording)
         #expect(toggleStartCount == 1)
         #expect(toggleStopCount == 0)
+    }
+
+    @Test("configuring a combination dictation hotkey enters combination mode and toggles")
+    @MainActor
+    func combinationDictationHotkeyEntersCombinationModeAndToggles() {
+        let scheduler = ManualHotkeyScheduler()
+        let monitor = scheduler.makeMonitor(startDelay: 0.03)
+        // ⌘⌥D — the kind of multi-modifier chord dictation can now use.
+        monitor.configure(HotkeyConfig.combination(modifiers: [.command, .option], keyCode: 2))
+        #expect(monitor.isCombinationMode)
+
+        var toggleStartCount = 0
+        var toggleStopCount = 0
+        monitor.onToggleStart = { toggleStartCount += 1 }
+        monitor.onToggleStop = { toggleStopCount += 1 }
+
+        monitor.handleCombinationForTests(type: .keyDown, keyCode: 2, flags: [.command, .option])
+        scheduler.advance(by: 0.05)
+        #expect(toggleStartCount == 1)
+        #expect(monitor.isToggleRecording)
+
+        monitor.handleCombinationForTests(type: .keyDown, keyCode: 2, flags: [.command, .option])
+        scheduler.advance(by: 0.05)
+        #expect(toggleStopCount == 1)
+        #expect(!monitor.isToggleRecording)
     }
 
     @Test("combination shortcut cancels when modifiers release before threshold")
@@ -2161,6 +2213,43 @@ struct HotkeyConfigTests {
         #expect(resolution.result == .conflict(message: ShortcutHotkeyPolicy.conflictMessage))
     }
 
+    @Test("dictation hotkey can be a combination and conflicts are detected across targets")
+    func dictationCombinationConflictsAcrossTargets() {
+        // A dictation combination matching the meeting-recording default (⌘⇧R) conflicts.
+        let clashing = HotkeyConfig.combination(modifiers: [.command, .shift], keyCode: 15)
+        #expect(clashing.isCombination)
+        #expect(ShortcutHotkeyPolicy.validateDictationHotkey(
+            clashing,
+            computerUseHotkey: .computerUseDefault,
+            isComputerUseEnabled: false,
+            meetingRecordingHotkey: .meetingRecordingDefault,
+            isMeetingRecordingEnabled: true
+        ) == .conflict(message: ShortcutHotkeyPolicy.conflictMessage))
+
+        // A distinct dictation combination (⌘⌥D) is accepted.
+        let distinct = HotkeyConfig.combination(modifiers: [.command, .option], keyCode: 2)
+        #expect(ShortcutHotkeyPolicy.validateDictationHotkey(
+            distinct,
+            computerUseHotkey: .computerUseDefault,
+            isComputerUseEnabled: false,
+            meetingRecordingHotkey: .meetingRecordingDefault,
+            isMeetingRecordingEnabled: true
+        ) == .updated(notice: ShortcutHotkeyPolicy.commonGlobalShortcutWarning))
+    }
+
+    @Test("non-letter keys like Space are valid combination keys")
+    func nonLetterKeysAreValidCombinationKeys() {
+        // Space (49) was previously rejected by the letter-only guard.
+        #expect(HotkeyConfig.keyLabel(for: 49) == "Space")
+        #expect(HotkeyConfig.keyLabel(for: 18) == "1")
+        #expect(HotkeyConfig.keyLabel(for: 53) == nil) // Escape never anchors a shortcut
+
+        let cmdShiftSpace = HotkeyConfig.combination(modifiers: [.command, .shift], keyCode: 49)
+        #expect(cmdShiftSpace.isCombination)
+        #expect(cmdShiftSpace.combinationKeyCode == 49)
+        #expect(cmdShiftSpace.label == "⌘⇧Space")
+    }
+
     @Test("combination conflicts ignore unsupported modifier flags")
     func combinationConflictsIgnoreUnsupportedModifierFlags() {
         let visible = HotkeyConfig.combination(modifiers: [.command, .shift], keyCode: 15)
@@ -2170,6 +2259,49 @@ struct HotkeyConfigTests {
         #expect(withCapsLock.label == "⌘⇧R")
         #expect(visible.combinationModifiers == withCapsLock.combinationModifiers)
         #expect(ShortcutHotkeyPolicy.hotkeysConflict(visible, withCapsLock))
+    }
+
+    @Test("dictation warns for common global app shortcuts")
+    func dictationWarnsForCommonGlobalAppShortcuts() {
+        let commandQ = HotkeyConfig.combination(modifiers: [.command], keyCode: 12)
+        let result = ShortcutHotkeyPolicy.validateDictationHotkey(
+            commandQ,
+            computerUseHotkey: .computerUseDefault,
+            isComputerUseEnabled: false
+        )
+
+        #expect(result.didUpdate)
+        #expect(result.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+
+        for keyCode: UInt16 in [7, 51] {
+            let destructiveChord = HotkeyConfig.combination(modifiers: [.command], keyCode: keyCode)
+            let destructiveResult = ShortcutHotkeyPolicy.validateDictationHotkey(
+                destructiveChord,
+                computerUseHotkey: .computerUseDefault,
+                isComputerUseEnabled: false
+            )
+            #expect(destructiveResult.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+        }
+
+        for modifiers: NSEvent.ModifierFlags in [.command, [.command, .shift]] {
+            let pasteChord = HotkeyConfig.combination(modifiers: modifiers, keyCode: 9)
+            let pasteResult = ShortcutHotkeyPolicy.validateDictationHotkey(
+                pasteChord,
+                computerUseHotkey: .computerUseDefault,
+                isComputerUseEnabled: false
+            )
+            #expect(pasteResult.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+        }
+
+        #expect(ShortcutHotkeyPolicy.commonGlobalShortcutWarning(for: .default) == nil)
+
+        for keyCode: UInt16 in [8, 6, 2] {
+            let terminalChord = HotkeyConfig.combination(modifiers: [.control], keyCode: keyCode)
+            #expect(ShortcutHotkeyPolicy.commonGlobalShortcutWarning(for: terminalChord) == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
+        }
+
+        let optionOnly = HotkeyConfig.combination(modifiers: [.option], keyCode: 2)
+        #expect(ShortcutHotkeyPolicy.commonGlobalShortcutWarning(for: optionOnly) == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
     }
 
     @Test("meeting recording warns for common global app shortcuts")
@@ -2185,8 +2317,8 @@ struct HotkeyConfigTests {
         #expect(result.message == ShortcutHotkeyPolicy.commonGlobalShortcutWarning)
     }
 
-    @Test("meeting recording does not warn for uncommon global combinations")
-    func meetingRecordingDoesNotWarnForUncommonGlobalCombinations() {
+    @Test("meeting recording warns for all global combinations")
+    func meetingRecordingWarnsForAllGlobalCombinations() {
         let uncommon = HotkeyConfig.combination(modifiers: [.command, .option, .control], keyCode: 46)
         let result = ShortcutHotkeyPolicy.validateMeetingRecordingHotkey(
             uncommon,
@@ -2195,7 +2327,7 @@ struct HotkeyConfigTests {
             isComputerUseEnabled: false
         )
 
-        #expect(result == .updated)
+        #expect(result == .updated(notice: ShortcutHotkeyPolicy.commonGlobalShortcutWarning))
     }
 
     @Test("label for known key codes")
