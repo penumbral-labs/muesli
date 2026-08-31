@@ -30,7 +30,15 @@ enum ShortcutHotkeyUpdateResult: Equatable {
 struct ShortcutHotkeyPolicy {
     static let conflictMessage = "These shortcuts need different keys."
     static let commonGlobalShortcutWarning = "This shortcut is commonly used by other apps. Muesli listens globally, so choose a less common combination if it conflicts with your workflow."
+    static let dictationKeyMessage = "Push to Talk needs a modifier key or a modifier-and-key combination."
     static let quilKeyCountMessage = "Quill supports one key or a two-key shortcut."
+
+    static func isValidDictationShortcut(_ hotkey: HotkeyConfig) -> Bool {
+        guard hotkey.isCombination else { return HotkeyConfig.label(for: hotkey.keyCode) != nil }
+        guard let modifiers = hotkey.resolvedCombinationModifiers,
+              let keyCode = hotkey.combinationKeyCode else { return false }
+        return !modifiers.isEmpty && HotkeyConfig.keyLabel(for: keyCode) != nil
+    }
 
     static func isValidQuilShortcut(_ hotkey: HotkeyConfig) -> Bool {
         guard hotkey.isCombination else { return HotkeyConfig.label(for: hotkey.keyCode) != nil }
@@ -78,6 +86,7 @@ struct ShortcutHotkeyPolicy {
         meetingRecordingHotkey: HotkeyConfig = .meetingRecordingDefault,
         isMeetingRecordingEnabled: Bool = false
     ) -> ShortcutHotkeyUpdateResult {
+        guard isValidDictationShortcut(hotkey) else { return .conflict(message: dictationKeyMessage) }
         if isComputerUseEnabled && hotkeysConflict(hotkey, computerUseHotkey) {
             return .conflict(message: conflictMessage)
         }

@@ -4851,7 +4851,9 @@ public final class MuesliController: NSObject {
             if onboardingUseCase.includesPushToTalk {
                 hotkeyMonitor.start()
                 startComputerUseHotkeyMonitorIfNeeded()
+                startQuilHotkeyMonitorIfNeeded()
             }
+            startMeetingRecordingHotkeyMonitorIfNeeded()
             syncCalendarMonitor()
             // Start monitors that were deferred during onboarding
             if shouldRunMeetingFeatureMonitors {

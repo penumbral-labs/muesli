@@ -2873,6 +2873,25 @@ struct HotkeyConfigTests {
         ) == .updated(notice: ShortcutHotkeyPolicy.commonGlobalShortcutWarning))
     }
 
+    @Test("dictation rejects malformed shortcuts outside the capture UI")
+    func dictationRejectsMalformedShortcuts() {
+        let missingModifier = HotkeyConfig.combination(modifiers: [], keyCode: 2)
+        let unsupportedKey = HotkeyConfig(
+            keyCode: UInt16.max,
+            label: "?",
+            combinationModifiers: UInt(NSEvent.ModifierFlags.command.rawValue),
+            combinationKeyCode: 53
+        )
+
+        for hotkey in [missingModifier, unsupportedKey, HotkeyConfig(keyCode: 0, label: "A")] {
+            #expect(ShortcutHotkeyPolicy.validateDictationHotkey(
+                hotkey,
+                computerUseHotkey: .computerUseDefault,
+                isComputerUseEnabled: false
+            ) == .conflict(message: ShortcutHotkeyPolicy.dictationKeyMessage))
+        }
+    }
+
     @Test("non-letter keys like Space are valid combination keys")
     func nonLetterKeysAreValidCombinationKeys() {
         // Space (49) was previously rejected by the letter-only guard.
