@@ -1,5 +1,7 @@
 import Testing
+import EventKit
 import Foundation
+import MuesliCore
 @testable import MuesliNativeApp
 
 @Suite("Google Calendar integration")
@@ -63,6 +65,29 @@ struct GoogleCalendarTests {
         #expect(event?.title == "Sprint Planning")
         #expect(event?.isAllDay == false)
         #expect(event?.source == .googleCalendar)
+    }
+
+    @Test("does not import people from the unreleased direct Google integration")
+    func directGoogleEventsDoNotCarryPeople() throws {
+        let item: [String: Any] = [
+            "id": "event-with-people",
+            "summary": "Sprint Planning",
+            "start": ["dateTime": "2026-04-10T14:00:00Z"],
+            "end": ["dateTime": "2026-04-10T15:00:00Z"],
+            "organizer": [
+                "email": "alice@example.test",
+                "displayName": "Alice Example",
+            ],
+            "attendees": [
+                ["email": "alice@example.test", "displayName": "Alice Example"],
+                ["email": "bob@example.test", "displayName": "Bob Example"],
+                ["email": "room@example.test", "displayName": "Conference Room", "resource": true],
+            ],
+        ]
+
+        let event = try #require(GoogleCalendarClient().parseEvent(item, calendarID: "primary"))
+
+        #expect(event.attendees.isEmpty)
     }
 
     @Test("parses all-day event from Google Calendar API response")
@@ -161,10 +186,132 @@ struct GoogleCalendarTests {
         #expect(url?.absoluteString == "https://meet.google.com/abc-defg-hij")
     }
 
+    @Test("CalendarMonitor extracts Slack huddle URL from text")
+    func extractsSlackHuddleURL() {
+        let url = CalendarMonitor.findMeetingURL(in: "Join the standup huddle: https://app.slack.com/huddle/T026CMCFV4H/D026SCN0LAU thanks")
+        #expect(url?.absoluteString == "https://app.slack.com/huddle/T026CMCFV4H/D026SCN0LAU")
+    }
+
+    @Test("CalendarMonitor returns nil for non-huddle Slack URL")
+    func slackNonHuddleURLNotMatched() {
+        let url = CalendarMonitor.findMeetingURL(in: "Open the channel: https://app.slack.com/client/T026CMCFV4H/C026SCN0LAU")
+        #expect(url == nil)
+    }
+
+    @Test("MeetingPlatform.detect recognizes Slack huddle URL")
+    func detectSlackHuddle() {
+        let url = URL(string: "https://app.slack.com/huddle/T026CMCFV4H/D026SCN0LAU")!
+        #expect(MeetingPlatform.detect(from: url) == .slack)
+    }
+
+    @Test("MeetingPlatform.detect ignores non-huddle Slack URL")
+    func detectSlackNonHuddleReturnsNil() {
+        let url = URL(string: "https://app.slack.com/client/T026CMCFV4H/C026SCN0LAU")!
+        #expect(MeetingPlatform.detect(from: url) == nil)
+    }
+
+    @Test("CalendarMonitor extracts huddle URL with query parameters")
+    func extractsSlackHuddleURLWithQueryParams() {
+        let url = CalendarMonitor.findMeetingURL(in: "Standup: https://app.slack.com/huddle/T026CMCFV4H/D026SCN0LAU?x=1")
+        #expect(url?.absoluteString == "https://app.slack.com/huddle/T026CMCFV4H/D026SCN0LAU?x=1")
+    }
+
+    @Test("Google event picks up huddle URL from description")
+    func googleEventHuddleFromDescription() throws {
+        let item: [String: Any] = [
+            "id": "huddle1",
+            "summary": "Standup",
+            "start": ["dateTime": "2026-04-10T14:00:00Z"],
+            "end": ["dateTime": "2026-04-10T14:30:00Z"],
+            "description": "Join: https://app.slack.com/huddle/T026CMCFV4H/D026SCN0LAU",
+        ]
+        let event = try #require(GoogleCalendarClient().parseEvent(item, calendarID: "primary"))
+        #expect(event.meetingURL?.absoluteString == "https://app.slack.com/huddle/T026CMCFV4H/D026SCN0LAU")
+    }
+
+    @Test("Google event picks up huddle URL from location")
+    func googleEventHuddleFromLocation() throws {
+        let item: [String: Any] = [
+            "id": "huddle2",
+            "summary": "Standup",
+            "start": ["dateTime": "2026-04-10T14:00:00Z"],
+            "end": ["dateTime": "2026-04-10T14:30:00Z"],
+            "location": "https://app.slack.com/huddle/T026CMCFV4H/D026SCN0LAU",
+        ]
+        let event = try #require(GoogleCalendarClient().parseEvent(item, calendarID: "primary"))
+        #expect(event.meetingURL?.absoluteString == "https://app.slack.com/huddle/T026CMCFV4H/D026SCN0LAU")
+    }
+
+    @Test("Google event ignores non-huddle Slack URL in description")
+    func googleEventNonHuddleSlackIgnored() throws {
+        let item: [String: Any] = [
+            "id": "notmeeting1",
+            "summary": "Async update",
+            "start": ["dateTime": "2026-04-10T14:00:00Z"],
+            "end": ["dateTime": "2026-04-10T14:30:00Z"],
+            "description": "Discuss in https://app.slack.com/client/T026CMCFV4H/C026SCN0LAU",
+        ]
+        let event = try #require(GoogleCalendarClient().parseEvent(item, calendarID: "primary"))
+        #expect(event.meetingURL == nil)
+    }
+
     @Test("CalendarMonitor returns nil for text without meeting URLs")
     func returnsNilForNonMeetingText() {
         let url = CalendarMonitor.findMeetingURL(in: "Conference room 3B on the second floor")
         #expect(url == nil)
+    }
+
+    // MARK: - EventKit occurrence identity
+
+    @Test("EventKit one-off event identity survives rescheduling")
+    func eventKitOneOffIdentitySurvivesRescheduling() {
+        let eventStore = EKEventStore()
+        let event = EKEvent(eventStore: eventStore)
+        let originalStart = date("2026-04-10T14:00:00Z")
+        event.startDate = originalStart
+        event.endDate = originalStart.addingTimeInterval(30 * 60)
+
+        let originalReference = CalendarMonitor.occurrenceReference(
+            for: event,
+            eventID: "one-off-event",
+            startDate: originalStart
+        )
+
+        let movedStart = originalStart.addingTimeInterval(90 * 60)
+        event.startDate = movedStart
+        event.endDate = movedStart.addingTimeInterval(30 * 60)
+        let movedReference = CalendarMonitor.occurrenceReference(
+            for: event,
+            eventID: "one-off-event",
+            startDate: movedStart
+        )
+
+        #expect(originalReference.seriesID == nil)
+        #expect(movedReference.seriesID == nil)
+        #expect(originalReference.identityKey == movedReference.identityKey)
+    }
+
+    @Test("EventKit recurrence uses the server-stable series identifier")
+    func eventKitRecurrenceUsesExternalSeriesIdentifier() throws {
+        let eventStore = EKEventStore()
+        let event = EKEvent(eventStore: eventStore)
+        let start = date("2026-04-10T14:00:00Z")
+        event.startDate = start
+        event.endDate = start.addingTimeInterval(30 * 60)
+        event.addRecurrenceRule(
+            EKRecurrenceRule(recurrenceWith: .daily, interval: 1, end: nil)
+        )
+
+        let externalIdentifier = try #require(event.calendarItemExternalIdentifier)
+        let reference = CalendarMonitor.occurrenceReference(
+            for: event,
+            eventID: "store-local-event-id",
+            startDate: start
+        )
+
+        #expect(reference.seriesID == externalIdentifier)
+        #expect(reference.seriesID != reference.eventID)
+        #expect(reference.originalStartTime == event.occurrenceDate)
     }
 
     // MARK: - Merge & dedup
@@ -309,6 +456,157 @@ struct GoogleCalendarTests {
         ]
         let event = GoogleCalendarClient().parseEvent(item, calendarID: "team@dockstreet.com")
         #expect(event?.calendarID == "team@dockstreet.com")
+    }
+
+    @Test("parsed recurring event keeps its immutable occurrence identity")
+    func parsedRecurringEventCarriesOriginalStartTime() throws {
+        let item: [String: Any] = [
+            "id": "series_20260410T140000Z",
+            "recurringEventId": "series",
+            "summary": "Daily sync",
+            "originalStartTime": ["dateTime": "2026-04-10T14:00:00Z"],
+            "start": ["dateTime": "2026-04-10T15:30:00Z"],
+            "end": ["dateTime": "2026-04-10T16:00:00Z"],
+        ]
+
+        let event = try #require(
+            GoogleCalendarClient().parseEvent(item, calendarID: "team@dockstreet.com")
+        )
+        let occurrence = try #require(event.calendarOccurrence)
+
+        #expect(occurrence.provider == .googleCalendar)
+        #expect(occurrence.calendarID == "team@dockstreet.com")
+        #expect(occurrence.eventID == "series_20260410T140000Z")
+        #expect(occurrence.seriesID == "series")
+        #expect(occurrence.originalStartTime == date("2026-04-10T14:00:00Z"))
+        #expect(event.startDate == date("2026-04-10T15:30:00Z"))
+    }
+
+    @Test("calendar placeholders reconcile before start, preserve removals, and allow the next recurrence")
+    func calendarPlaceholderOccurrenceDeduplication() async throws {
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("muesli-calendar-occurrence-\(UUID().uuidString).db")
+        let store = DictationStore(databaseURL: databaseURL)
+        try store.migrateIfNeeded()
+        let controller = MuesliController(
+            runtime: RuntimePaths(
+                repoRoot: FileManager.default.temporaryDirectory,
+                menuIcon: nil,
+                appIcon: nil,
+                bundlePath: nil
+            ),
+            dictationStore: store
+        )
+        let firstStart = date("2026-04-10T14:00:00Z")
+        let firstOccurrence = CalendarOccurrenceReference(
+            provider: .eventKit,
+            calendarID: "work",
+            eventID: "shared-series-id",
+            seriesID: "shared-series-id",
+            originalStartTime: firstStart
+        )
+        let attendee = try #require(CalendarAttendee(
+            identifier: "alice@example.test",
+            displayName: "Alice Example",
+            emailAddress: "alice@example.test"
+        ))
+        let firstEvent = UnifiedCalendarEvent(
+            id: "shared-series-id",
+            title: "Daily sync",
+            startDate: firstStart,
+            endDate: firstStart.addingTimeInterval(30 * 60),
+            isAllDay: false,
+            source: .eventKit,
+            calendarID: "work",
+            calendarOccurrence: firstOccurrence,
+            attendees: [attendee]
+        )
+        controller.createMeetingFromCalendarEvent(firstEvent, folderID: nil)
+        controller.createMeetingFromCalendarEvent(firstEvent, folderID: nil)
+
+        let nextStart = firstStart.addingTimeInterval(24 * 60 * 60)
+        let nextOccurrence = CalendarOccurrenceReference(
+            provider: .eventKit,
+            calendarID: "work",
+            eventID: "shared-series-id",
+            seriesID: "shared-series-id",
+            originalStartTime: nextStart
+        )
+        let nextEvent = UnifiedCalendarEvent(
+            id: "shared-series-id",
+            title: "Daily sync",
+            startDate: nextStart,
+            endDate: nextStart.addingTimeInterval(30 * 60),
+            isAllDay: false,
+            source: .eventKit,
+            calendarID: "work",
+            calendarOccurrence: nextOccurrence
+        )
+        controller.createMeetingFromCalendarEvent(nextEvent, folderID: nil)
+
+        let meetings = try store.recentMeetings(limit: 10)
+        #expect(meetings.count == 2)
+        #expect(Set(meetings.compactMap(\.calendarOccurrence?.identityKey)) == Set([
+            firstOccurrence.identityKey,
+            nextOccurrence.identityKey,
+        ]))
+        let firstMeeting = try #require(meetings.first(where: {
+            $0.calendarOccurrence?.identityKey == firstOccurrence.identityKey
+        }))
+        let firstMeetingParticipants = try await controller.meetingParticipants(meetingID: firstMeeting.id)
+        #expect(firstMeetingParticipants.map(\.displayName) == [
+            "Alice Example",
+        ])
+
+        let participant = try #require(firstMeetingParticipants.first)
+        try await controller.removeMeetingParticipant(
+            meetingID: firstMeeting.id,
+            participantIdentifier: participant.participantIdentifier
+        )
+        let folderID = try store.createFolder(name: "Filed calendar meetings")
+        controller.createMeetingFromCalendarEvent(firstEvent, folderID: folderID)
+
+        #expect(try await controller.meetingParticipants(meetingID: firstMeeting.id).isEmpty)
+        #expect(try store.meeting(id: firstMeeting.id)?.folderID == folderID)
+
+        let bob = try #require(CalendarAttendee(
+            identifier: "bob@example.test",
+            displayName: "Bob Example",
+            emailAddress: "bob@example.test"
+        ))
+        let refreshedEvent = UnifiedCalendarEvent(
+            id: firstEvent.id,
+            title: firstEvent.title,
+            startDate: firstEvent.startDate,
+            endDate: firstEvent.endDate,
+            isAllDay: false,
+            source: .eventKit,
+            calendarID: firstEvent.calendarID,
+            calendarOccurrence: firstOccurrence,
+            attendees: [attendee, bob]
+        )
+        await controller.reconcilePendingEventKitCalendarAttendees(
+            events: [refreshedEvent],
+            now: firstStart.addingTimeInterval(-60)
+        )
+        #expect(try await controller.meetingParticipants(meetingID: firstMeeting.id).map(\.displayName) == [
+            "Bob Example",
+        ])
+
+        let carol = try #require(CalendarAttendee(
+            identifier: "carol@example.test",
+            displayName: "Carol Example",
+            emailAddress: "carol@example.test"
+        ))
+        var afterStartEvent = refreshedEvent
+        afterStartEvent.attendees = [carol]
+        await controller.reconcilePendingEventKitCalendarAttendees(
+            events: [afterStartEvent],
+            now: firstStart
+        )
+        #expect(try await controller.meetingParticipants(meetingID: firstMeeting.id).map(\.displayName) == [
+            "Bob Example",
+        ])
     }
 
     @Test("event sync cache resets when upcoming window changes")

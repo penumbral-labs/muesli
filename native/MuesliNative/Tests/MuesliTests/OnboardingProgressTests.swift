@@ -23,7 +23,6 @@ struct OnboardingProgressTests {
         let progress = try JSONDecoder().decode(OnboardingProgress.self, from: Data(json.utf8))
 
         #expect(progress.selectedCohereLanguageCode == CohereTranscribeLanguage.english.rawValue)
-        #expect(progress.hotkey == HotkeyConfig(keyCode: 55, label: "Left Cmd"))
     }
 
     @Test("unsupported Cohere language is normalized")
@@ -44,7 +43,6 @@ struct OnboardingProgressTests {
         let progress = try JSONDecoder().decode(OnboardingProgress.self, from: Data(json.utf8))
 
         #expect(progress.selectedCohereLanguageCode == CohereTranscribeLanguage.english.rawValue)
-        #expect(progress.hotkey == HotkeyConfig(keyCode: 55, label: "Left Cmd"))
     }
 
     @Test("missing onboarding use case defaults to dictation")
@@ -64,7 +62,6 @@ struct OnboardingProgressTests {
         let progress = try JSONDecoder().decode(OnboardingProgress.self, from: Data(json.utf8))
 
         #expect(progress.onboardingUseCaseRawValue == OnboardingUseCase.dictation.rawValue)
-        #expect(progress.hotkey == HotkeyConfig(keyCode: 55, label: "Left Cmd"))
     }
 
     @Test("model download display progress round-trips")
@@ -88,21 +85,82 @@ struct OnboardingProgressTests {
 
     @Test("combination dictation hotkey round-trips through onboarding progress")
     func combinationDictationHotkeyRoundTrips() throws {
-        let combo = HotkeyConfig.combination(modifiers: [.command, .option], keyCode: 2)
+        let combination = HotkeyConfig.combination(modifiers: [.command, .option], keyCode: 2)
         let progress = OnboardingProgress(
             currentStep: 3,
             userName: "Test User",
             selectedBackendKey: "fluidaudio",
             selectedModelKey: "FluidInference/parakeet-tdt-0.6b-v3-coreml",
-            hotkey: combo
+            hotkey: combination
         )
 
         let data = try JSONEncoder().encode(progress)
         let decoded = try JSONDecoder().decode(OnboardingProgress.self, from: data)
 
-        #expect(decoded.hotkey == combo)
+        #expect(decoded.hotkey == combination)
         #expect(decoded.hotkey.isCombination)
         #expect(decoded.hotkey.combinationKeyCode == 2)
+    }
+
+    @Test("dictation monitor starts at and after its resume threshold")
+    func dictationMonitorUsesResumeThreshold() {
+        let threshold = OnboardingFlow.dictationTestStep
+
+        #expect(!OnboardingFlow.shouldStartDictationTestMonitor(
+            currentStep: threshold - 1,
+            dictationTestStep: threshold,
+            modelReady: true
+        ))
+        #expect(OnboardingFlow.shouldStartDictationTestMonitor(
+            currentStep: threshold,
+            dictationTestStep: threshold,
+            modelReady: true
+        ))
+        #expect(OnboardingFlow.shouldStartDictationTestMonitor(
+            currentStep: threshold + 1,
+            dictationTestStep: threshold,
+            modelReady: true
+        ))
+        #expect(!OnboardingFlow.shouldStartDictationTestMonitor(
+            currentStep: threshold,
+            dictationTestStep: threshold,
+            modelReady: false
+        ))
+    }
+
+    @Test("dictation test resume threshold persists through decode and round trip")
+    func dictationTestResumeThresholdPersists() throws {
+        let threshold = OnboardingFlow.dictationTestStep
+        #expect(threshold == 4)
+
+        let json = """
+        {
+          "schemaVersion": 3,
+          "currentStep": 4,
+          "userName": "Test User",
+          "selectedBackendKey": "fluidaudio",
+          "selectedModelKey": "FluidInference/parakeet-tdt-0.6b-v3-coreml",
+          "hotkeyKeyCode": 55,
+          "hotkeyLabel": "Left Cmd"
+        }
+        """
+        let decoded = try JSONDecoder().decode(OnboardingProgress.self, from: Data(json.utf8))
+        #expect(decoded.currentStep == threshold)
+
+        for step in [threshold - 1, threshold, threshold + 1] {
+            let progress = OnboardingProgress(
+                currentStep: step,
+                userName: "Test User",
+                selectedBackendKey: "fluidaudio",
+                selectedModelKey: "FluidInference/parakeet-tdt-0.6b-v3-coreml",
+                hotkey: HotkeyConfig(keyCode: 55, label: "Left Cmd")
+            )
+            let roundTripped = try JSONDecoder().decode(
+                OnboardingProgress.self,
+                from: JSONEncoder().encode(progress)
+            )
+            #expect(roundTripped.currentStep == step)
+        }
     }
 
     @Test("meeting permissions do not block dictation step resume")

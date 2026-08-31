@@ -59,6 +59,21 @@ If launch fails with `No matching profile found`, the embedded profile, bundle I
   - Must show CloudKit container `iCloud.com.mueslihq.muesli`
   - Must show CloudKit environment `Production`
   - Must show APNs environment `production` when using the production Developer ID CloudKit profile
+- [ ] Verify the built app:
+  ```bash
+  scripts/verify_signed_cloud_entitlements.sh /Applications/Muesli.app Production com.muesli.app iCloud.com.mueslihq.muesli production
+  ```
+- [ ] Mount the local DMG, then verify its app:
+  ```bash
+  scripts/verify_signed_cloud_entitlements.sh /Volumes/Muesli/Muesli.app Production com.muesli.app iCloud.com.mueslihq.muesli production
+  ```
+- [ ] Re-download and mount the GitHub release DMG, then verify its app with the same command:
+  ```bash
+  scripts/verify_signed_cloud_entitlements.sh /Volumes/Muesli/Muesli.app Production com.muesli.app iCloud.com.mueslihq.muesli production
+  ```
+- [ ] Stable and pre-production builds explicitly set `MUESLI_ICLOUD_CONTAINER_ENVIRONMENT=Production`; omission must fail closed.
+- [ ] The stable release creates a dedicated `codex/release-<version>-appcast` PR for `docs/appcast.xml`, `docs/index.html`, and `docs/llms.txt`; it must not push those files directly to `main`.
+- [ ] Merge the release metadata PR only after confirming its Sparkle enclosure URL, length, EdDSA signature, version, and release notes match the verified GitHub Release asset.
 
 ## Notarize & Staple (CRITICAL ORDER)
 
@@ -136,23 +151,29 @@ If launch fails with `No matching profile found`, the embedded profile, bundle I
   - The local and hosted SHA256 hashes must match exactly
   - Must show `accepted` and `The validate action worked!`
 
-- [ ] **Publish the verified draft release**
-
 ## Appcast & Docs
 
-- [ ] **Generate appcast on the single Sparkle host:**
+- [ ] **Generate the new release item without replacing appcast history:**
   ```bash
-  native/MuesliNative/.build/artifacts/sparkle/Sparkle/bin/generate_appcast dist-release/ -o docs/appcast.xml
+  generated_appcast="$(mktemp)"
+  native/MuesliNative/.build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+    dist-release/ -o "$generated_appcast"
+  python3 scripts/update_appcast_release_notes.py \
+    "$generated_appcast" \
+    --sparkle-version X.Y.Z \
+    --short-version X.Y.Z \
+    < docs/release-notes/X.Y.Z.md
+  python3 scripts/merge_appcast_item.py \
+    --existing docs/appcast.xml \
+    --generated "$generated_appcast" \
+    --version X.Y.Z \
+    --output docs/appcast.xml
+  rm "$generated_appcast"
   ```
 
-- [ ] **Fix appcast enclosure URLs to GitHub Releases** — `generate_appcast` writes GitHub Pages URLs. Replace with GitHub Releases URLs:
-  ```
-  https://muesli-hq.github.io/muesli/Muesli-X.Y.Z.dmg
-  →
-  https://github.com/Muesli-HQ/muesli/releases/download/vX.Y.Z/Muesli-X.Y.Z.dmg
-  ```
-
-- [ ] **Remove delta entries** from appcast (deltas aren't hosted)
+- [ ] **Confirm historical items are unchanged.** `merge_appcast_item.py` rejects
+  duplicate versions and noncanonical historical URLs, normalizes the new item
+  to GitHub Releases, and removes unhosted delta enclosures.
 
 - [ ] **Update download link** in `docs/index.html` (both the `<a>` href and JSON-LD `downloadUrl`)
 
@@ -161,12 +182,25 @@ If launch fails with `No matching profile found`, the embedded profile, bundle I
   scripts/verify_update_flow.sh --version X.Y.Z --dmg dist-release/Muesli-X.Y.Z.dmg --require-notarized
   ```
 
-- [ ] **Push appcast + download link:**
+- [ ] **Push the appcast + download-link metadata branch:**
   ```bash
+  git switch -c codex/release-X.Y.Z-appcast
   git add docs/appcast.xml docs/index.html
+  git add docs/llms.txt
   git commit -m "Update appcast for vX.Y.Z"
-  git push
+  git push -u origin codex/release-X.Y.Z-appcast
   ```
+
+- [ ] **Open the release-metadata PR while the GitHub Release remains a draft.**
+
+  If the final GitHub publication call fails after this point, rerun the same
+  `release.sh X.Y.Z` command from exact `origin/main`. The pipeline recognizes
+  the existing versioned metadata branch and open PR, revalidates the hosted
+  notarized artifact, Production CloudKit entitlements, and appcast, then safely
+  resumes publication without recreating release metadata.
+  - If appcast generation, release-note injection, validation, commit, push, or PR creation fails, stop and leave the GitHub Release as a draft.
+
+- [ ] **Publish the verified draft release only after the metadata PR exists.**
 
 ## Homebrew Cask
 

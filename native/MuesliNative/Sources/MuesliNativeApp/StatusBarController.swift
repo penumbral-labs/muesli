@@ -4,13 +4,13 @@ import MuesliCore
 
 final class CalendarMenuMeetingPayload: NSObject {
     let title: String
-    let calendarEventID: String
+    let calendarOccurrence: CalendarOccurrenceReference
     let endDate: Date
     let autoStopSource: MeetingAutoStopSource?
 
     init(event: UnifiedCalendarEvent) {
         self.title = event.title
-        self.calendarEventID = event.id
+        self.calendarOccurrence = event.resolvedCalendarOccurrence
         self.endDate = event.endDate
         self.autoStopSource = event.meetingURL.flatMap { MeetingAutoStopSource(meetingURL: $0) }
     }
@@ -46,11 +46,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     func setCountdownOverride(_ text: String?) {
         countdownOverride = text
-        if let text {
-            statusItem.button?.title = text
-        } else {
-            updateMenuBarTitle()
-        }
+        updateMenuBarTitle()
     }
 
     func refreshIcon() {
@@ -59,36 +55,37 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     func updateMenuBarTitle() {
+        let detail: String?
         if let countdownOverride {
-            statusItem.button?.title = countdownOverride
-            return
-        }
-        guard controller.config.showNextMeetingInMenuBar else {
-            statusItem.button?.title = ""
-            return
-        }
+            detail = countdownOverride
+        } else if controller.config.showNextMeetingInMenuBar {
+            let now = Date()
+            let hidden = controller.appState.hiddenCalendarEventIDs
+            let endOfToday = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: now)) ?? now
+            let nextEvent = controller.appState.upcomingCalendarEvents
+                .filter { !$0.isAllDay && $0.startDate > now && $0.startDate < endOfToday && !hidden.contains($0.id) }
+                .sorted { $0.startDate < $1.startDate }
+                .first
 
-        let now = Date()
-        let hidden = controller.appState.hiddenCalendarEventIDs
-        let endOfToday = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: now)) ?? now
-        let nextEvent = controller.appState.upcomingCalendarEvents
-            .filter { !$0.isAllDay && $0.startDate > now && $0.startDate < endOfToday && !hidden.contains($0.id) }
-            .sorted { $0.startDate < $1.startDate }
-            .first
-
-        if let event = nextEvent {
-            let minutesUntil = Int(ceil(event.startDate.timeIntervalSince(now) / 60))
-            let truncatedTitle = event.title.count > 20
-                ? String(event.title.prefix(18)) + "…"
-                : event.title
-            if minutesUntil <= 60 {
-                statusItem.button?.title = " \(truncatedTitle) · \(formatTimeUntil(minutesUntil))"
+            if let event = nextEvent {
+                let minutesUntil = Int(ceil(event.startDate.timeIntervalSince(now) / 60))
+                let truncatedTitle = event.title.count > 20
+                    ? String(event.title.prefix(18)) + "…"
+                    : event.title
+                detail = minutesUntil <= 60
+                    ? "\(truncatedTitle) · \(formatTimeUntil(minutesUntil))"
+                    : truncatedTitle
             } else {
-                statusItem.button?.title = " \(truncatedTitle)"
+                detail = nil
             }
         } else {
-            statusItem.button?.title = ""
+            detail = nil
         }
+        statusItem.button?.attributedTitle = MenuBarIconRenderer.statusTitle(
+            hotkey: controller.config.dictationHotkey,
+            showsHotkey: controller.config.showHotkeyInMenuBar,
+            detail: detail
+        )
     }
 
     private func build() {
@@ -142,17 +139,77 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.setSubmenu(recentMenu, for: recentItem)
         menu.addItem(recentItem)
 
-        let backendItem = NSMenuItem(title: "Transcription Backend", action: nil, keyEquivalent: "")
-        let backendMenu = NSMenu()
+        let dictationModelItem = NSMenuItem(title: "Dictation Model", action: nil, keyEquivalent: "")
+        let dictationModelMenu = NSMenu()
+        dictationModelMenu.addItem(.sectionHeader(title: "Local"))
         for option in BackendOption.downloaded {
-            let prefix = controller.selectedBackend == option ? "✓ " : ""
-            let item = NSMenuItem(title: "\(prefix)\(option.label)", action: #selector(MuesliController.selectBackendFromMenu(_:)), keyEquivalent: "")
+            let isSelected = controller.selectedDictationProvider == .local
+                && controller.selectedBackend == option
+            let prefix = isSelected ? "✓ " : ""
+            let item = NSMenuItem(
+                title: "\(prefix)\(option.label)",
+                action: #selector(MuesliController.selectLocalDictationModelFromMenu(_:)),
+                keyEquivalent: ""
+            )
             item.target = controller
             item.representedObject = option.label
-            backendMenu.addItem(item)
+            dictationModelMenu.addItem(item)
         }
-        menu.setSubmenu(backendMenu, for: backendItem)
-        menu.addItem(backendItem)
+
+        let hostedVisibility = controller.hostedDictationModelVisibility
+        if hostedVisibility.shows(.openAI) {
+            dictationModelMenu.addItem(.separator())
+            dictationModelMenu.addItem(.sectionHeader(title: "OpenAI"))
+            var openAIModels = OpenAITranscriptionClient.modelPresets
+            let configuredOpenAIModel = controller.config.openaiDictationModel
+            if !openAIModels.contains(configuredOpenAIModel) {
+                openAIModels.append(configuredOpenAIModel)
+            }
+            for model in openAIModels {
+                let isSelected = controller.selectedDictationProvider == .openAI
+                    && configuredOpenAIModel == model
+                let prefix = isSelected ? "✓ " : ""
+                let item = NSMenuItem(
+                    title: "\(prefix)\(model)",
+                    action: #selector(MuesliController.selectOpenAIDictationModelFromMenu(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = controller
+                item.representedObject = model
+                dictationModelMenu.addItem(item)
+            }
+        }
+
+        if hostedVisibility.shows(.openRouter) {
+            controller.loadOpenRouterModels(.transcription)
+            dictationModelMenu.addItem(.separator())
+            dictationModelMenu.addItem(.sectionHeader(title: "OpenRouter"))
+            let openRouterModels = OpenRouterModelSelection.presetsIncludingConfiguredModel(
+                controller.appState.openRouterTranscriptionModels,
+                configuredModel: controller.config.openRouterDictationModel
+            )
+            if openRouterModels.isEmpty {
+                let item = NSMenuItem(title: "Choose a model in Settings…", action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                dictationModelMenu.addItem(item)
+            } else {
+                for preset in openRouterModels {
+                    let isSelected = controller.selectedDictationProvider == .openRouter
+                        && controller.config.openRouterDictationModel == preset.id
+                    let prefix = isSelected ? "✓ " : ""
+                    let item = NSMenuItem(
+                        title: "\(prefix)\(preset.label)",
+                        action: #selector(MuesliController.selectOpenRouterDictationModelFromMenu(_:)),
+                        keyEquivalent: ""
+                    )
+                    item.target = controller
+                    item.representedObject = preset.id
+                    dictationModelMenu.addItem(item)
+                }
+            }
+        }
+        menu.setSubmenu(dictationModelMenu, for: dictationModelItem)
+        menu.addItem(dictationModelItem)
 
         let meetingBackendItem = NSMenuItem(title: "Meetings Backend", action: nil, keyEquivalent: "")
         let meetingBackendMenu = NSMenu()

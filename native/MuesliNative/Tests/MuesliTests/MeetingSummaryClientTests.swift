@@ -90,12 +90,74 @@ struct MeetingSummaryClientTests {
         )
 
         #expect(prompt.contains("Current generated notes to preserve and reformat:"))
-        #expect(prompt.contains("Protected written notes typed by the user during the meeting"))
+        #expect(prompt.contains("First-class meeting context from written notes typed by the user during the meeting"))
+        #expect(prompt.contains("identify the meeting's topic, decisions, action items, risks, and outcomes"))
         #expect(prompt.contains("- User typed decision"))
     }
 
-    @Test("ChatGPT WHAM parser reads top-level output text")
-    func chatGPTWHAMParserReadsTopLevelOutputText() {
+    @Test("title prompt includes written notes as meeting context")
+    func titlePromptIncludesWrittenNotes() {
+        let prompt = MeetingSummaryClient.titlePrompt(
+            transcript: "Transcript body",
+            manualNotes: "Decision: launch the new workflow"
+        )
+
+        #expect(prompt.contains("Meeting transcript excerpts:"))
+        #expect(prompt.contains("Transcript body"))
+        #expect(prompt.contains("Written notes captured by the user during the meeting"))
+        #expect(prompt.contains("Decision: launch the new workflow"))
+    }
+
+    @Test("title prompt bounds oversized written notes")
+    func titlePromptBoundsOversizedWrittenNotes() {
+        let prompt = MeetingSummaryClient.titlePrompt(
+            transcript: "Transcript body",
+            manualNotes: String(repeating: "Decision: launch the new workflow\n", count: 1_000)
+        )
+
+        #expect(prompt.contains("Transcript body"))
+        #expect(prompt.count <= 6_000)
+    }
+
+    @Test("ChatGPT Codex requests fix GPT-5.6 reasoning to High")
+    func chatGPTCodexRequestUsesHighReasoningForGPT56() {
+        for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let body = ChatGPTResponsesClient.requestBody(
+                systemPrompt: "System",
+                userPrompt: "User",
+                model: model
+            )
+            let reasoning = body["reasoning"] as? [String: String]
+
+            #expect(reasoning?["effort"] == "high")
+        }
+    }
+
+    @Test("ChatGPT Codex requests preserve GPT-5.4 Mini reasoning behavior")
+    func chatGPTCodexRequestPreservesGPT54MiniReasoning() {
+        let body = ChatGPTResponsesClient.requestBody(
+            systemPrompt: "System",
+            userPrompt: "User",
+            model: "gpt-5.4-mini"
+        )
+
+        #expect(body["reasoning"] == nil)
+    }
+
+    @Test("ChatGPT Codex requests forward explicit output budgets")
+    func chatGPTCodexRequestForwardsOutputBudget() {
+        let body = ChatGPTResponsesClient.requestBody(
+            systemPrompt: "System",
+            userPrompt: "User",
+            model: "gpt-5.6-terra",
+            maxOutputTokens: QuilModelPolicy.remoteMaximumOutputTokens
+        )
+
+        #expect(body["max_output_tokens"] as? Int == QuilModelPolicy.remoteMaximumOutputTokens)
+    }
+
+    @Test("ChatGPT Codex parser reads top-level output text")
+    func chatGPTCodexParserReadsTopLevelOutputText() {
         let payload: [String: Any] = [
             "output_text": "Cleaned dictation text",
         ]
@@ -103,8 +165,8 @@ struct MeetingSummaryClientTests {
         #expect(ChatGPTResponsesClient.extractOutputText(from: payload) == "Cleaned dictation text")
     }
 
-    @Test("ChatGPT WHAM parser reads streaming deltas")
-    func chatGPTWHAMParserReadsStreamingDeltas() {
+    @Test("ChatGPT Codex parser reads streaming deltas")
+    func chatGPTCodexParserReadsStreamingDeltas() {
         let payload: [String: Any] = [
             "type": "response.output_text.delta",
             "delta": "streamed text",
@@ -113,25 +175,25 @@ struct MeetingSummaryClientTests {
         #expect(ChatGPTResponsesClient.extractOutputTextDelta(from: payload) == "streamed text")
     }
 
-    @Test("ChatGPT WHAM parser rejects malformed stream payloads")
-    func chatGPTWHAMParserRejectsMalformedStreamPayloads() {
+    @Test("ChatGPT Codex parser rejects malformed stream payloads")
+    func chatGPTCodexParserRejectsMalformedStreamPayloads() {
         #expect(throws: ChatGPTResponsesError.self) {
             _ = try ChatGPTResponsesClient.decodeStreamPayload("{", httpStatus: 200)
         }
     }
 
-    @Test("ChatGPT WHAM parser ignores heartbeat stream payloads")
-    func chatGPTWHAMParserIgnoresHeartbeatPayloads() throws {
+    @Test("ChatGPT Codex parser ignores heartbeat stream payloads")
+    func chatGPTCodexParserIgnoresHeartbeatPayloads() throws {
         #expect(try ChatGPTResponsesClient.decodeStreamPayload("ping", httpStatus: 200) == nil)
     }
 
-    @Test("ChatGPT WHAM parser ignores blank stream payloads")
-    func chatGPTWHAMParserIgnoresBlankStreamPayloads() throws {
+    @Test("ChatGPT Codex parser ignores blank stream payloads")
+    func chatGPTCodexParserIgnoresBlankStreamPayloads() throws {
         #expect(try ChatGPTResponsesClient.decodeStreamPayload("   ", httpStatus: 200) == nil)
     }
 
-    @Test("ChatGPT WHAM parser ignores valid unknown stream events")
-    func chatGPTWHAMParserIgnoresValidUnknownStreamEvents() throws {
+    @Test("ChatGPT Codex parser ignores valid unknown stream events")
+    func chatGPTCodexParserIgnoresValidUnknownStreamEvents() throws {
         var deltaText = "partial"
         var finalText = ""
         let decoded = try ChatGPTResponsesClient.decodeStreamPayload(
@@ -150,8 +212,8 @@ struct MeetingSummaryClientTests {
         #expect(finalText.isEmpty)
     }
 
-    @Test("ChatGPT WHAM parser prefers final output over streamed deltas")
-    func chatGPTWHAMParserPrefersFinalOutputOverDeltas() {
+    @Test("ChatGPT Codex parser prefers final output over streamed deltas")
+    func chatGPTCodexParserPrefersFinalOutputOverDeltas() {
         var deltaText = ""
         var finalText = ""
 
@@ -179,8 +241,8 @@ struct MeetingSummaryClientTests {
         #expect(ChatGPTResponsesClient.accumulatedOutputText(deltaText: deltaText, finalText: finalText) == "final cleaned text")
     }
 
-    @Test("ChatGPT WHAM parser reads nested final response payload")
-    func chatGPTWHAMParserReadsNestedFinalResponsePayload() {
+    @Test("ChatGPT Codex parser reads nested final response payload")
+    func chatGPTCodexParserReadsNestedFinalResponsePayload() {
         let payload: [String: Any] = [
             "type": "response.completed",
             "response": [
@@ -202,8 +264,8 @@ struct MeetingSummaryClientTests {
         #expect(ChatGPTResponsesClient.extractOutputText(from: payload) == "Nested final response text")
     }
 
-    @Test("ChatGPT WHAM parser reads output content text")
-    func chatGPTWHAMParserReadsOutputContentText() {
+    @Test("ChatGPT Codex parser reads output content text")
+    func chatGPTCodexParserReadsOutputContentText() {
         let payload: [String: Any] = [
             "output": [
                 [
@@ -336,7 +398,8 @@ struct MeetingSummaryClientTests {
         let result = try await MeetingSummaryClient.summarize(
             transcript: "Test transcript",
             meetingTitle: "My Meeting",
-            config: config
+            config: config,
+            openRouterAPIKeyOverride: ""
         )
 
         // No key → falls back to raw transcript
@@ -577,7 +640,8 @@ struct MeetingSummaryClientTests {
 
         let title = await MeetingSummaryClient.generateTitle(
             transcript: "Sprint planning discussion",
-            config: config
+            config: config,
+            openRouterAPIKeyOverride: ""
         )
 
         #expect(title == nil)

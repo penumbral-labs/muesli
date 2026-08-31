@@ -8,6 +8,7 @@ import MuesliCore
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: MuesliController?
+    private var terminationTask: Task<Void, Never>?
     private(set) var updaterController: SPUStandardUpdaterController?
     private let sparkleUpdateDelegate = SparkleUpdateDelegate()
 
@@ -22,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if runtimeTelemetry.isEnabled {
             TelemetryDeck.signal("app.launched")
         }
+        // Always drain a pending marker. TelemetryDeck's global privacy gate
+        // suppresses the signal when analytics are disabled.
+        DiarizerPreloadDiagnostics().reportInterruptedAttemptIfNeeded()
 
         do {
             let runtime = try RuntimePaths.resolve()
@@ -30,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApplication.shared.applicationIconImage = image
             }
             let controller = MuesliController(runtime: runtime)
+            controller.applyAppThemeAppearance()
             sparkleUpdateDelegate.appState = controller.appState
             if Self.hasConfiguredSparkleFeed {
                 let updaterController = SPUStandardUpdaterController(
@@ -52,10 +57,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        controller?.shutdown()
-    }
-
     func application(
         _ application: NSApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
@@ -75,10 +76,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationTask != nil {
+            return .terminateLater
+        }
         if controller?.shouldTerminateApplication() == false {
             return .terminateCancel
         }
-        return .terminateNow
+        guard let controller else { return .terminateNow }
+
+        terminationTask = Task { @MainActor [weak self] in
+            await controller.shutdown()
+            self?.terminationTask = nil
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     private static var hasConfiguredSparkleFeed: Bool {
@@ -100,7 +111,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller?.showWhatsNew()
     }
 
+    @objc func showDictations(_ sender: Any?) {
+        controller?.openHistoryWindow(tab: .dictations)
+    }
+
+    @objc func showMeetings(_ sender: Any?) {
+        controller?.openHistoryWindow(tab: .meetings)
+    }
+
     private func installStandardEditMenu() {
+        let menus = standardMenus()
+        NSApp.windowsMenu = menus.windowMenu
+        NSApp.mainMenu = menus.mainMenu
+    }
+
+    func standardMenus() -> (mainMenu: NSMenu, windowMenu: NSMenu) {
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
@@ -119,6 +144,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         whatsNewItem.target = self
         appMenu.addItem(whatsNewItem)
+        appMenu.addItem(.separator())
+        appMenu.addItem(
+            withTitle: "Hide \(AppIdentity.displayName)",
+            action: #selector(NSApplication.hide(_:)),
+            keyEquivalent: "h"
+        )
+        let hideOthersItem = NSMenuItem(
+            title: "Hide Others",
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h"
+        )
+        hideOthersItem.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthersItem)
+        appMenu.addItem(
+            withTitle: "Show All",
+            action: #selector(NSApplication.unhideAllApplications(_:)),
+            keyEquivalent: ""
+        )
         appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Quit \(AppIdentity.displayName)",
@@ -155,18 +198,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
-        let windowMenuItem = NSMenuItem()
+        let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+        let viewMenu = NSMenu(title: "View")
+        let dictationsItem = NSMenuItem(
+            title: "Dictations",
+            action: #selector(AppDelegate.showDictations(_:)),
+            keyEquivalent: "1"
+        )
+        dictationsItem.target = self
+        viewMenu.addItem(dictationsItem)
+        let meetingsItem = NSMenuItem(
+            title: "Meetings",
+            action: #selector(AppDelegate.showMeetings(_:)),
+            keyEquivalent: "2"
+        )
+        meetingsItem.target = self
+        viewMenu.addItem(meetingsItem)
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
+
+        let windowMenuItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
         let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(
+            withTitle: "Minimize",
+            action: #selector(NSWindow.performMiniaturize(_:)),
+            keyEquivalent: "m"
+        )
+        windowMenu.addItem(
+            withTitle: "Zoom",
+            action: #selector(NSWindow.performZoom(_:)),
+            keyEquivalent: ""
+        )
+        windowMenu.addItem(.separator())
         windowMenu.addItem(
             withTitle: "Close Window",
             action: #selector(NSWindow.performClose(_:)),
             keyEquivalent: "w"
         )
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(
+            withTitle: "Bring All to Front",
+            action: #selector(NSApplication.arrangeInFront(_:)),
+            keyEquivalent: ""
+        )
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
-        NSApp.windowsMenu = windowMenu
-
-        NSApp.mainMenu = mainMenu
+        return (mainMenu, windowMenu)
     }
 }
 

@@ -30,6 +30,7 @@ node_modules/
 # Environment variables
 .env
 .env.production
+.env.local
 .dev.vars*
 
 # Local database
@@ -67,6 +68,9 @@ native/MuesliNative/.build/
 native/MuesliNative/.build-direct/
 native/MuesliNative/.xcodebuild/
 native/MuesliNative/LocalVQE/lib/
+
+# Generated Xcode project (regenerate with `xcodegen generate` from project.yml)
+native/MuesliXcode/*.xcodeproj/
 build/
 dist/
 output/
@@ -76,6 +80,8 @@ tmp-install/
 
 # Audio/data files
 *.wav
+!assets/audio/quill-activate.wav
+!assets/audio/quill-release.wav
 *.sqlite
 *.db
 

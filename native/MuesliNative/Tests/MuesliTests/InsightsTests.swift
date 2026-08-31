@@ -57,6 +57,146 @@ struct InsightsTests {
         #expect(snapshot.meetingWords.first?.word == "rhythm")
     }
 
+    @Test("average pace excludes words without a measured duration")
+    func averagePaceExcludesUntimedWords() throws {
+        let store = try makeStore()
+        let now = Date(timeIntervalSince1970: 1_784_092_800)
+        try store.insertDictation(
+            text: "one two",
+            durationSeconds: 60,
+            startedAt: now.addingTimeInterval(-60),
+            endedAt: now
+        )
+        try store.insertDictation(
+            text: "three four five",
+            durationSeconds: 0,
+            startedAt: now,
+            endedAt: now
+        )
+
+        let snapshot = try store.insightsSnapshot(range: .allTime, now: now)
+
+        #expect(snapshot.lifetime.totalWords == 5)
+        #expect(snapshot.lifetime.averageWPM == 2)
+        #expect(snapshot.selected.averageWPM == 2)
+    }
+
+    @Test("Quill insights use the spoken prompt and exclude model output")
+    func quillInsightsUseSpokenPrompt() throws {
+        let store = try makeStore()
+        let now = Date(timeIntervalSince1970: 1_784_092_800)
+        try store.insertDictation(
+            text: "spokenanchor",
+            durationSeconds: 60,
+            startedAt: now.addingTimeInterval(-60),
+            endedAt: now
+        )
+        try store.insertQuilDictation(
+            outputText: "generatedartifact generatedartifact generatedartifact",
+            originalText: "highlightartifact highlightartifact",
+            instruction: "rewriteprompt concisely",
+            backend: "gemma4LiteRT",
+            model: "gemma-4-e4b-it",
+            durationSeconds: 60,
+            startedAt: now.addingTimeInterval(-60),
+            endedAt: now
+        )
+
+        let snapshot = try store.insightsSnapshot(range: .allTime, now: now)
+        let words = Set(snapshot.dictationWords.map(\.word))
+
+        #expect(snapshot.lifetime.dictationWords == 3)
+        #expect(snapshot.lifetime.dictationSessions == 2)
+        #expect(snapshot.lifetime.averageWPM == 1.5)
+        #expect(words.contains("spokenanchor"))
+        #expect(words.contains("rewriteprompt"))
+        #expect(!words.contains("generatedartifact"))
+        #expect(!words.contains("highlightartifact"))
+    }
+
+    @Test("selected average pace uses the caller's local-day boundary")
+    func selectedAveragePaceUsesLocalDayBoundary() throws {
+        let store = try makeStore()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "Asia/Kolkata"))
+        let localMidnightRecord = try #require(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 7,
+            day: 1,
+            hour: 0,
+            minute: 15
+        )))
+        let now = try #require(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 7,
+            day: 30,
+            hour: 12
+        )))
+        try store.insertDictation(
+            text: "one two",
+            durationSeconds: 60,
+            startedAt: localMidnightRecord.addingTimeInterval(-60),
+            endedAt: localMidnightRecord
+        )
+
+        let snapshot = try store.insightsSnapshot(
+            range: .thirtyDays,
+            now: now,
+            calendar: calendar
+        )
+
+        #expect(snapshot.selected.dictationWords == 2)
+        #expect(snapshot.selected.averageWPM == 2)
+    }
+
+    @Test("snapshot reads every metric from one SQLite view")
+    func snapshotUsesOneSQLiteReadView() throws {
+        let store = try makeStore()
+        let writer = DictationStore(databaseURL: store.databasePath())
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = Date(timeIntervalSince1970: 1_784_092_800)
+        try store.insertDictation(
+            text: "initial",
+            durationSeconds: 60,
+            startedAt: now.addingTimeInterval(-60),
+            endedAt: now
+        )
+        _ = try store.insightsSnapshot(range: .thirtyDays, now: now, calendar: calendar)
+
+        let snapshot = try store.insightsSnapshot(
+            range: .thirtyDays,
+            now: now,
+            calendar: calendar,
+            afterLifetimeRead: {
+                try writer.insertDictation(
+                    text: "later cache commit",
+                    durationSeconds: 60,
+                    startedAt: now.addingTimeInterval(-60),
+                    endedAt: now
+                )
+                _ = try writer.insightsSnapshot(
+                    range: .thirtyDays,
+                    now: now,
+                    calendar: calendar
+                )
+            }
+        )
+
+        #expect(snapshot.lifetime.dictationWords == 1)
+        #expect(snapshot.selected.dictationWords == 1)
+        #expect(snapshot.dailyActivity.reduce(0) { $0 + $1.words } == 1)
+        #expect(snapshot.dictationWords == [InsightsWordFrequency(word: "initial", count: 1)])
+
+        let refreshed = try store.insightsSnapshot(
+            range: .thirtyDays,
+            now: now,
+            calendar: calendar
+        )
+        #expect(refreshed.lifetime.dictationWords == 4)
+        #expect(refreshed.selected.dictationWords == 4)
+    }
+
     @Test("deleted history is absent from totals, activity, and vocabulary")
     func deletedHistory() throws {
         let store = try makeStore()
