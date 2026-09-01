@@ -7,8 +7,14 @@ import MuesliCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private enum TerminationCompletion {
+        case shutdownFinished
+        case deadlineReached
+    }
+
     private var controller: MuesliController?
     private var terminationTask: Task<Void, Never>?
+    private var terminationTaskRequestID: UUID?
     private var terminationDeadlineTask: Task<Void, Never>?
     private var terminationRequestID: UUID?
     private(set) var updaterController: SPUStandardUpdaterController?
@@ -81,6 +87,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if terminationRequestID != nil {
             return .terminateLater
         }
+        if terminationTaskRequestID != nil {
+            return .terminateNow
+        }
         if controller?.shouldTerminateApplication() == false {
             return .terminateCancel
         }
@@ -88,26 +97,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let requestID = UUID()
         terminationRequestID = requestID
+        terminationTaskRequestID = requestID
         terminationTask = Task { @MainActor [weak self] in
             await controller.shutdown()
-            self?.completeTermination(requestID: requestID, application: sender)
+            self?.completeTermination(
+                requestID: requestID,
+                application: sender,
+                completion: .shutdownFinished
+            )
+            self?.clearFinishedTerminationTask(requestID: requestID)
         }
         terminationDeadlineTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled else { return }
-            self?.completeTermination(requestID: requestID, application: sender)
+            self?.completeTermination(
+                requestID: requestID,
+                application: sender,
+                completion: .deadlineReached
+            )
         }
         return .terminateLater
     }
 
-    private func completeTermination(requestID: UUID, application: NSApplication) {
+    private func completeTermination(
+        requestID: UUID,
+        application: NSApplication,
+        completion: TerminationCompletion
+    ) {
         guard terminationRequestID == requestID else { return }
         terminationRequestID = nil
-        terminationTask?.cancel()
-        terminationDeadlineTask?.cancel()
-        terminationTask = nil
-        terminationDeadlineTask = nil
+        switch completion {
+        case .shutdownFinished:
+            terminationDeadlineTask?.cancel()
+            terminationTask = nil
+            terminationTaskRequestID = nil
+            terminationDeadlineTask = nil
+        case .deadlineReached:
+            // Reply on time without cancelling shutdown so persistence and cleanup
+            // can continue for however long the process remains alive.
+            terminationDeadlineTask = nil
+        }
         application.reply(toApplicationShouldTerminate: true)
+    }
+
+    private func clearFinishedTerminationTask(requestID: UUID) {
+        guard terminationTaskRequestID == requestID else { return }
+        terminationTask = nil
+        terminationTaskRequestID = nil
     }
 
     private static var hasConfiguredSparkleFeed: Bool {

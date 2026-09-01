@@ -60,7 +60,13 @@ enum Qwen3AsrWarmupReadiness {
 /// Requires macOS 15+ due to CoreML stateful decoder support.
 @available(macOS 15, *)
 actor Qwen3AsrTranscriber {
+    private struct LoadTaskState {
+        let generation: UInt64
+        let task: Task<MuesliQwen3AsrManager, Error>
+    }
+
     private var manager: MuesliQwen3AsrManager?
+    private var loadTask: LoadTaskState?
     private var loadGeneration: UInt64 = 0
 
     enum TranscriberError: Error, LocalizedError {
@@ -80,38 +86,43 @@ actor Qwen3AsrTranscriber {
         progressSnapshot: ModelDownloadProgressHandler? = nil
     ) async throws {
         if manager != nil { return }
+        if let loadTask {
+            try await finishLoad(loadTask)
+            return
+        }
+
+        loadGeneration &+= 1
         let generation = loadGeneration
-
-        fputs("[qwen3-asr] downloading/loading models...\n", stderr)
         let plan = ManagedASRModelPlans.qwen3ASRInt8()
-        let mgr = try await ManagedASRModelDownloader.loadValidated(
-            plan,
-            progress: progress,
-            progressSnapshot: progressSnapshot
-        ) { modelDir in
-            let preparing = ModelDownloadProgress.preparing(
-                modelID: plan.modelID,
-                message: "Loading Qwen3 ASR into Core ML..."
-            )
-            progress?(0.95, preparing.message)
-            progressSnapshot?(preparing)
-            let candidate = MuesliQwen3AsrManager()
-            try await candidate.loadModels(from: modelDir)
-            fputs("[qwen3-asr] models loaded, running warmup inference...\n", stderr)
+        let task = Task<MuesliQwen3AsrManager, Error> {
+            fputs("[qwen3-asr] downloading/loading models...\n", stderr)
+            return try await ManagedASRModelDownloader.loadValidated(
+                plan,
+                progress: progress,
+                progressSnapshot: progressSnapshot
+            ) { modelDir in
+                let preparing = ModelDownloadProgress.preparing(
+                    modelID: plan.modelID,
+                    message: "Loading Qwen3 ASR into Core ML..."
+                )
+                progress?(0.95, preparing.message)
+                progressSnapshot?(preparing)
+                let candidate = MuesliQwen3AsrManager()
+                try await candidate.loadModels(from: modelDir)
+                fputs("[qwen3-asr] models loaded, running warmup inference...\n", stderr)
 
-            // Warmup: run a tiny dummy audio through the pipeline to trigger CoreML compilation.
-            // This moves the ~30s compilation cost from first dictation to preload time.
-            let warmupSamples = [Float](repeating: 0, count: 16000) // 1 second of silence
-            _ = try await candidate.transcribe(audioSamples: warmupSamples)
-            try Qwen3AsrWarmupReadiness.validate(isCurrent: generation == loadGeneration)
-            return candidate
+                // Warmup: run a tiny dummy audio through the pipeline to trigger CoreML compilation.
+                // This moves the ~30s compilation cost from first dictation to preload time.
+                let warmupSamples = [Float](repeating: 0, count: 16000) // 1 second of silence
+                _ = try await candidate.transcribe(audioSamples: warmupSamples)
+                try Qwen3AsrWarmupReadiness.validate(isCurrent: generation == loadGeneration)
+                return candidate
+            }
         }
-        // A shutdown() during load or warmup must invalidate the result instead
-        // of publishing a stale manager after shutdown returns.
-        guard generation == loadGeneration else {
-            throw CancellationError()
-        }
-        self.manager = mgr
+        let state = LoadTaskState(generation: generation, task: task)
+        loadTask = state
+        try await finishLoad(state)
+
         let preparing = ModelDownloadProgress.preparing(
             modelID: plan.modelID,
             message: "Loading Qwen3 ASR into Core ML..."
@@ -119,6 +130,24 @@ actor Qwen3AsrTranscriber {
         progress?(1, nil)
         progressSnapshot?(preparing.replacing(phase: .ready, message: "Model ready"))
         fputs("[qwen3-asr] warmup complete, ready\n", stderr)
+    }
+
+    private func finishLoad(_ state: LoadTaskState) async throws {
+        do {
+            let loadedManager = try await state.task.value
+            if manager != nil { return }
+            guard loadGeneration == state.generation,
+                  loadTask?.generation == state.generation else {
+                throw CancellationError()
+            }
+            manager = loadedManager
+            loadTask = nil
+        } catch {
+            if loadTask?.generation == state.generation {
+                loadTask = nil
+            }
+            throw error
+        }
     }
 
     /// Transcribe a WAV file URL.
@@ -135,7 +164,9 @@ actor Qwen3AsrTranscriber {
     }
 
     func shutdown() {
-        manager = nil
         loadGeneration &+= 1
+        loadTask?.task.cancel()
+        loadTask = nil
+        manager = nil
     }
 }
