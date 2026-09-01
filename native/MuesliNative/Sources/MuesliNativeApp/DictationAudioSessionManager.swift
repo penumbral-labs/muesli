@@ -89,15 +89,6 @@ protocol DictationAudioRecording: AnyObject {
     func currentPower() -> Float
 }
 
-extension DictationAudioRecording {
-    var onAudioBuffer: (([Float]) -> Void)? {
-        get { nil }
-        set {}
-    }
-}
-
-extension MicrophoneRecorder: DictationAudioRecording {}
-
 final class DictationAudioSessionManager: @unchecked Sendable {
     private enum StartupError: LocalizedError {
         case noAudioBuffer

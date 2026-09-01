@@ -19,7 +19,7 @@ import Foundation
 /// Implementation note: Apple's vDSP FFT requires lengths of form `f * 2^n` where
 /// `f ∈ {1,3,5,15}`, which excludes 400. We compute the DFT via a pre-computed
 /// DFT matrix (cos/sin tables), using vDSP vector operations for efficiency.
-/// This gives bit-exact results matching Python's `torch.stft(n_fft=400)`.
+/// This matches Python's `torch.stft(n_fft=400)` to within Float32 rounding.
 ///
 /// - Warning: This class is NOT thread-safe and NOT `Sendable` due to mutable
 ///   reusable buffers. Each thread/task should use its own instance.

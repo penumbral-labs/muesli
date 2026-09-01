@@ -104,6 +104,34 @@ struct ConfigStoreTests {
         #expect(persistedConfig.openRouterAPIKey.isEmpty)
     }
 
+    @Test("failed migration keeps the legacy key for retry")
+    func failedMigrationKeepsLegacyKey() throws {
+        let supportDirectory = makeSupportDirectory(label: "migration-failure")
+        defer { try? FileManager.default.removeItem(at: supportDirectory) }
+        try FileManager.default.createDirectory(
+            at: supportDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: supportDirectory.appendingPathComponent("openrouter-auth.json"),
+            withIntermediateDirectories: true
+        )
+
+        var staleConfig = AppConfig()
+        staleConfig.openRouterAPIKey = "sk-or-legacy"
+        let configURL = supportDirectory.appendingPathComponent("config.json")
+        try JSONEncoder().encode(staleConfig).write(to: configURL, options: .atomic)
+
+        let loaded = ConfigStore(supportDirectory: supportDirectory).load()
+
+        #expect(loaded.openRouterAPIKey == "sk-or-legacy")
+        let persistedConfig = try JSONDecoder().decode(
+            AppConfig.self,
+            from: Data(contentsOf: configURL)
+        )
+        #expect(persistedConfig.openRouterAPIKey == "sk-or-legacy")
+    }
+
     private func makeSupportDirectory(label: String) -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent(
             "muesli-config-\(label)-\(UUID().uuidString)",

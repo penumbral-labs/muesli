@@ -1279,6 +1279,13 @@ struct ModelDownloadCoordinatorTests {
         #expect(unified.mirror?.manifestURL.absoluteString == "https://assets.muesli.works/models/fluidaudio/parakeet-unified-en-0.6b/legacy-local-v1/manifest.json")
 
         let whisper = ManagedASRModelPlans.whisperKit(modelName: "tiny", downloadRoot: root)
+        let prefixedWhisper = ManagedASRModelPlans.whisperKit(
+            modelName: "openai_whisper-tiny",
+            downloadRoot: root
+        )
+        #expect(whisper.modelID == "tiny")
+        #expect(prefixedWhisper.modelID == "tiny")
+        #expect(prefixedWhisper.cacheDirectory == whisper.cacheDirectory)
         #expect(whisper.selections[0].includedPaths.contains("AudioEncoder.mlmodelc"))
         #expect(whisper.selections[0].includedPaths.contains("config.json"))
         #expect(whisper.selections[0].includedPaths.contains("generation_config.json"))

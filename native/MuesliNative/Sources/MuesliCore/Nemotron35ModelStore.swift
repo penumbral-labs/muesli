@@ -1,25 +1,5 @@
 import Foundation
 
-public enum Nemotron35ModelStoreError: Error, LocalizedError {
-    case invalidURL(String)
-    case invalidResponse(String)
-    case httpError(Int, String)
-    case retriesExhausted(String, Error)
-
-    public var errorDescription: String? {
-        switch self {
-        case .invalidURL(let value):
-            return "Invalid Nemotron model URL: \(value)"
-        case .invalidResponse(let value):
-            return "Invalid Nemotron model response: \(value)"
-        case .httpError(let code, let path):
-            return "HTTP \(code) downloading Nemotron model file \(path)"
-        case .retriesExhausted(let path, let underlying):
-            return "Failed to download Nemotron model file \(path) after retries: \(underlying.localizedDescription)"
-        }
-    }
-}
-
 /// The shared on-disk Nemotron 3.5 model store used by the app and CLI.
 ///
 /// The app's RNNT engine and FluidAudio's multilingual manager can both load
@@ -88,20 +68,22 @@ public enum Nemotron35ModelStore {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         progress?(0.0, "Downloading Nemotron 3.5 model...")
 
-        let apiURL = "https://huggingface.co/api/models/\(repoID)/tree/main/\(variantPath)"
-        let files = try await collectFiles(
-            apiURL: apiURL,
-            remotePath: variantPath,
-            skipRelativePrefix: "decoder_joint.mlmodelc"
-        )
-        guard !files.isEmpty else {
-            throw Nemotron35ModelStoreError.invalidResponse(apiURL)
-        }
-
-        let manifest = ModelDownloadManifest(
-            id: repoID,
-            version: "main:\(variantPath)",
-            files: files,
+        let manifest = try await HuggingFaceModelManifestResolver.shared.resolve(
+            modelID: repoID,
+            repository: repoID,
+            selections: [
+                HuggingFaceModelSelection(
+                    remoteDirectory: variantPath,
+                    includedPaths: [
+                        "encoder.mlmodelc",
+                        "decoder.mlmodelc",
+                        "joint.mlmodelc",
+                        "preprocessor.mlmodelc",
+                        "metadata.json",
+                        "tokenizer.json",
+                    ]
+                )
+            ],
             maximumConcurrency: 2
         )
         try await ModelDownloadCoordinator.shared.download(manifest, to: directory) { snapshot in
@@ -155,58 +137,4 @@ public enum Nemotron35ModelStore {
         )
     }
 
-    private static func collectFiles(
-        apiURL: String,
-        remotePath: String,
-        skipRelativePrefix: String?
-    ) async throws -> [ModelDownloadFile] {
-        guard let url = URL(string: apiURL) else {
-            throw Nemotron35ModelStoreError.invalidURL(apiURL)
-        }
-
-        let (data, response) = try await URLSession.shared.data(from: url)
-        if let httpResponse = response as? HTTPURLResponse,
-           !(200..<300).contains(httpResponse.statusCode) {
-            throw Nemotron35ModelStoreError.httpError(httpResponse.statusCode, apiURL)
-        }
-
-        guard let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            throw Nemotron35ModelStoreError.invalidResponse(apiURL)
-        }
-
-        var files: [ModelDownloadFile] = []
-        for entry in entries {
-            guard let path = entry["path"] as? String,
-                  let type = entry["type"] as? String,
-                  path.hasPrefix(remotePath + "/")
-            else {
-                continue
-            }
-
-            let relativePath = String(path.dropFirst(remotePath.count + 1))
-            if let skipRelativePrefix, relativePath.hasPrefix(skipRelativePrefix) {
-                continue
-            }
-
-            if type == "directory" {
-                let subAPI = "https://huggingface.co/api/models/\(repoID)/tree/main/\(path)"
-                files.append(contentsOf: try await collectFiles(
-                    apiURL: subAPI,
-                    remotePath: remotePath,
-                    skipRelativePrefix: skipRelativePrefix
-                ))
-            } else if type == "file" {
-                guard let fileURL = URL(string: "https://huggingface.co/\(repoID)/resolve/main/\(path)") else {
-                    throw Nemotron35ModelStoreError.invalidURL(path)
-                }
-                let expectedByteCount = (entry["size"] as? NSNumber)?.int64Value
-                files.append(ModelDownloadFile(
-                    relativePath: relativePath,
-                    remoteURL: fileURL,
-                    expectedByteCount: expectedByteCount
-                ))
-            }
-        }
-        return files.sorted { $0.relativePath < $1.relativePath }
-    }
 }

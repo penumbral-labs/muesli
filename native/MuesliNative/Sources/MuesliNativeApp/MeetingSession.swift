@@ -349,6 +349,18 @@ final class MeetingSession {
         meetingMicRecorder.preferredInputDeviceID = deviceID
     }
 
+    static func inputIsMuted(
+        muteValues: [Bool?],
+        mainVolume: Float?,
+        channelVolumes: [Float?]
+    ) -> Bool {
+        if muteValues.contains(true) { return true }
+        if let mainVolume, mainVolume <= 0.0001 { return true }
+        let readableChannelVolumes = channelVolumes.compactMap { $0 }
+        return !readableChannelVolumes.isEmpty
+            && readableChannelVolumes.allSatisfy { $0 <= 0.0001 }
+    }
+
     /// True when the capture device is muted or zero-gain at the source (user
     /// intent), which presents the same all-zero signature as a broken route.
     /// Called by the coordinator at episode confirmation and at most 1Hz while
@@ -392,18 +404,10 @@ final class MeetingSession {
                 }
             }
         }
+        var muteValues: [Bool?] = []
+        var mainVolume: Float?
+        var channelVolumes: [Float?] = []
         for element in elements {
-            var volumeAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyVolumeScalar,
-                mScope: kAudioObjectPropertyScopeInput,
-                mElement: element
-            )
-            var volume: Float32 = 1
-            var volumeSize = UInt32(MemoryLayout<Float32>.size)
-            if AudioObjectGetPropertyData(deviceID, &volumeAddress, 0, nil, &volumeSize, &volume) == noErr,
-               volume <= 0.0001 {
-                return true
-            }
             var muteAddress = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyMute,
                 mScope: kAudioObjectPropertyScopeInput,
@@ -411,12 +415,43 @@ final class MeetingSession {
             )
             var muted: UInt32 = 0
             var muteSize = UInt32(MemoryLayout<UInt32>.size)
-            if AudioObjectGetPropertyData(deviceID, &muteAddress, 0, nil, &muteSize, &muted) == noErr,
-               muted != 0 {
-                return true
+            let muteStatus = AudioObjectGetPropertyData(
+                deviceID,
+                &muteAddress,
+                0,
+                nil,
+                &muteSize,
+                &muted
+            )
+            muteValues.append(muteStatus == noErr ? muted != 0 : nil)
+
+            var volumeAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: element
+            )
+            var volume: Float32 = 1
+            var volumeSize = UInt32(MemoryLayout<Float32>.size)
+            let volumeStatus = AudioObjectGetPropertyData(
+                deviceID,
+                &volumeAddress,
+                0,
+                nil,
+                &volumeSize,
+                &volume
+            )
+            let readableVolume = volumeStatus == noErr ? volume : nil
+            if element == kAudioObjectPropertyElementMain {
+                mainVolume = readableVolume
+            } else {
+                channelVolumes.append(readableVolume)
             }
         }
-        return false
+        return Self.inputIsMuted(
+            muteValues: muteValues,
+            mainVolume: mainVolume,
+            channelVolumes: channelVolumes
+        )
     }
 
     private func currentBackend() -> BackendOption {

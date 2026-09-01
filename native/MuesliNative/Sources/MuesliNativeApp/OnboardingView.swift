@@ -507,7 +507,7 @@ struct OnboardingView: View {
                 details.append("\(formattedETA) left")
             }
             if snapshot.retryCount > 0 {
-                details.append("retry \(snapshot.retryCount)/3")
+                details.append("retry \(snapshot.retryCount)/\(ModelDownloadCoordinator.maximumDownloadAttempts)")
             }
         } else if let message = snapshot.message, !message.isEmpty {
             details.append(message)
@@ -1912,13 +1912,18 @@ struct OnboardingView: View {
             modelDownloadStatus = snapshot.message ?? "Download failed"
         }
 
-        publishModelPreparationStatus(
-            title: modelDownloadIndicatorTitle,
-            detail: modelDownloadStatus,
-            progress: modelDownloadProgress,
-            isPreparing: isModelPreparingAfterDownload,
-            isComplete: snapshot.phase == .ready
-        )
+        if OnboardingFlow.shouldPublishModelDownloadSnapshot(
+            isReadySnapshot: snapshot.phase == .ready,
+            backendIsReady: modelReadyBackend == backend
+        ) {
+            publishModelPreparationStatus(
+                title: modelDownloadIndicatorTitle,
+                detail: modelDownloadStatus,
+                progress: modelDownloadProgress,
+                isPreparing: isModelPreparingAfterDownload,
+                isComplete: false
+            )
+        }
     }
 
     private func applyModelPreparationProgress(

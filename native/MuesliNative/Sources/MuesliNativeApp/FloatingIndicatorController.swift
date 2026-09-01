@@ -126,42 +126,6 @@ private final class HoverIndicatorView: NSView {
     }
 }
 
-// A self-contained rounded "shortcut pill" shown beside the idle indicator on
-// hover when `IndicatorHoverStyle.shortcutPill` is configured. Drawn as one
-// rounded rectangle so the label never inherits the mic surface's shape.
-private final class IdleShortcutPillView: NSView {
-    var title = "" {
-        didSet { needsDisplay = true }
-    }
-
-    override var isOpaque: Bool { false }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let pillRect = bounds.insetBy(dx: 0.5, dy: 0.5)
-        let pillPath = NSBezierPath(roundedRect: pillRect, xRadius: 14, yRadius: 14)
-        NSColor.black.withAlphaComponent(0.97).setFill()
-        pillPath.fill()
-        NSColor.white.withAlphaComponent(0.16).setStroke()
-        pillPath.lineWidth = 1
-        pillPath.stroke()
-
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 15, weight: .regular),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.88),
-            .paragraphStyle: paragraph
-        ]
-        let attributedTitle = NSAttributedString(string: title, attributes: attributes)
-        let textSize = attributedTitle.size()
-        attributedTitle.draw(at: NSPoint(
-            x: floor((bounds.width - textSize.width) / 2),
-            y: floor((bounds.height - textSize.height) / 2)
-        ))
-    }
-}
-
 @MainActor
 final class FloatingIndicatorController: NSObject {
     private var panel: NSPanel?
@@ -191,7 +155,6 @@ final class FloatingIndicatorController: NSObject {
     )
     private var glassView: NSVisualEffectView?
     private var tintLayer: CALayer?
-    private var idleShortcutPillView: IdleShortcutPillView?
     private var idleIconBackgroundLayer: CALayer?
     private var micIconView: NSImageView?
     private var wandIconView: NSImageView?
@@ -1244,7 +1207,6 @@ final class FloatingIndicatorController: NSObject {
     /// non-idle path (transcribing, loading, warning, automation cursor) must
     /// clear it or the grip/label lingers on top of those overlays.
     private func hideShortcutPillChrome() {
-        idleShortcutPillView?.isHidden = true
         idleIconBackgroundLayer?.isHidden = true
     }
 
@@ -1264,7 +1226,6 @@ final class FloatingIndicatorController: NSObject {
         wandIconView?.isHidden = true
         quillIconView?.isHidden = true
         iconLabel?.isHidden = true
-        idleShortcutPillView?.isHidden = true
 
         let placement = idleHoverPlacement(for: config.indicatorAnchor)
         let (pillFrame, title, font, textWidth) = shortcutPillHoverFrame(
@@ -1356,7 +1317,6 @@ final class FloatingIndicatorController: NSObject {
                 layoutShortcutPillIdle(frameSize: frameSize, config: config)
                 return
             }
-            idleShortcutPillView?.isHidden = true
             idleIconBackgroundLayer?.isHidden = true
             // Mic symbol centred (or left-aligned when hovered beside text).
             wandIconView?.isHidden = true
@@ -1698,12 +1658,6 @@ final class FloatingIndicatorController: NSObject {
         tintLayer = tint
 
         // Shortcut-pill hover style: adjacent label pill + mic capsule/handle.
-        let shortcutPill = IdleShortcutPillView(frame: .zero)
-        shortcutPill.wantsLayer = true
-        shortcutPill.isHidden = true
-        contentView.addSubview(shortcutPill)
-        idleShortcutPillView = shortcutPill
-
         let iconBackground = CALayer()
         iconBackground.backgroundColor = NSColor.colorWith(hex: 0x111111, alpha: 1).cgColor
         iconBackground.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
@@ -1904,7 +1858,6 @@ final class FloatingIndicatorController: NSObject {
         case .preparing: size = NSSize(width: 76, height: 22)
         case .recording: size = NSSize(width: 76, height: 22)
         case .transcribing:
-            hideShortcutPillChrome()
             if let transcript = instructionTranscriptText {
                 size = Self.instructionTranscriptPillSize(
                     transcript: transcript,

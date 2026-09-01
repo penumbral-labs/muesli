@@ -67,11 +67,42 @@ struct OnboardingFlowTests {
         #expect(OnboardingFlow.completionTab(for: .dictationAndMeetings) == .dictations)
     }
 
-    @Test("dictation monitor stops and cancels active testing when readiness is lost")
-    func dictationMonitorStopsWhenReadinessIsLost() {
+    @Test("late ready download snapshots do not replace authoritative completion")
+    func lateReadySnapshotDoesNotPublish() {
+        #expect(OnboardingFlow.shouldPublishModelDownloadSnapshot(
+            isReadySnapshot: false,
+            backendIsReady: true
+        ))
+        #expect(OnboardingFlow.shouldPublishModelDownloadSnapshot(
+            isReadySnapshot: true,
+            backendIsReady: false
+        ))
+        #expect(!OnboardingFlow.shouldPublishModelDownloadSnapshot(
+            isReadySnapshot: true,
+            backendIsReady: true
+        ))
+    }
+
+    @Test("dictation monitor respects readiness and step threshold")
+    func dictationMonitorRespectsReadinessAndStepThreshold() {
+        let threshold = OnboardingFlow.dictationTestStep
         #expect(OnboardingFlow.dictationTestMonitorAction(
-            currentStep: OnboardingFlow.dictationTestStep,
-            dictationTestStep: OnboardingFlow.dictationTestStep,
+            currentStep: threshold - 1,
+            dictationTestStep: threshold,
+            modelReady: true,
+            monitorActive: false,
+            dictationTesting: false
+        ) == .none)
+        #expect(OnboardingFlow.dictationTestMonitorAction(
+            currentStep: threshold,
+            dictationTestStep: threshold,
+            modelReady: false,
+            monitorActive: false,
+            dictationTesting: false
+        ) == .stop(cancelTestDictation: false))
+        #expect(OnboardingFlow.dictationTestMonitorAction(
+            currentStep: threshold,
+            dictationTestStep: threshold,
             modelReady: false,
             monitorActive: true,
             dictationTesting: true
@@ -119,5 +150,13 @@ struct OnboardingFlowTests {
         #expect(ModelDownloadDisplayFormatting.eta(Double.greatestFiniteMagnitude) == nil)
         #expect(ModelDownloadDisplayFormatting.eta(.infinity) == nil)
         #expect(ModelDownloadDisplayFormatting.eta(3_600) == "1h 00m")
+    }
+
+    @Test("download rates preserve useful units at every scale")
+    func downloadRatesUseAppropriateUnits() {
+        #expect(ModelDownloadDisplayFormatting.rate(40) == "40 B/s")
+        #expect(ModelDownloadDisplayFormatting.rate(1_500) == "1.5 KB/s")
+        #expect(ModelDownloadDisplayFormatting.rate(1_500_000) == "1.5 MB/s")
+        #expect(ModelDownloadDisplayFormatting.rate(1_500_000_000) == "1.5 GB/s")
     }
 }

@@ -332,7 +332,9 @@ public enum ManagedASRModelPlans {
         modelName: String,
         downloadRoot: URL? = nil
     ) -> ManagedASRModelPlan {
-        let fullName = modelName.hasPrefix("openai_whisper-") ? modelName : "openai_whisper-\(modelName)"
+        let prefix = "openai_whisper-"
+        let fullName = modelName.hasPrefix(prefix) ? modelName : "\(prefix)\(modelName)"
+        let canonicalModelID = String(fullName.dropFirst(prefix.count))
         let root = downloadRoot ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents/huggingface/models/argmaxinc/whisperkit-coreml", isDirectory: true)
         let directory = root.appendingPathComponent(fullName, isDirectory: true)
@@ -341,7 +343,7 @@ public enum ManagedASRModelPlans {
         ]
         let requiredFiles = requiredModels + ["config.json", "generation_config.json"]
         return ManagedASRModelPlan(
-            modelID: modelName,
+            modelID: canonicalModelID,
             repository: "argmaxinc/whisperkit-coreml",
             cacheDirectory: directory,
             selections: [HuggingFaceModelSelection(

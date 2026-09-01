@@ -519,7 +519,11 @@ struct MeetingsView: View {
     }
 
     private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "HH:mm"; return f
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
     }()
 
     private func formatTimeRange(_ event: UnifiedCalendarEvent) -> String {

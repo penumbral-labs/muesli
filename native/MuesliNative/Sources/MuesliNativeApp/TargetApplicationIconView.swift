@@ -4,7 +4,21 @@ import MuesliCore
 
 @MainActor
 private enum TargetApplicationIconResolver {
+    private final class CachedMiss: NSObject {
+        let expiresAt: Date
+
+        init(expiresAt: Date) {
+            self.expiresAt = expiresAt
+        }
+    }
+
+    private static let unresolvedCacheTTL: TimeInterval = 60
     private static let cache = NSCache<NSString, NSImage>()
+    private static let unresolvedCache: NSCache<NSString, CachedMiss> = {
+        let cache = NSCache<NSString, CachedMiss>()
+        cache.countLimit = 256
+        return cache
+    }()
 
     static func icon(bundleIdentifier: String?) -> NSImage? {
         guard let bundleIdentifier = bundleIdentifier?
@@ -17,6 +31,10 @@ private enum TargetApplicationIconResolver {
         if let cached = cache.object(forKey: key) {
             return cached
         }
+        if let miss = unresolvedCache.object(forKey: key) {
+            if miss.expiresAt > Date() { return nil }
+            unresolvedCache.removeObject(forKey: key)
+        }
 
         let runningURL = NSRunningApplication
             .runningApplications(withBundleIdentifier: bundleIdentifier)
@@ -24,10 +42,15 @@ private enum TargetApplicationIconResolver {
             .bundleURL
         guard let applicationURL = runningURL
                 ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
+            unresolvedCache.setObject(
+                CachedMiss(expiresAt: Date().addingTimeInterval(unresolvedCacheTTL)),
+                forKey: key
+            )
             return nil
         }
 
         let icon = NSWorkspace.shared.icon(forFile: applicationURL.path)
+        unresolvedCache.removeObject(forKey: key)
         cache.setObject(icon, forKey: key)
         return icon
     }

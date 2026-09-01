@@ -651,7 +651,10 @@ final class MuesliICloudSyncEngine {
     }
 
     static func isSyncZoneRecoveryError(_ error: Error) -> Bool {
-        isSyncZoneMissing(error)
+        if containsCloudKitError(error, codes: [.zoneNotFound, .userDeletedZone]) {
+            return true
+        }
+        return errorMessageIndicatesMissingSyncZone(error)
     }
 
     @discardableResult
@@ -1371,6 +1374,10 @@ final class MuesliICloudSyncEngine {
             return true
         }
 
+        return errorMessageIndicatesMissingSyncZone(error)
+    }
+
+    private static func errorMessageIndicatesMissingSyncZone(_ error: Error) -> Bool {
         let nsError = error as NSError
         let message = [
             nsError.localizedDescription,

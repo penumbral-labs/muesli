@@ -3,6 +3,35 @@ import Testing
 @testable import MuesliNativeApp
 
 struct MeetingMicRecoveryCoordinatorTests {
+    @Test("capture mute decision preserves mute precedence and channel unanimity")
+    func captureMuteDecision() {
+        #expect(MeetingSession.inputIsMuted(
+            muteValues: [nil, false, true],
+            mainVolume: 1,
+            channelVolumes: [1, 1]
+        ))
+        #expect(MeetingSession.inputIsMuted(
+            muteValues: [false],
+            mainVolume: 0,
+            channelVolumes: [1, 1]
+        ))
+        #expect(!MeetingSession.inputIsMuted(
+            muteValues: [false, false],
+            mainVolume: nil,
+            channelVolumes: [0, 1]
+        ))
+        #expect(MeetingSession.inputIsMuted(
+            muteValues: [false, nil],
+            mainVolume: nil,
+            channelVolumes: [0, 0]
+        ))
+        #expect(!MeetingSession.inputIsMuted(
+            muteValues: [nil],
+            mainVolume: nil,
+            channelVolumes: [nil, nil]
+        ))
+    }
+
     private final class Harness {
         let tracker = MeetingMicHealthTracker()
         var coordinator: MeetingMicRecoveryCoordinator!

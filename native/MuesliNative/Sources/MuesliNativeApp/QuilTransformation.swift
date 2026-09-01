@@ -94,7 +94,8 @@ enum QuilTransformationOutput {
     static let maximumOutputCharacters = 40_000
 
     static func validated(_ raw: String) throws -> String {
-        let result = raw.replacingOccurrences(of: "\r\n", with: "\n")
+        let result = strippingModelControlMarkers(from: raw)
+            .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !result.isEmpty else {
@@ -107,6 +108,29 @@ enum QuilTransformationOutput {
             throw QuilTransformationError.nonReplacementResponse
         }
         return result
+    }
+
+    private static func strippingModelControlMarkers(from raw: String) -> String {
+        raw.replacingOccurrences(
+            of: #"<think>[\s\S]*?</think>"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        .replacingOccurrences(
+            of: #"^\s*<think\b[^>]*>[\s\S]*$"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        .replacingOccurrences(
+            of: #"<\|im_start\|>[ \t]*(?:system|user|assistant|tool)\b[ \t]*\n?"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        .replacingOccurrences(
+            of: #"<\|im_(?:start|end)\|>"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
     }
 
     private static func looksLikeCommentaryOrAlternatives(_ result: String) -> Bool {

@@ -222,7 +222,8 @@ struct TimelineView: View {
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = .current
-        formatter.dateFormat = "hh:mm a"
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
         return formatter
     }()
 

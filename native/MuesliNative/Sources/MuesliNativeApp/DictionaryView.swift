@@ -11,6 +11,26 @@ private enum DictionaryRowMetrics {
     static let suggestionPageSize = 10
 }
 
+enum DictionaryImportMessage {
+    static func zeroChange(importedCount: Int, invalidCount: Int, skippedCount: Int) -> String {
+        guard importedCount > 0 else {
+            return "The selected dictionary did not contain any entries."
+        }
+        guard invalidCount > 0 else {
+            return "All dictionary entries were already present."
+        }
+
+        let invalidNoun = invalidCount == 1 ? "entry" : "entries"
+        let duplicateCount = min(importedCount - invalidCount, max(0, skippedCount - invalidCount))
+        guard duplicateCount > 0 else {
+            return "Skipped \(invalidCount) invalid dictionary \(invalidNoun)."
+        }
+        let duplicateNoun = duplicateCount == 1 ? "entry was" : "entries were"
+        return "Skipped \(invalidCount) invalid dictionary \(invalidNoun); "
+            + "\(duplicateCount) \(duplicateNoun) already present."
+    }
+}
+
 struct DictionaryView: View {
     let appState: AppState
     let controller: MuesliController
@@ -174,10 +194,15 @@ struct DictionaryView: View {
                 controller.updateConfig { $0.customWords = result.words }
 
                 let totalChanged = result.addedCount + result.updatedCount
+                let invalidCount = imported.filter {
+                    $0.word.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }.count
                 if totalChanged == 0 {
-                    dictionaryAlertMessage = imported.isEmpty
-                        ? "The selected dictionary did not contain any entries."
-                        : "All dictionary entries were already present."
+                    dictionaryAlertMessage = DictionaryImportMessage.zeroChange(
+                        importedCount: imported.count,
+                        invalidCount: invalidCount,
+                        skippedCount: result.skippedCount
+                    )
                 } else {
                     var details = ["Imported \(result.addedCount) new", "updated \(result.updatedCount)"]
                     if result.skippedCount > 0 {

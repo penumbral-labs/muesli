@@ -239,7 +239,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let now = Date()
         let calendar = Calendar.current
         let timeFormatter = DateFormatter()
-        timeFormatter.dateFormat = "HH:mm"
+        timeFormatter.locale = .current
+        timeFormatter.dateStyle = .none
+        timeFormatter.timeStyle = .short
 
         let futureEvents = events
             .filter { $0.startDate > now }

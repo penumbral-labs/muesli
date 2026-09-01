@@ -97,6 +97,27 @@ struct QuilTransformationTests {
         #expect(try QuilTransformationOutput.validated(fenced) == fenced)
     }
 
+    @Test("output strips model control markers and roles without rewriting Markdown")
+    func stripsModelControlMarkersAndRoles() throws {
+        let fenced = "```swift\nlet value = 1\n```"
+        let raw = "<think>private reasoning</think><|im_start|>assistant\n\(fenced)<|im_end|>"
+
+        #expect(try QuilTransformationOutput.validated(raw) == fenced)
+    }
+
+    @Test("leading unterminated reasoning is rejected as empty")
+    func stripsLeadingUnterminatedReasoning() {
+        #expect(throws: QuilTransformationError.emptyResponse) {
+            try QuilTransformationOutput.validated("  \n<think>unfinished reasoning")
+        }
+    }
+
+    @Test("literal mid-response think tags do not truncate content")
+    func preservesLiteralMidResponseThinkTag() throws {
+        let raw = "Document this literal marker: <think>keep this text"
+        #expect(try QuilTransformationOutput.validated(raw) == raw)
+    }
+
     @Test("empty output is rejected")
     func rejectsEmptyOutput() {
         #expect(throws: QuilTransformationError.emptyResponse) {

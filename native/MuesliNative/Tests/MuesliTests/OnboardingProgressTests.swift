@@ -102,32 +102,6 @@ struct OnboardingProgressTests {
         #expect(decoded.hotkey.combinationKeyCode == 2)
     }
 
-    @Test("dictation monitor starts at and after its resume threshold")
-    func dictationMonitorUsesResumeThreshold() {
-        let threshold = OnboardingFlow.dictationTestStep
-
-        #expect(!OnboardingFlow.shouldStartDictationTestMonitor(
-            currentStep: threshold - 1,
-            dictationTestStep: threshold,
-            modelReady: true
-        ))
-        #expect(OnboardingFlow.shouldStartDictationTestMonitor(
-            currentStep: threshold,
-            dictationTestStep: threshold,
-            modelReady: true
-        ))
-        #expect(OnboardingFlow.shouldStartDictationTestMonitor(
-            currentStep: threshold + 1,
-            dictationTestStep: threshold,
-            modelReady: true
-        ))
-        #expect(!OnboardingFlow.shouldStartDictationTestMonitor(
-            currentStep: threshold,
-            dictationTestStep: threshold,
-            modelReady: false
-        ))
-    }
-
     @Test("dictation test resume threshold persists through decode and round trip")
     func dictationTestResumeThresholdPersists() throws {
         let threshold = OnboardingFlow.dictationTestStep

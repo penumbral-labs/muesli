@@ -1,4 +1,5 @@
 import CoreAudio
+import Foundation
 import Testing
 @testable import MuesliNativeApp
 
@@ -51,8 +52,8 @@ struct CoreAudioSystemRecorderTests {
     func routeChangeIsRecordOnly() async throws {
         let recorder = CoreAudioSystemRecorder()
         recorder.testing_setRecording(true)
-        var attempts = 0
-        recorder.createAndStartForTesting = { attempts += 1 }
+        let attempts = LockedValues()
+        recorder.createAndStartForTesting = { attempts.incrementAttempts() }
 
         CoreAudioSystemRecorder.routeSettleDelay = 0.05
         defer { CoreAudioSystemRecorder.routeSettleDelay = 1.5 }
@@ -64,15 +65,15 @@ struct CoreAudioSystemRecorderTests {
 
         // The tap is route-independent (global process mix): no rebuild ever.
         try await Task.sleep(for: .milliseconds(150))
-        #expect(attempts == 0)
+        #expect(attempts.attemptCount == 0)
     }
 
     @Test("health recovery requested during route churn defers until settle, sharing one slot")
     func healthRecoveryDefersDuringRouteSettle() async throws {
         let recorder = CoreAudioSystemRecorder()
         recorder.testing_setRecording(true)
-        var attempts = 0
-        recorder.createAndStartForTesting = { attempts += 1 }
+        let attempts = LockedValues()
+        recorder.createAndStartForTesting = { attempts.incrementAttempts() }
 
         CoreAudioSystemRecorder.routeSettleDelay = 0.08
         defer { CoreAudioSystemRecorder.routeSettleDelay = 1.5 }
@@ -81,10 +82,10 @@ struct CoreAudioSystemRecorderTests {
         // inside the settle window: one shared slot, one attempt total.
         recorder.restartTapForDefaultOutputDeviceChange()
         #expect(recorder.rebuildForHealthRecovery(reason: "test"))
-        #expect(attempts == 0) // deferred, not immediate
-        try await waitForCondition { attempts == 1 }
+        #expect(attempts.attemptCount == 0) // deferred, not immediate
+        try await waitForCondition { attempts.attemptCount == 1 }
         try await Task.sleep(for: .milliseconds(120))
-        #expect(attempts == 1)
+        #expect(attempts.attemptCount == 1)
     }
 
     @Test("CoreAudio tap backend supports heartbeat monitoring; SCK fallback does not")
@@ -97,23 +98,22 @@ struct CoreAudioSystemRecorderTests {
     func rebuildRetriesThenSucceeds() async throws {
         let recorder = CoreAudioSystemRecorder()
         recorder.testing_setRecording(true)
-        var attempts = 0
+        let values = LockedValues()
         recorder.createAndStartForTesting = {
-            attempts += 1
+            let attempts = values.incrementAttempts()
             if attempts < 3 { throw NSError(domain: "test", code: 1) }
         }
-        var failures = 0
-        recorder.onCaptureFailure = { _ in failures += 1 }
+        recorder.onCaptureFailure = { _ in values.incrementFailures() }
 
         let fast = RebuildRetryPolicy(delays: [0.02, 0.05, 0.05])
         CoreAudioSystemRecorder.rebuildRetryPolicy = fast
         defer { CoreAudioSystemRecorder.rebuildRetryPolicy = .default }
 
         recorder.attemptTapRebuild(reason: "test")
-        try await waitForCondition { attempts == 3 && !recorder.isRebuilding }
+        try await waitForCondition { values.attemptCount == 3 && !recorder.isRebuilding }
 
-        #expect(attempts == 3)
-        #expect(failures == 0)
+        #expect(values.attemptCount == 3)
+        #expect(values.failureCount == 0)
         #expect(!recorder.captureIsDead)
     }
 
@@ -121,28 +121,56 @@ struct CoreAudioSystemRecorderTests {
     func terminalFailureRemainsRecoverable() async throws {
         let recorder = CoreAudioSystemRecorder()
         recorder.testing_setRecording(true)
-        var shouldFail = true
-        var attempts = 0
+        let values = LockedValues(shouldFail: true)
         recorder.createAndStartForTesting = {
-            attempts += 1
-            if shouldFail { throw NSError(domain: "test", code: 1) }
+            values.incrementAttempts()
+            if values.shouldFail { throw NSError(domain: "test", code: 1) }
         }
-        var failures = 0
-        recorder.onCaptureFailure = { _ in failures += 1 }
+        recorder.onCaptureFailure = { _ in values.incrementFailures() }
 
         let fast = RebuildRetryPolicy(delays: [0.02, 0.02, 0.02])
         CoreAudioSystemRecorder.rebuildRetryPolicy = fast
         defer { CoreAudioSystemRecorder.rebuildRetryPolicy = .default }
 
         recorder.attemptTapRebuild(reason: "test")
-        try await waitForCondition { failures == 1 }
+        try await waitForCondition { values.failureCount == 1 }
         #expect(recorder.captureIsDead)
         // Terminal state must remain recoverable (isRecording stays alive).
         #expect(recorder.rebuildForHealthRecovery(reason: "watchdog"))
 
-        shouldFail = false
+        values.shouldFail = false
         try await waitForCondition { !recorder.captureIsDead && !recorder.isRebuilding }
-        #expect(attempts >= 4)
+        #expect(values.attemptCount >= 4)
+    }
+
+    private final class LockedValues: @unchecked Sendable {
+        private let lock = NSLock()
+        private var attempts = 0
+        private var failures = 0
+        private var fail = false
+
+        init(shouldFail: Bool = false) {
+            fail = shouldFail
+        }
+
+        var attemptCount: Int { lock.withLock { attempts } }
+        var failureCount: Int { lock.withLock { failures } }
+        var shouldFail: Bool {
+            get { lock.withLock { fail } }
+            set { lock.withLock { fail = newValue } }
+        }
+
+        @discardableResult
+        func incrementAttempts() -> Int {
+            lock.withLock {
+                attempts += 1
+                return attempts
+            }
+        }
+
+        func incrementFailures() {
+            lock.withLock { failures += 1 }
+        }
     }
 
     private func waitForCondition(

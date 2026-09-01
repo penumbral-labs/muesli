@@ -9,8 +9,29 @@ struct Qwen3VendorTests {
     @Test("default int8 cache directory matches the managed plan's install directory")
     func defaultCacheMatchesManagedPlan() {
         let plan = ManagedASRModelPlans.qwen3ASRInt8()
-        let cache = MuesliQwen3AsrModels.defaultCacheDirectory(variant: .int8)
+        let cache = MuesliQwen3AsrModels.defaultCacheDirectory()
         #expect(cache.standardizedFileURL == plan.cacheDirectory.standardizedFileURL)
+    }
+
+    @Test("multi-array fast path requires dense contiguous strides")
+    func multiArrayDenseLayout() {
+        #expect(MuesliQwen3MultiArrayLayout.isDense(
+            shape: [1, 10, 1_024],
+            strides: [10_240, 1_024, 1]
+        ))
+        #expect(!MuesliQwen3MultiArrayLayout.isDense(
+            shape: [1, 10, 1_024],
+            strides: [12_000, 1_200, 1]
+        ))
+        #expect(!MuesliQwen3MultiArrayLayout.isDense(shape: [10, 1_024], strides: [1_024]))
+        #expect(!MuesliQwen3MultiArrayLayout.isDense(shape: [10, 0], strides: [1, 1]))
+    }
+
+    @Test("streaming config clamps duration and retains the mel frame floor")
+    func streamingLimits() {
+        let config = MuesliQwen3StreamingConfig(maxAudioSeconds: 120)
+        #expect(config.maxAudioSeconds == MuesliQwen3AsrConfig.maxAudioSeconds)
+        #expect(MuesliQwen3StreamingConfig.finalAudioSampleFloor == 160)
     }
 
     @available(macOS 15, *)

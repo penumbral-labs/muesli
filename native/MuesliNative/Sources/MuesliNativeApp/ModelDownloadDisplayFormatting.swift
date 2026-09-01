@@ -31,6 +31,12 @@ enum ModelDownloadDisplayFormatting {
         if bytesPerSecond >= 1_000_000_000 {
             return String(format: "%.1f GB/s", bytesPerSecond / 1_000_000_000)
         }
-        return String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
+        if bytesPerSecond >= 1_000_000 {
+            return String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
+        }
+        if bytesPerSecond >= 1_000 {
+            return String(format: "%.1f KB/s", bytesPerSecond / 1_000)
+        }
+        return String(format: "%.0f B/s", bytesPerSecond)
     }
 }

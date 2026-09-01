@@ -107,11 +107,11 @@ public final class MuesliModelMirrorManifestResolver: @unchecked Sendable {
         let objectKeyPrefix = Self.objectKeyPrefix(for: mirror.manifestURL)
         var seenPaths = Set<String>()
         let files = try payload.files.map { entry -> ModelDownloadFile in
-            guard Self.isSafeRelativePath(entry.relativePath),
+            guard ModelDownloadPathSafety.isSafeRelativePath(entry.relativePath),
                   entry.bytes > 0,
                   Self.isSHA256(entry.sha256),
                   entry.objectKey.hasPrefix(objectKeyPrefix),
-                  Self.isSafeObjectKey(entry.objectKey),
+                  ModelDownloadPathSafety.isSafeRelativePath(entry.objectKey),
                   !entry.objectKey.contains("?") && !entry.objectKey.contains("#")
             else {
                 throw MuesliModelMirrorManifestError.invalidFile(entry.relativePath)
@@ -173,22 +173,6 @@ public final class MuesliModelMirrorManifestResolver: @unchecked Sendable {
         components.query = nil
         components.fragment = nil
         return components.url
-    }
-
-    private static func isSafeRelativePath(_ path: String) -> Bool {
-        let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        return !path.isEmpty
-            && !path.hasPrefix("/")
-            && !path.contains("\\")
-            && components.allSatisfy { $0 != "." && $0 != ".." && !$0.isEmpty }
-    }
-
-    private static func isSafeObjectKey(_ key: String) -> Bool {
-        let components = key.split(separator: "/", omittingEmptySubsequences: false)
-        return !key.isEmpty
-            && !key.hasPrefix("/")
-            && !key.contains("\\")
-            && components.allSatisfy { $0 != "." && $0 != ".." && !$0.isEmpty }
     }
 
     private static func isSHA256(_ value: String) -> Bool {

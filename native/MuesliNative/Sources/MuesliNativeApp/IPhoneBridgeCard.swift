@@ -210,7 +210,7 @@ struct IPhoneBridgeCard: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 12)
                 .frame(height: 28)
-                .background(MuesliTheme.accent)
+                .background(actionDisabled ? MuesliTheme.accent.opacity(0.4) : MuesliTheme.accent)
                 .clipShape(RoundedRectangle(cornerRadius: MuesliTheme.cornerSmall))
             }
             .buttonStyle(.plain)
@@ -229,6 +229,7 @@ struct IPhoneBridgeCard: View {
             }
             .buttonStyle(.plain)
             .help("Hide iOS companion prompt")
+            .accessibilityLabel("Hide iOS companion prompt")
         }
         .padding(MuesliTheme.spacing12)
         .background(MuesliTheme.backgroundRaised)
@@ -530,6 +531,7 @@ struct IPhoneBridgeQRCodeSheet: View {
                         .clipShape(RoundedRectangle(cornerRadius: MuesliTheme.cornerSmall))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Close")
             }
 
             HStack(alignment: .center, spacing: MuesliTheme.spacing16) {

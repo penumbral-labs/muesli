@@ -213,6 +213,7 @@ struct DiarizerPreloadDiagnosticsTests {
     func telemetryAllowlist() {
         let parameters = makeContext().telemetryParameters
 
+        #expect(parameters["fluid_audio_version"] == "0.15.5")
         #expect(Set(parameters.keys) == [
             "schema_version",
             "trigger",

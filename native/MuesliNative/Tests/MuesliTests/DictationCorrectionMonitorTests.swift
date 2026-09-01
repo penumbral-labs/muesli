@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import MuesliNativeApp
 
-@Suite("Dictionary correction monitor")
+@Suite("Dictation correction monitor")
 struct DictationCorrectionMonitorTests {
     private let processID: pid_t = 42
     private let role = "AXTextArea"

@@ -258,6 +258,7 @@ private struct DownloadFileKey: Hashable, Sendable {
 public actor ModelDownloadCoordinator {
     /// The process-wide coordinator used by model backends and the UI.
     public static let shared = ModelDownloadCoordinator()
+    public static let maximumDownloadAttempts = 3
 
     private var inFlight: [DownloadJobKey: Task<Void, Error>] = [:]
     private var progressHandlers: [DownloadJobKey: [UUID: ModelDownloadProgressHandler]] = [:]
@@ -483,7 +484,7 @@ public actor ModelDownloadCoordinator {
         var didResetPartialForAttempt = false
 
         var attempt = 0
-        while attempt < 3 {
+        while attempt < Self.maximumDownloadAttempts {
             if attempt > 0 {
                 let base = UInt64(1 << (attempt - 1)) * 1_000_000_000
                 let jitter = UInt64.random(in: 0...250_000_000)
@@ -792,14 +793,7 @@ public actor ModelDownloadCoordinator {
     /// boundary defensive prevents a malformed or compromised manifest from
     /// writing or deleting arbitrary files.
     private func validatedURL(for relativePath: String, in directory: URL) throws -> URL {
-        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
-        guard !relativePath.isEmpty,
-              !relativePath.hasPrefix("/"),
-              !relativePath.contains("\\"),
-              components.allSatisfy({ component in
-                  let component = String(component)
-                  return !component.isEmpty && component != "." && component != ".."
-              }) else {
+        guard ModelDownloadPathSafety.isSafeRelativePath(relativePath) else {
             throw ModelDownloadError.invalidRelativePath(relativePath)
         }
 

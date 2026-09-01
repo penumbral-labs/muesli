@@ -5,6 +5,17 @@ import Testing
 
 @Suite("DictationAudioSessionManager")
 struct DictationAudioSessionManagerTests {
+    @Test("audio buffer callback passes through to the recorder")
+    func audioBufferCallbackPassesThrough() {
+        let harness = Harness(routeKind: .speakerLike)
+        var received: [Float] = []
+        harness.manager.onAudioBuffer = { received = $0 }
+
+        harness.recorder.onAudioBuffer?([0.25, -0.5])
+
+        #expect(received == [0.25, -0.5])
+    }
+
     @Test("arm activates warm engine without starting capture")
     func armActivatesWarmEngineWithoutStartingCapture() {
         let harness = Harness(routeKind: .speakerLike)
@@ -699,6 +710,7 @@ private final class FakeDictationRecorder: DictationAudioRecording {
     var onNoAudioTimeout: ((Date) -> Void)?
     var onRecordingFailed: ((Error, UUID) -> Void)?
     var onLatencyEvent: ((String, Date) -> Void)?
+    var onAudioBuffer: (([Float]) -> Void)?
 
     var prepareCalls = 0
     var explicitWarmupCalls = 0

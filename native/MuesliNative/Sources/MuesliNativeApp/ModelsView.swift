@@ -1014,7 +1014,7 @@ struct ModelsView: View {
                 details.append("\(formattedETA) left")
             }
             if snapshot.retryCount > 0 {
-                details.append("retry \(snapshot.retryCount)/3")
+                details.append("retry \(snapshot.retryCount)/\(ModelDownloadCoordinator.maximumDownloadAttempts)")
             }
         } else if let message = snapshot.message, !message.isEmpty {
             details.append(message)

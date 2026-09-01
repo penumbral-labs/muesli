@@ -269,7 +269,16 @@ struct MuesliCKSyncEngineTests {
         #expect(!MuesliICloudSyncEngine.isICloudAccountContextError(overDepthLimit))
         #expect(MuesliICloudSyncEngine.isSyncZoneRecoveryError(CKError(.zoneNotFound)))
         #expect(MuesliICloudSyncEngine.isSyncZoneRecoveryError(CKError(.userDeletedZone)))
+        #expect(!MuesliICloudSyncEngine.isSyncZoneRecoveryError(CKError(.unknownItem)))
         #expect(!MuesliICloudSyncEngine.isSyncZoneRecoveryError(CKError(.networkUnavailable)))
+        #expect(MuesliICloudSyncEngine.isSyncZoneMissing(CKError(.unknownItem)))
+
+        let partialUnknownItem = CKError(.partialFailure, userInfo: [
+            CKPartialErrorsByItemIDKey: [
+                CKRecord.ID(recordName: "missing-record"): CKError(.unknownItem),
+            ],
+        ])
+        #expect(!MuesliICloudSyncEngine.isSyncZoneRecoveryError(partialUnknownItem))
     }
 
     @Test("provenance treats only uniformly missing nested records as a safe non-match")

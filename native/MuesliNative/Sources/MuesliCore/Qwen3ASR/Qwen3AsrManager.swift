@@ -8,6 +8,27 @@ import OSLog
 
 private let logger = Logger(subsystem: "FluidAudio", category: "MuesliQwen3AsrManager")
 
+enum MuesliQwen3MultiArrayLayout {
+    static func isDense(shape: [Int], strides: [Int]) -> Bool {
+        guard !shape.isEmpty,
+              shape.count == strides.count,
+              shape.allSatisfy({ $0 > 0 }) else {
+            return false
+        }
+
+        var expectedStride = 1
+        for dimension in shape.indices.reversed() {
+            guard strides[dimension] == expectedStride else { return false }
+            let (nextStride, overflow) = expectedStride.multipliedReportingOverflow(
+                by: shape[dimension]
+            )
+            guard !overflow else { return false }
+            expectedStride = nextStride
+        }
+        return true
+    }
+}
+
 // MARK: - Qwen3-ASR Manager (2-model pipeline)
 
 /// Manages Qwen3-ASR CoreML inference using the optimized 2-model pipeline.
@@ -175,13 +196,36 @@ public actor MuesliQwen3AsrManager {
                     / MuesliQwen3AsrConfig.convDownsampleFactor
             }
 
-            for f in 0..<numOutputFrames {
-                var vec = [Float](repeating: 0.0, count: MuesliQwen3AsrConfig.encoderOutputDim)
-                for d in 0..<MuesliQwen3AsrConfig.encoderOutputDim {
-                    let idx = f * MuesliQwen3AsrConfig.encoderOutputDim + d
-                    vec[d] = features[idx].floatValue
+            let outputDimension = MuesliQwen3AsrConfig.encoderOutputDim
+            let requiredFeatureCount = numOutputFrames * outputDimension
+            guard features.count >= requiredFeatureCount else {
+                throw MuesliQwen3AsrError.encoderFailed("Unexpected audio_features shape")
+            }
+            let hasDenseFloatStorage = features.dataType == .float32
+                && MuesliQwen3MultiArrayLayout.isDense(
+                    shape: features.shape.map(\.intValue),
+                    strides: features.strides.map(\.intValue)
+                )
+            if hasDenseFloatStorage {
+                let featurePointer = features.dataPointer.bindMemory(
+                    to: Float.self,
+                    capacity: features.count
+                )
+                let featureBuffer = UnsafeBufferPointer(start: featurePointer, count: features.count)
+                for frame in 0..<numOutputFrames {
+                    let start = frame * outputDimension
+                    allFeatures.append(Array(featureBuffer[start..<(start + outputDimension)]))
                 }
-                allFeatures.append(vec)
+            } else {
+                for frame in 0..<numOutputFrames {
+                    var vector = [Float]()
+                    vector.reserveCapacity(outputDimension)
+                    let start = frame * outputDimension
+                    for index in start..<(start + outputDimension) {
+                        vector.append(features[index].floatValue)
+                    }
+                    allFeatures.append(vector)
+                }
             }
 
             offset += windowSize

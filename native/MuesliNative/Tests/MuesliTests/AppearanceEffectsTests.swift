@@ -99,11 +99,12 @@ struct MenuBarIconRendererTests {
     }
 
     @Test("status shortcut cue is compact while detail keeps menu bar size")
-    func statusShortcutCueTypography() {
+    func statusShortcutCueTypography() throws {
         let title = MenuBarIconRenderer.statusTitle(hotkey: .default, detail: "Meeting in 5m")
         let cueFont = title.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
-        let detailIndex = (title.string as NSString).range(of: "Meeting").location
-        let detailFont = title.attribute(.font, at: detailIndex, effectiveRange: nil) as? NSFont
+        let detailRange = (title.string as NSString).range(of: "Meeting")
+        try #require(detailRange.location != NSNotFound)
+        let detailFont = title.attribute(.font, at: detailRange.location, effectiveRange: nil) as? NSFont
 
         #expect(cueFont?.pointSize == 9)
         #expect((detailFont?.pointSize ?? 0) > (cueFont?.pointSize ?? 0))

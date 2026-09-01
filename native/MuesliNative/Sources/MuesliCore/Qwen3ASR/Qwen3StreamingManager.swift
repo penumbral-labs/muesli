@@ -10,6 +10,8 @@ private let logger = Logger(subsystem: "FluidAudio", category: "MuesliQwen3Strea
 
 /// Configuration for Qwen3 streaming transcription.
 public struct MuesliQwen3StreamingConfig: Sendable {
+    public static let finalAudioSampleFloor = 160
+
     /// Minimum audio duration (seconds) before first transcription.
     public let minAudioSeconds: Double
 
@@ -30,7 +32,7 @@ public struct MuesliQwen3StreamingConfig: Sendable {
     ) {
         self.minAudioSeconds = minAudioSeconds
         self.chunkSeconds = chunkSeconds
-        self.maxAudioSeconds = maxAudioSeconds
+        self.maxAudioSeconds = min(maxAudioSeconds, MuesliQwen3AsrConfig.maxAudioSeconds)
         self.language = language
     }
 
@@ -90,7 +92,12 @@ public actor MuesliQwen3StreamingManager {
 
     /// Configure streaming parameters.
     public func configure(_ config: MuesliQwen3StreamingConfig) {
-        self.config = config
+        self.config = MuesliQwen3StreamingConfig(
+            minAudioSeconds: config.minAudioSeconds,
+            chunkSeconds: config.chunkSeconds,
+            maxAudioSeconds: config.maxAudioSeconds,
+            language: config.language
+        )
     }
 
     /// Reset streaming state for a new session.
@@ -120,13 +127,7 @@ public actor MuesliQwen3StreamingManager {
             return nil
         }
 
-        // Trim if exceeding max duration
-        let maxSamples = Int(config.maxAudioSeconds * 16000)
-        if audioBuffer.count > maxSamples {
-            let excess = audioBuffer.count - maxSamples
-            audioBuffer.removeFirst(excess)
-            logger.debug("Trimmed \(excess) samples to stay under \(self.config.maxAudioSeconds)s limit")
-        }
+        trimToLimit()
 
         // Transcribe accumulated audio
         let transcript = try await asrManager.transcribe(
@@ -153,10 +154,12 @@ public actor MuesliQwen3StreamingManager {
     ///
     /// Transcribes any remaining audio and returns the final result.
     public func finish() async throws -> MuesliQwen3StreamingResult {
+        trimToLimit()
         let duration = Double(audioBuffer.count) / 16000.0
 
-        // If we have audio that hasn't been transcribed, do final transcription
-        if samplesSinceLastTranscribe > 0 && audioBuffer.count >= Int(config.minAudioSeconds * 16000) {
+        // Retain final audio down to the mel extractor's one-frame floor.
+        if samplesSinceLastTranscribe > 0
+            && audioBuffer.count >= MuesliQwen3StreamingConfig.finalAudioSampleFloor {
             let transcript = try await asrManager.transcribe(
                 audioSamples: audioBuffer,
                 language: config.language,
@@ -177,6 +180,14 @@ public actor MuesliQwen3StreamingManager {
         reset()
 
         return result
+    }
+
+    private func trimToLimit() {
+        let maxSamples = Int(config.maxAudioSeconds * 16_000)
+        guard audioBuffer.count > maxSamples else { return }
+        let excess = audioBuffer.count - maxSamples
+        audioBuffer.removeFirst(excess)
+        logger.debug("Trimmed \(excess) samples to stay under \(self.config.maxAudioSeconds)s limit")
     }
 
     /// Get current transcript without triggering a new transcription.

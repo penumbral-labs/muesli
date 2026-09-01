@@ -324,7 +324,8 @@ struct DictationsView: View {
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale.current
-        f.dateFormat = "hh:mm a"
+        f.dateStyle = .none
+        f.timeStyle = .short
         return f
     }()
 

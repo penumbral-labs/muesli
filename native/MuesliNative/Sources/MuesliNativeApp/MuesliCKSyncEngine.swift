@@ -164,6 +164,7 @@ actor MuesliCKSyncEngine: CKSyncEngineDelegate {
     private var uploaded = ICloudSyncKindCounts()
     private var downloaded = ICloudSyncKindCounts()
     private var bridgeRefreshTask: Task<Void, Never>?
+    private var bridgeRefreshGeneration = 0
     private var bridgeRefreshForceRequested = false
     private var targetZoneFetchProcessingFailed = false
     private let bridgeRefreshDidFinish: (@MainActor @Sendable () -> Void)?
@@ -493,8 +494,10 @@ actor MuesliCKSyncEngine: CKSyncEngineDelegate {
         bridgeRefreshForceRequested = bridgeRefreshForceRequested || forceRefresh
         guard bridgeRefreshTask == nil else { return }
 
+        bridgeRefreshGeneration += 1
+        let generation = bridgeRefreshGeneration
         bridgeRefreshTask = Task { [weak self] in
-            await self?.runBridgeDeviceRefreshes()
+            await self?.runBridgeDeviceRefreshes(generation: generation)
         }
     }
 
@@ -502,7 +505,7 @@ actor MuesliCKSyncEngine: CKSyncEngineDelegate {
         scheduleBridgeDeviceRefresh(forceRefresh: true)
     }
 
-    private func runBridgeDeviceRefreshes() async {
+    private func runBridgeDeviceRefreshes(generation: Int) async {
         while !Task.isCancelled {
             let forceRefresh = bridgeRefreshForceRequested
             bridgeRefreshForceRequested = false
@@ -513,7 +516,9 @@ actor MuesliCKSyncEngine: CKSyncEngineDelegate {
             await bridgeRefreshDidFinish?()
             guard bridgeRefreshForceRequested else { break }
         }
-        bridgeRefreshTask = nil
+        if bridgeRefreshGeneration == generation {
+            bridgeRefreshTask = nil
+        }
     }
 
     private func makeEngineIfNeeded() throws -> CKSyncEngine {

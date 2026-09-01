@@ -168,10 +168,7 @@ final class RouteAwareDictationRecorder: DictationAudioRecording {
             self?.forwardIfActive(kind) { $0.onLatencyEvent?(event, date) }
         }
         recorder.onAudioBuffer = { [weak self] samples in
-            self?.forwardIfActive(kind) { recorder in
-                let callback = recorder.lock.withLock { recorder.onAudioBufferStorage }
-                callback?(samples)
-            }
+            self?.forwardIfActive(kind) { $0.onAudioBuffer?(samples) }
         }
     }
 

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import MuesliCore
+@testable import MuesliNativeApp
 
 @Suite("Custom word dictionary portability")
 struct CustomWordDictionaryTests {
@@ -72,6 +73,35 @@ struct CustomWordDictionaryTests {
         #expect(result.words[0].word == "muesli")
         #expect(result.words[0].matchingThreshold == 0.9)
         #expect(result.words[1].targetWord == "Kubernetes")
+    }
+
+    @Test("zero-change import messages distinguish invalid and duplicate entries")
+    func zeroChangeImportMessages() {
+        #expect(DictionaryImportMessage.zeroChange(
+            importedCount: 0,
+            invalidCount: 0,
+            skippedCount: 0
+        ) == "The selected dictionary did not contain any entries.")
+        #expect(DictionaryImportMessage.zeroChange(
+            importedCount: 2,
+            invalidCount: 0,
+            skippedCount: 2
+        ) == "All dictionary entries were already present.")
+        #expect(DictionaryImportMessage.zeroChange(
+            importedCount: 1,
+            invalidCount: 1,
+            skippedCount: 1
+        ) == "Skipped 1 invalid dictionary entry.")
+        #expect(DictionaryImportMessage.zeroChange(
+            importedCount: 3,
+            invalidCount: 1,
+            skippedCount: 3
+        ) == "Skipped 1 invalid dictionary entry; 2 entries were already present.")
+        #expect(DictionaryImportMessage.zeroChange(
+            importedCount: 3,
+            invalidCount: 2,
+            skippedCount: 3
+        ) == "Skipped 2 invalid dictionary entries; 1 entry was already present.")
     }
 
     @Test("new imported entries receive fresh IDs")

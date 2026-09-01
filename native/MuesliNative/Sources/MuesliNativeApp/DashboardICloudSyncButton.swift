@@ -45,13 +45,13 @@ struct DashboardICloudSyncButton: View {
         if isSyncing {
             return "Syncing with iCloud"
         }
+        if !isEnabled {
+            return "Set up iCloud sync"
+        }
         if hasError {
             return "Retry iCloud sync"
         }
-        if isEnabled {
-            return "Sync now"
-        }
-        return "Set up iCloud sync"
+        return "Sync now"
     }
 
     var body: some View {

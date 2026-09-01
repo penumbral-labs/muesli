@@ -29,6 +29,7 @@ enum PasteController {
     /// How long to wait after simulating the selected paste shortcut before restoring the clipboard.
     /// The receiving app must have consumed the paste data within this window.
     private static let clipboardRestoreDelay: TimeInterval = 0.5
+    @MainActor private static var activeStagedChangeCounts: [NSPasteboard.Name: Int] = [:]
     /// Accessibility calls cross a process boundary and can block their caller while
     /// the target app is busy. Keep both each request and the full menu walk bounded;
     /// an unavailable command falls back to leaving Quill output on the clipboard.
@@ -98,6 +99,9 @@ enum PasteController {
         let clearedChangeCount = pasteboard.clearContents()
         let didStageText = pasteboard.setString(text, forType: .string)
         let pasteChangeCount = pasteboard.changeCount
+        if didStageText {
+            activeStagedChangeCounts[pasteboard.name] = pasteChangeCount
+        }
         onLifecycleEvent(didStageText ? .clipboardStaged : .clipboardStageFailed)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -116,6 +120,7 @@ enum PasteController {
                 } else {
                     onLifecycleEvent(.clipboardRestoreSkipped)
                 }
+                clearActiveStagedChangeCount(pasteChangeCount, for: pasteboard)
                 onPasteFinished(nil)
                 onClipboardSettled()
             }
@@ -130,11 +135,13 @@ enum PasteController {
                     } else {
                         onLifecycleEvent(.clipboardRestoreSkipped)
                     }
+                    clearActiveStagedChangeCount(pasteChangeCount, for: pasteboard)
                     onPasteFinished(nil)
                     onClipboardSettled()
                     return
                 }
                 guard pasteboard.changeCount == pasteChangeCount else {
+                    clearActiveStagedChangeCount(pasteChangeCount, for: pasteboard)
                     onLifecycleEvent(.clipboardOwnershipLost)
                     onPasteFinished(nil)
                     onClipboardSettled()
@@ -189,6 +196,7 @@ enum PasteController {
                 } else {
                     onLifecycleEvent(.clipboardRestoreSkipped)
                 }
+                clearActiveStagedChangeCount(pasteChangeCount, for: pasteboard)
                 onClipboardSettled()
             }
 
@@ -228,6 +236,9 @@ enum PasteController {
         pollInterval: TimeInterval = 0.01,
         simulateCopyAction: @MainActor () -> Bool = PasteController.simulateCopy
     ) -> String? {
+        guard activeStagedChangeCounts[pasteboard.name] != pasteboard.changeCount else {
+            return nil
+        }
         let savedItems = saveClipboard(pasteboard)
         let originalChangeCount = pasteboard.changeCount
         guard simulateCopyAction() else { return nil }
@@ -253,6 +264,12 @@ enum PasteController {
     }
 
     // MARK: - Private
+
+    @MainActor
+    private static func clearActiveStagedChangeCount(_ changeCount: Int, for pasteboard: NSPasteboard) {
+        guard activeStagedChangeCounts[pasteboard.name] == changeCount else { return }
+        activeStagedChangeCounts[pasteboard.name] = nil
+    }
 
     private static func simulateCopy() -> Bool {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
@@ -366,8 +383,7 @@ enum PasteController {
             return element
         }
 
-        guard let children = axChildren(element, deadline: deadline) else { return nil }
-        for child in children {
+        for child in axChildren(element, deadline: deadline) {
             guard Date() < deadline else { return nil }
             if let match = standardPasteMenuItem(
                 in: child,
@@ -410,8 +426,8 @@ enum PasteController {
         return (value as! AXUIElement)
     }
 
-    private static func axChildren(_ element: AXUIElement, deadline: Date) -> [AXUIElement]? {
-        guard configureTargetPasteTimeout(for: element, deadline: deadline) else { return nil }
+    private static func axChildren(_ element: AXUIElement, deadline: Date) -> [AXUIElement] {
+        guard configureTargetPasteTimeout(for: element, deadline: deadline) else { return [] }
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             element,

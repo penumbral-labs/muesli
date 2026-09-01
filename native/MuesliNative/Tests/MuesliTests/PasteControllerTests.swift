@@ -62,6 +62,33 @@ struct PasteControllerTests {
         #expect(restored == ["item-one", "item-two"])
     }
 
+    @Test("selection copy does not adopt an active staged paste value")
+    func browserSelectionCopyRejectsActivePasteTransaction() async throws {
+        let pasteboard = makePasteboard()
+        pasteboard.clearContents()
+        pasteboard.setString("original", forType: .string)
+
+        PasteController.paste(
+            text: "staged Quill output",
+            pasteboard: pasteboard,
+            simulatePasteAction: { _ in true }
+        )
+        var copyWasSimulated = false
+        let selected = PasteController.copySelectedText(
+            pasteboard: pasteboard,
+            timeout: 0,
+            simulateCopyAction: {
+                copyWasSimulated = true
+                return true
+            }
+        )
+
+        #expect(selected == nil)
+        #expect(!copyWasSimulated)
+        let restored = await waitForClipboardString(in: pasteboard, expected: "original")
+        #expect(restored == "original")
+    }
+
     @Test("browser selection copy leaves clipboard unchanged when copy produces nothing")
     func browserSelectionCopyWithoutSelectionPreservesClipboard() {
         let pasteboard = makePasteboard()

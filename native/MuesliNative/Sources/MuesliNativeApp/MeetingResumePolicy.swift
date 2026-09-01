@@ -32,7 +32,7 @@ enum MeetingResumePolicy {
         combinedResumeTranscript(prior: prior, new: new) != prior
     }
 
-    /// Combined visual context is prefix-capped so repeated resumes cannot grow
+    /// Combined visual context is capped from the tail so repeated resumes cannot grow
     /// the stored value without bound (each session's drain is already capped
     /// by MeetingScreenContextCollector).
     static let combinedVisualContextLimit = 20_000

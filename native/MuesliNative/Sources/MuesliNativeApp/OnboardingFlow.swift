@@ -19,12 +19,11 @@ enum OnboardingFlow {
 
     static let dictationTestStep = Step.dictationTest.rawValue
 
-    static func shouldStartDictationTestMonitor(
-        currentStep: Int,
-        dictationTestStep: Int,
-        modelReady: Bool
+    static func shouldPublishModelDownloadSnapshot(
+        isReadySnapshot: Bool,
+        backendIsReady: Bool
     ) -> Bool {
-        modelReady && currentStep >= dictationTestStep
+        !isReadySnapshot || !backendIsReady
     }
 
     static func dictationTestMonitorAction(
