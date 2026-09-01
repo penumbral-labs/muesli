@@ -168,6 +168,8 @@ struct MeetingSystemAudioWatchdogTests {
 
         settling = false
         harness.stalledTick()
+        #expect(harness.events.isEmpty)
+        #expect(harness.recoveryRequests.isEmpty)
         harness.stalledTick()
         #expect(harness.events.map(\.kind) == [.degraded])
         #expect(harness.recoveryRequests.count == 1)

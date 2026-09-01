@@ -138,11 +138,13 @@ final class MeetingSystemAudioWatchdog {
 
         lock.lock()
         if !finished {
+            let timestamp = now()
             if isPaused() || isRouteSettling() {
+                lastObservedHeartbeat = captureHeartbeat()
+                lastHeartbeatAdvanceAt = timestamp
                 lock.unlock()
                 return
             }
-            let timestamp = now()
             // Alive = capture active AND the IO heartbeat advanced recently.
             // Content silence still delivers callbacks; a stall means the
             // pipeline is dead. A rebuild in flight is a known-transient.
