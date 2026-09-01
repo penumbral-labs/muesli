@@ -4933,6 +4933,7 @@ public final class MuesliController: NSObject {
         hotkeyMonitor.configure(config.dictationHotkey)
         hotkeyMonitor.start()
         startComputerUseHotkeyMonitorIfNeeded()
+        startQuilHotkeyMonitorIfNeeded()
         syncDictationRecorderWarmup(intent: .idlePrewarm(.permissionsReady))
         TelemetryDeck.signal("onboarding.use_case_reclassified", parameters: [
             "from_use_case": OnboardingUseCase.voiceNotes.rawValue,
