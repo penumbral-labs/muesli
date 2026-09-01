@@ -316,6 +316,9 @@ final class MeetingSession {
         systemAudioWatchdog.isPaused = { [weak systemAudioRecorder] in
             systemAudioRecorder?.isPaused ?? false
         }
+        systemAudioWatchdog.isRebuilding = { [weak systemAudioRecorder] in
+            systemAudioRecorder?.isRebuilding ?? false
+        }
         systemAudioWatchdog.isRouteSettling = { [weak systemAudioRecorder] in
             systemAudioRecorder?.isRouteSettling ?? false
         }

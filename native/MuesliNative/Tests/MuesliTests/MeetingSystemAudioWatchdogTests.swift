@@ -12,6 +12,7 @@ struct MeetingSystemAudioWatchdogTests {
         var heartbeat: UInt64 = 0
         var captureActive = true
         var paused = false
+        var rebuilding = false
         var micLastCallbackAt: Date?
 
         init(policy: MeetingSystemAudioWatchdog.Policy = .default) {
@@ -19,6 +20,7 @@ struct MeetingSystemAudioWatchdogTests {
             watchdog.captureHeartbeat = { [weak self] in self?.heartbeat ?? 0 }
             watchdog.isCaptureActive = { [weak self] in self?.captureActive ?? false }
             watchdog.isPaused = { [weak self] in self?.paused ?? false }
+            watchdog.isRebuilding = { [weak self] in self?.rebuilding ?? false }
             watchdog.lastMicCallbackAt = { [weak self] in self?.micLastCallbackAt }
             watchdog.recoveryRequest = { [weak self] reason in
                 self?.recoveryRequests.append(reason)
@@ -150,6 +152,48 @@ struct MeetingSystemAudioWatchdogTests {
         harness.stalledTick()
         #expect(harness.events.isEmpty)
         #expect(harness.recoveryRequests.isEmpty)
+    }
+
+    @Test("rebuilds suppress recovery retries beyond the cooldown")
+    func rebuildingSuppressesRecoveryRetries() {
+        let harness = Harness(policy: .init(
+            stallThreshold: 2,
+            recoveredAfterTicks: 2,
+            attemptCooldown: 5,
+            maxAttemptsPerEpisode: 3
+        ))
+        harness.aliveTick()
+        harness.stalledTick()
+        harness.stalledTick()
+        #expect(harness.events.map(\.kind) == [.degraded])
+        #expect(harness.recoveryRequests.count == 1)
+
+        harness.rebuilding = true
+        harness.captureActive = false
+        for _ in 0..<10 { harness.stalledTick() }
+        #expect(harness.events.map(\.kind) == [.degraded])
+        #expect(harness.recoveryRequests.count == 1)
+    }
+
+    @Test("rebuilding clears partial episode recovery progress")
+    func rebuildingClearsPartialRecovery() {
+        let harness = Harness()
+        harness.aliveTick()
+        harness.stalledTick()
+        harness.stalledTick()
+        harness.aliveTick()
+        #expect(harness.events.map(\.kind) == [.degraded])
+
+        harness.rebuilding = true
+        harness.captureActive = false
+        harness.stalledTick()
+        harness.rebuilding = false
+        harness.captureActive = true
+        harness.stalledTick()
+        #expect(harness.events.map(\.kind) == [.degraded])
+
+        harness.aliveTick()
+        #expect(harness.events.map(\.kind) == [.degraded, .recovered])
     }
 
     @Test("route transitions suppress stall evaluation while settling")

@@ -56,6 +56,8 @@ final class MeetingSystemAudioWatchdog {
     var isCaptureActive: () -> Bool = { false }
     /// While true (meeting paused), ticks are ignored entirely.
     var isPaused: () -> Bool = { false }
+    /// While true (a recovery rebuild is already in flight), ticks are ignored.
+    var isRebuilding: () -> Bool = { false }
     /// While true (a route transition is still settling), ticks are ignored:
     /// the old tap's heartbeat stalling mid-transition is expected, and firing
     /// a recovery rebuild into daemon churn reliably fails and amplifies it
@@ -139,9 +141,10 @@ final class MeetingSystemAudioWatchdog {
         lock.lock()
         if !finished {
             let timestamp = now()
-            if isPaused() || isRouteSettling() {
+            if isPaused() || isRebuilding() || isRouteSettling() {
                 lastObservedHeartbeat = captureHeartbeat()
                 lastHeartbeatAdvanceAt = timestamp
+                episode?.healthyTicks = 0
                 lock.unlock()
                 return
             }
@@ -224,8 +227,8 @@ final class MeetingSystemAudioWatchdog {
             onEpisodeEvent?(eventToEmit)
         }
         if let recoveryReason {
-            // A rejection (paused / rebuild in flight) must not burn the
-            // attempt budget; the cooldown timestamp stands either way so a
+            // A rejected recovery request must not burn the attempt budget;
+            // the cooldown timestamp stands either way so a
             // refused request still has back-pressure.
             let initiated = recoveryRequest(recoveryReason)
             if !initiated {
