@@ -1,7 +1,22 @@
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import Foundation
 import MuesliCore
+
+enum MuesliSyntheticKeyboardEvent {
+    // "MUESLI" encoded as a small Int64. CGEvent preserves eventSourceUserData
+    // when an injected event is surfaced through NSEvent monitors.
+    static let userDataMarker: Int64 = 0x4D_55_45_53_4C_49
+
+    static func mark(_ event: CGEvent) {
+        event.setIntegerValueField(.eventSourceUserData, value: userDataMarker)
+    }
+
+    static func isMarked(_ event: NSEvent) -> Bool {
+        event.cgEvent?.getIntegerValueField(.eventSourceUserData) == userDataMarker
+    }
+}
 
 enum HotkeyTriggerTiming {
     static let defaultThresholdMilliseconds = 250
@@ -25,6 +40,11 @@ enum HotkeyTriggerTiming {
 }
 
 final class HotkeyMonitor {
+    enum CombinationActivation {
+        case toggle
+        case pushToTalk
+    }
+
     var onArm: (() -> Void)?
     var onPrepare: (() -> Void)?
     var onStart: (() -> Void)?
@@ -34,6 +54,8 @@ final class HotkeyMonitor {
     var onToggleStop: (() -> Void)?
     var targetKeyCode: UInt16 = 55
     var doubleTapEnabled: Bool = true
+    var combinationActivation: CombinationActivation = .toggle
+    var registersCombinationGlobally = false
 
     // Combination mode (e.g. Cmd+Shift+R)
     var combinationModifiers: NSEvent.ModifierFlags?
@@ -45,6 +67,8 @@ final class HotkeyMonitor {
 
     private var globalMonitor: Any?
     private var localMonitor: Any?
+    private var registeredHotKey: EventHotKeyRef?
+    private var registeredHotKeyHandler: EventHandlerRef?
     private var prepareWorkItem: DispatchWorkItem?
     private var startWorkItem: DispatchWorkItem?
     private var armCancelWorkItem: DispatchWorkItem?
@@ -84,6 +108,10 @@ final class HotkeyMonitor {
         self.now = now
     }
 
+    deinit {
+        tearDownResources()
+    }
+
     func configureTriggerThreshold(milliseconds: Int) {
         finishActiveSessionBeforeReconfigure()
         prepareDelay = HotkeyTriggerTiming.prepareDelay(forThresholdMilliseconds: milliseconds)
@@ -100,13 +128,23 @@ final class HotkeyMonitor {
     }
 
     func start() {
-        guard globalMonitor == nil, localMonitor == nil else { return }
+        guard !isRunning else { return }
 
+        // Carbon registration itself does not require listen access, but the
+        // companion global Escape monitor does.
         let hasListenAccess = CGPreflightListenEventAccess()
         fputs("[hotkey] listen event access: \(hasListenAccess)\n", stderr)
         if !hasListenAccess {
             let requested = CGRequestListenEventAccess()
             fputs("[hotkey] requested listen event access: \(requested)\n", stderr)
+        }
+
+        if isCombinationMode, registersCombinationGlobally {
+            if startRegisteredCombination() {
+                startRegisteredCombinationEscapeMonitors()
+                return
+            }
+            fputs("[hotkey] Carbon registration failed; falling back to event monitors\n", stderr)
         }
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown, .keyUp]) { [weak self] event in
@@ -130,15 +168,7 @@ final class HotkeyMonitor {
 
     func stop() {
         finishActiveSessionBeforeReconfigure()
-        cancelTimers()
-        if let globalMonitor {
-            NSEvent.removeMonitor(globalMonitor)
-        }
-        if let localMonitor {
-            NSEvent.removeMonitor(localMonitor)
-        }
-        globalMonitor = nil
-        localMonitor = nil
+        tearDownResources()
         targetKeyDown = false
         otherKeyPressed = false
         armed = false
@@ -160,7 +190,11 @@ final class HotkeyMonitor {
     func configure(combination config: HotkeyConfig) {
         guard config.isCombination,
               let mods = config.resolvedCombinationModifiers,
-              let kc = config.combinationKeyCode else { return }
+              !mods.isEmpty,
+              let kc = config.combinationKeyCode else {
+            configure(keyCode: HotkeyConfig.default.keyCode)
+            return
+        }
         finishActiveSessionBeforeReconfigure()
         targetKeyCode = UInt16.max
         combinationModifiers = mods
@@ -169,7 +203,7 @@ final class HotkeyMonitor {
     }
 
     func configure(_ config: HotkeyConfig) {
-        if config.isCombination {
+        if config.combinationModifiers != nil || config.combinationKeyCode != nil {
             configure(combination: config)
         } else {
             configure(keyCode: config.keyCode)
@@ -240,7 +274,7 @@ final class HotkeyMonitor {
     }
 
     var isRunning: Bool {
-        globalMonitor != nil || localMonitor != nil
+        globalMonitor != nil || localMonitor != nil || registeredHotKey != nil
     }
 
     var hasActiveInputSession: Bool {
@@ -260,6 +294,10 @@ final class HotkeyMonitor {
 
     @discardableResult
     private func handle(_ event: NSEvent) -> Bool {
+        // Clipboard copy/paste and direct typing generate their own keyboard
+        // events. They must not look like a second physical key and cancel an
+        // Fn/hold hotkey that is currently preparing or recording.
+        guard !MuesliSyntheticKeyboardEvent.isMarked(event) else { return false }
         if isCombinationMode {
             return handleCombination(event)
         }
@@ -292,6 +330,11 @@ final class HotkeyMonitor {
         isRepeat: Bool
     ) -> Bool {
         if type == .keyDown && keyCode == 53 {
+            if combinationActivation == .pushToTalk,
+               combinationKeyDown || prepared || active {
+                finishCombinationPushToTalk(cancelled: true)
+                return true
+            }
             if toggleActive {
                 cancelCombinationPending(notify: false)
                 toggleActive = false
@@ -311,12 +354,20 @@ final class HotkeyMonitor {
 
         if type == .flagsChanged, combinationKeyDown,
            HotkeyConfig.supportedCombinationModifiers(from: flags) != targetMods {
-            cancelCombinationPending(notify: false)
+            if combinationActivation == .pushToTalk {
+                finishCombinationPushToTalk(cancelled: false)
+            } else {
+                cancelCombinationPending(notify: false)
+            }
             return true
         }
 
         if type == .keyUp, combinationKeyDown, keyCode == targetKey {
-            cancelCombinationPending(notify: false)
+            if combinationActivation == .pushToTalk {
+                finishCombinationPushToTalk(cancelled: false)
+            } else {
+                cancelCombinationPending(notify: false)
+            }
             return true
         }
 
@@ -325,6 +376,11 @@ final class HotkeyMonitor {
               keyCode == targetKey,
               HotkeyConfig.supportedCombinationModifiers(from: flags) == targetMods
         else { return false }
+
+        if combinationActivation == .pushToTalk {
+            beginCombinationPushToTalk()
+            return true
+        }
 
         combinationKeyDown = true
         combinationTriggered = false
@@ -339,6 +395,34 @@ final class HotkeyMonitor {
         scheduleAfter(startDelay, item)
         fputs("[hotkey] combination armed\n", stderr)
         return true
+    }
+
+    private func beginCombinationPushToTalk() {
+        guard !combinationKeyDown else { return }
+        combinationKeyDown = true
+        targetKeyDown = true
+        otherKeyPressed = false
+        prepared = false
+        active = false
+        cancelTimers()
+        scheduleTimers()
+    }
+
+    private func finishCombinationPushToTalk(cancelled: Bool) {
+        let wasActive = active
+        let wasPrepared = prepared
+        combinationKeyDown = false
+        targetKeyDown = false
+        prepared = false
+        active = false
+        cancelTimers()
+        if cancelled {
+            if wasActive || wasPrepared { onCancel?() }
+        } else if wasActive {
+            onStop?()
+        } else if wasPrepared {
+            onCancel?()
+        }
     }
 
     private func fireCombinationToggle() {
@@ -364,6 +448,73 @@ final class HotkeyMonitor {
         if notify && wasPending {
             onCancel?()
         }
+    }
+
+    @discardableResult
+    private func startRegisteredCombination() -> Bool {
+        guard let keyCode = combinationKeyCode,
+              let modifiers = combinationModifiers,
+              !modifiers.isEmpty else { return false }
+        var eventTypes = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
+        ]
+        let status = InstallEventHandler(
+            GetApplicationEventTarget(),
+            muesliRegisteredHotKeyHandler,
+            eventTypes.count,
+            &eventTypes,
+            Unmanaged.passUnretained(self).toOpaque(),
+            &registeredHotKeyHandler
+        )
+        guard status == noErr else { return false }
+        let hotKeyID = EventHotKeyID(signature: 0x5155494C, id: 1) // "QUIL"
+        guard RegisterEventHotKey(
+            UInt32(keyCode),
+            carbonModifiers(modifiers),
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &registeredHotKey
+        ) == noErr else {
+            RemoveEventHandler(registeredHotKeyHandler)
+            registeredHotKeyHandler = nil
+            return false
+        }
+        return true
+    }
+
+    /// Carbon owns the registered combination, but it does not deliver Escape.
+    /// Keep narrow monitors so an active global Quill session remains cancellable.
+    private func startRegisteredCombinationEscapeMonitors() {
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return }
+            _ = self?.handle(event)
+        }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53, let self else { return event }
+            return self.handle(event) ? nil : event
+        }
+    }
+
+    fileprivate func handleRegisteredHotKey(kind: UInt32) {
+        switch kind {
+        case UInt32(kEventHotKeyPressed):
+            beginCombinationPushToTalk()
+        case UInt32(kEventHotKeyReleased):
+            finishCombinationPushToTalk(cancelled: false)
+        default:
+            break
+        }
+    }
+
+    private func carbonModifiers(_ modifiers: NSEvent.ModifierFlags) -> UInt32 {
+        var result: UInt32 = 0
+        if modifiers.contains(.command) { result |= UInt32(cmdKey) }
+        if modifiers.contains(.control) { result |= UInt32(controlKey) }
+        if modifiers.contains(.option) { result |= UInt32(optionKey) }
+        if modifiers.contains(.shift) { result |= UInt32(shiftKey) }
+        return result
     }
 
 
@@ -628,6 +779,28 @@ final class HotkeyMonitor {
         combinationWorkItem = nil
     }
 
+    /// Releases system registrations and pending work without changing session
+    /// state or invoking lifecycle callbacks. Deinitialization must be silent.
+    private func tearDownResources() {
+        cancelTimers()
+        if let globalMonitor {
+            NSEvent.removeMonitor(globalMonitor)
+        }
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
+        }
+        globalMonitor = nil
+        localMonitor = nil
+        if let registeredHotKey {
+            UnregisterEventHotKey(registeredHotKey)
+            self.registeredHotKey = nil
+        }
+        if let registeredHotKeyHandler {
+            RemoveEventHandler(registeredHotKeyHandler)
+            self.registeredHotKeyHandler = nil
+        }
+    }
+
     func setHoldRecordingActiveForTests() {
         targetKeyDown = true
         active = true
@@ -650,4 +823,24 @@ final class HotkeyMonitor {
     ) -> Bool {
         handleCombination(type: type, keyCode: keyCode, flags: flags, isRepeat: isRepeat)
     }
+
+    @discardableResult
+    func handleEventForTests(_ event: NSEvent) -> Bool {
+        handle(event)
+    }
+
+    func handleRegisteredHotKeyPressForTests() {
+        handleRegisteredHotKey(kind: UInt32(kEventHotKeyPressed))
+    }
+}
+
+private func muesliRegisteredHotKeyHandler(
+    _ nextHandler: EventHandlerCallRef?,
+    _ event: EventRef?,
+    _ userData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    guard let event, let userData else { return OSStatus(eventNotHandledErr) }
+    let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(userData).takeUnretainedValue()
+    monitor.handleRegisteredHotKey(kind: GetEventKind(event))
+    return noErr
 }

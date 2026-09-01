@@ -17,6 +17,10 @@ struct OnboardingView: View {
     @State private var isSigningInChatGPT = false
     @State private var chatGPTSignInDone = false
     @State private var chatGPTSignInError: String?
+    @State private var isSigningInOpenRouter = false
+    @State private var openRouterSignInDone = false
+    @State private var openRouterSignInError: String?
+    @State private var isEnteringOpenRouterAPIKey = false
 
     // Permission states — polled from OS every second
     @State private var micGranted = false
@@ -39,13 +43,16 @@ struct OnboardingView: View {
 
     // Dictation test
     @State private var isDictationTesting = false
+    @State private var isDictationTestMonitorActive = false
     @State private var dictationTestResult: String?
     @State private var dictationTestError: String?
     @State private var isModelStillDownloading = false
     @State private var modelReadyBackend: BackendOption?
     @State private var modelDownloadBackend: BackendOption?
     @State private var modelDownloadTask: Task<Void, Never>?
+    @State private var modelDownloadGeneration = UUID()
     @State private var modelDownloadProgress: Double?
+    @State private var modelDownloadSnapshot: ModelDownloadProgress?
     @State private var isModelPreparingAfterDownload = false
     @State private var modelDownloadStatus: String?
     @State private var modelDownloadError: String?
@@ -59,7 +66,7 @@ struct OnboardingView: View {
     @State private var hasFinishedOnboarding = false
 
     static let permissionsStep = OnboardingFlow.Step.permissions.rawValue
-    static let dictationTestStep = OnboardingFlow.Step.dictationTest.rawValue
+    static let dictationTestStep = OnboardingFlow.dictationTestStep
 
     private var orderedSteps: [Int] {
         OnboardingFlow.orderedSteps(for: selectedUseCase)
@@ -74,13 +81,17 @@ struct OnboardingView: View {
     }
 
     private var onboardingAlternativeModels: [BackendOption] {
-        var options = BackendOption.onboarding.filter { $0 != .parakeetMultilingual }
+        var options = BackendOption.onboarding.filter { $0 != BackendOption.onboardingDefault }
         if BackendOption.onboarding.contains(selectedBackend),
-           selectedBackend != .parakeetMultilingual,
+           selectedBackend != BackendOption.onboardingDefault,
            !options.contains(selectedBackend) {
             options.insert(selectedBackend, at: 0)
         }
         return options
+    }
+
+    private var onboardingModelDescription: String {
+        "Start with a fast local model. Larger models can download while you continue setup."
     }
 
     init(
@@ -88,7 +99,7 @@ struct OnboardingView: View {
         appState: AppState,
         initialStep: Int = 0,
         initialUserName: String = "",
-        initialBackend: BackendOption = .parakeetMultilingual,
+        initialBackend: BackendOption = BackendOption.onboardingDefault,
         initialCohereLanguage: CohereTranscribeLanguage = CohereTranscribeLanguage.defaultLanguage,
         initialHotkey: HotkeyConfig = .default,
         initialSystemAudioRequested: Bool = false,
@@ -125,7 +136,9 @@ struct OnboardingView: View {
         _currentStep = State(initialValue: effectiveInitialStep)
         _userName = State(initialValue: initialUserName)
         _selectedUseCase = State(initialValue: initialUseCase)
-        let sanitizedInitialBackend = BackendOption.onboarding.contains(initialBackend) ? initialBackend : .parakeetMultilingual
+        let sanitizedInitialBackend = BackendOption.onboarding.contains(initialBackend)
+            ? initialBackend
+            : BackendOption.onboardingDefault
         _selectedBackend = State(initialValue: sanitizedInitialBackend)
         _selectedCohereLanguage = State(initialValue: initialCohereLanguage)
         _selectedHotkey = State(initialValue: initialHotkey)
@@ -424,8 +437,17 @@ struct OnboardingView: View {
     }
 
     private var modelDownloadIndicatorTitle: String {
+        if let snapshot = modelDownloadSnapshot {
+            switch snapshot.phase {
+            case .downloading: return "Downloading \(selectedBackend.label)"
+            case .preparing: return "Preparing \(selectedBackend.label)"
+            case .ready: return "\(selectedBackend.label) ready"
+            case .paused: return "Download paused"
+            case .failed: return "Download failed"
+            }
+        }
         if modelDownloadError != nil {
-            return "Download paused"
+            return "Download failed"
         }
         if isShowingModelReadyIndicator {
             return "\(selectedBackend.label) ready"
@@ -440,6 +462,9 @@ struct OnboardingView: View {
         if isShowingModelReadyIndicator {
             return "Ready to test"
         }
+        if let snapshot = modelDownloadSnapshot {
+            return modelDownloadSnapshotDetail(snapshot)
+        }
         if let modelDownloadStatus {
             return modelDownloadStatus
         }
@@ -449,11 +474,52 @@ struct OnboardingView: View {
         return "Downloading..."
     }
 
+    private func modelDownloadSnapshotDetail(_ snapshot: ModelDownloadProgress) -> String {
+        var details: [String] = []
+        if let currentFile = snapshot.currentFile?.split(separator: "/").last.map(String.init), !currentFile.isEmpty {
+            details.append(currentFile)
+        }
+        if snapshot.totalFileCount > 0 {
+            let completed = min(max(snapshot.completedFileCount, 0), snapshot.totalFileCount)
+            let remaining = snapshot.totalFileCount - completed
+            details.append("\(completed) of \(snapshot.totalFileCount) files")
+            if remaining > 0 {
+                details.append("\(remaining) left")
+            }
+        }
+        if let total = snapshot.totalBytes, total > 0 {
+            details.append("\(ModelDownloadDisplayFormatting.bytes(snapshot.completedBytes)) / \(ModelDownloadDisplayFormatting.bytes(total))")
+            if snapshot.completedBytes < total {
+                details.append("\(ModelDownloadDisplayFormatting.bytes(total - snapshot.completedBytes)) left")
+            }
+        } else if let currentTotal = snapshot.currentFileTotalBytes, currentTotal > 0 {
+            details.append("\(ModelDownloadDisplayFormatting.bytes(snapshot.currentFileCompletedBytes)) / \(ModelDownloadDisplayFormatting.bytes(currentTotal))")
+            if snapshot.currentFileCompletedBytes < currentTotal {
+                details.append("\(ModelDownloadDisplayFormatting.bytes(currentTotal - snapshot.currentFileCompletedBytes)) left")
+            }
+        }
+        if snapshot.phase == .downloading {
+            if snapshot.bytesPerSecond > 0 {
+                details.append(ModelDownloadDisplayFormatting.rate(snapshot.bytesPerSecond))
+            }
+            if let eta = snapshot.estimatedSecondsRemaining,
+               let formattedETA = ModelDownloadDisplayFormatting.eta(eta) {
+                details.append("\(formattedETA) left")
+            }
+            if snapshot.retryCount > 0 {
+                details.append("retry \(snapshot.retryCount)/\(ModelDownloadCoordinator.maximumDownloadAttempts)")
+            }
+        } else if let message = snapshot.message, !message.isEmpty {
+            details.append(message)
+        }
+        return details.isEmpty ? (snapshot.message ?? "Downloading...") : details.joined(separator: " · ")
+    }
+
     private var dictationTestSubtitle: AttributedString {
         let markdown: String
         if isSelectedModelReadyForDictationTest {
             if selectedHotkey.isCombination {
-                markdown = "Hold **\(selectedHotkey.label)** to start, then invoke it again when done.\nYour words should appear below."
+                markdown = "Invoke **\(selectedHotkey.label)** to start, then invoke it again when done.\nYour words should appear below."
             } else {
                 markdown = selectedUseCase.includesVoiceNotes
                     ? "Hold **\(selectedHotkey.label)** to record a voice note, then release.\nYour words should appear below."
@@ -617,7 +683,7 @@ struct OnboardingView: View {
                     .font(MuesliTheme.title1())
                     .foregroundStyle(MuesliTheme.textPrimary)
 
-                Text("Start with a fast local model.\nLarger models are available after setup.")
+                Text(onboardingModelDescription)
                     .font(MuesliTheme.body())
                     .foregroundStyle(MuesliTheme.textSecondary)
                     .multilineTextAlignment(.center)
@@ -626,7 +692,7 @@ struct OnboardingView: View {
 
             ScrollView {
                 VStack(spacing: MuesliTheme.spacing8) {
-                    modelCard(option: .parakeetMultilingual)
+                    modelCard(option: BackendOption.onboardingDefault)
 
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) {
@@ -717,7 +783,7 @@ struct OnboardingView: View {
                         Text(option.label)
                             .font(MuesliTheme.headline())
                             .foregroundStyle(MuesliTheme.textPrimary)
-                        if option.recommended {
+                        if option == BackendOption.onboardingDefault {
                             Text("Recommended")
                                 .font(.system(size: 9, weight: .semibold))
                                 .foregroundStyle(.white)
@@ -1286,6 +1352,7 @@ struct OnboardingView: View {
 
                         Button("Retry Download") {
                             self.modelDownloadError = nil
+                            self.modelDownloadSnapshot = nil
                             ensureModelDownloadStarted()
                         }
                         .buttonStyle(.plain)
@@ -1322,7 +1389,9 @@ struct OnboardingView: View {
                         HStack(spacing: 6) {
                             Image(systemName: "keyboard")
                                 .font(.system(size: 14))
-                            Text("Hold \(selectedHotkey.label) to start")
+                            Text(selectedHotkey.isCombination
+                                ? "Invoke \(selectedHotkey.label) to start"
+                                : "Hold \(selectedHotkey.label) to start")
                                 .font(MuesliTheme.body())
                         }
                         .foregroundStyle(MuesliTheme.textTertiary)
@@ -1387,6 +1456,7 @@ struct OnboardingView: View {
             if !hasFinishedOnboarding {
                 controller.stopHotkeyMonitor()
             }
+            isDictationTestMonitorActive = false
         }
     }
 
@@ -1512,13 +1582,84 @@ struct OnboardingView: View {
                             .foregroundStyle(MuesliTheme.success)
                     }
                 }
-            } else {
-                if summaryBackend == .openRouter {
-                    Text("OpenRouter supports many model providers through one API key.")
-                        .font(MuesliTheme.caption())
-                        .foregroundStyle(MuesliTheme.textTertiary)
-                }
+            } else if summaryBackend == .openRouter {
+                Text("Connect OpenRouter in your browser. Muesli receives a dedicated API key after you approve access.")
+                    .font(MuesliTheme.caption())
+                    .foregroundStyle(MuesliTheme.textSecondary)
+                    .multilineTextAlignment(.center)
 
+                if appState.isOpenRouterAuthenticated || openRouterSignInDone {
+                    HStack(spacing: 6) {
+                        Image(systemName: "network")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("OpenRouter connected")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(MuesliTheme.success)
+                    .clipShape(RoundedRectangle(cornerRadius: MuesliTheme.cornerSmall))
+                } else if isSigningInOpenRouter {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Connecting...")
+                            .font(.system(size: 12))
+                            .foregroundStyle(MuesliTheme.textSecondary)
+                    }
+                } else {
+                    Button {
+                        isSigningInOpenRouter = true
+                        openRouterSignInError = nil
+                        apiKey = ""
+                        isEnteringOpenRouterAPIKey = false
+                        Task {
+                            let error = await controller.signInWithOpenRouter()
+                            isSigningInOpenRouter = false
+                            openRouterSignInDone = OpenRouterAuthManager.shared.isAuthenticated
+                            openRouterSignInError = error
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "network")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Connect OpenRouter")
+                                .font(.system(size: 13, weight: .medium))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(MuesliTheme.accent)
+                        .clipShape(RoundedRectangle(cornerRadius: MuesliTheme.cornerSmall))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(isEnteringOpenRouterAPIKey ? "Cancel manual key" : "Enter API key manually") {
+                        isEnteringOpenRouterAPIKey.toggle()
+                        apiKey = ""
+                        openRouterSignInError = nil
+                    }
+                    .buttonStyle(.link)
+                    .font(.system(size: 11))
+
+                    if isEnteringOpenRouterAPIKey {
+                        PastableSecureField(
+                            text: apiKey,
+                            placeholder: "sk-or-...",
+                            onChange: { apiKey = $0 }
+                        )
+                        .frame(width: 320, height: 28)
+                    }
+
+                    if let openRouterSignInError {
+                        Text(openRouterSignInError)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
+                            .lineLimit(2)
+                    }
+                }
+            } else {
                 VStack(alignment: .leading, spacing: MuesliTheme.spacing8) {
                     Text("API Key")
                         .font(MuesliTheme.caption())
@@ -1526,7 +1667,7 @@ struct OnboardingView: View {
 
                     PastableSecureField(
                         text: apiKey,
-                        placeholder: summaryBackend == .openAI ? "sk-..." : "sk-or-...",
+                        placeholder: "sk-...",
                         onChange: { apiKey = $0 }
                     )
                     .frame(width: 320, height: 28)
@@ -1568,20 +1709,32 @@ struct OnboardingView: View {
     }
 
     private func startDictationTestMonitorIfReady() {
-        guard currentStep == Self.dictationTestStep else { return }
-        guard isSelectedModelReadyForDictationTest else {
-            if isDictationTesting {
+        let action = OnboardingFlow.dictationTestMonitorAction(
+            currentStep: currentStep,
+            dictationTestStep: Self.dictationTestStep,
+            modelReady: isSelectedModelReadyForDictationTest,
+            monitorActive: isDictationTestMonitorActive,
+            dictationTesting: isDictationTesting
+        )
+
+        switch action {
+        case .none:
+            return
+        case .stop(let cancelTestDictation):
+            if cancelTestDictation {
                 controller.cancelTestDictation()
                 isDictationTesting = false
             }
             controller.stopHotkeyMonitor()
+            isDictationTestMonitorActive = false
             return
+        case .start:
+            dictationTestError = nil
+            controller.dictationTestBackend = selectedBackend
+            controller.dictationTestCohereLanguage = selectedCohereLanguage
+            controller.startHotkeyMonitor(hotkey: selectedHotkey)
+            isDictationTestMonitorActive = true
         }
-
-        dictationTestError = nil
-        controller.dictationTestBackend = selectedBackend
-        controller.dictationTestCohereLanguage = selectedCohereLanguage
-        controller.startHotkeyMonitor(hotkey: selectedHotkey)
     }
 
     private func advanceAfterSuccessfulDictationTest(text: String) {
@@ -1615,6 +1768,8 @@ struct OnboardingView: View {
                 isModelStillDownloading = true
                 return
             }
+            cancelModelDownload(for: modelDownloadBackend)
+            modelDownloadGeneration = UUID()
             modelDownloadTask?.cancel()
             modelDownloadTask = nil
             modelDownloadBackend = nil
@@ -1622,7 +1777,9 @@ struct OnboardingView: View {
 
         let backend = selectedBackend
         let useCase = selectedUseCase
+        let generation = UUID()
         let alreadyDownloaded = backend.isDownloaded
+        modelDownloadGeneration = generation
         modelDownloadBackend = backend
         isModelStillDownloading = true
         modelDownloadProgress = alreadyDownloaded ? nil : (modelDownloadProgress ?? 0.02)
@@ -1631,6 +1788,7 @@ struct OnboardingView: View {
             ? "Warming up \(backend.label)..."
             : (modelDownloadStatus ?? initialDownloadStatus(for: backend))
         modelDownloadError = nil
+        modelDownloadSnapshot = nil
         publishModelPreparationStatus(
             title: "Preparing \(backend.label)",
             detail: modelDownloadStatus,
@@ -1642,7 +1800,7 @@ struct OnboardingView: View {
         modelDownloadTask = Task {
             defer {
                 Task { @MainActor in
-                    if modelDownloadBackend == backend {
+                    if modelDownloadGeneration == generation, modelDownloadBackend == backend {
                         modelDownloadTask = nil
                         modelDownloadBackend = nil
                     }
@@ -1651,14 +1809,26 @@ struct OnboardingView: View {
             do {
                 try await controller.downloadModelForOnboarding(backend, onboardingUseCase: useCase) { progress, status in
                     Task { @MainActor in
-                        guard selectedBackend == backend else { return }
-                        applyModelPreparationProgress(progress, status: status, backend: backend)
+                        guard modelDownloadGeneration == generation,
+                              modelDownloadBackend == backend,
+                              selectedBackend == backend else { return }
+                        applyModelPreparationProgress(progress, status: status, backend: backend, generation: generation)
+                    }
+                } progressSnapshot: { snapshot in
+                    Task { @MainActor in
+                        guard modelDownloadGeneration == generation,
+                              modelDownloadBackend == backend,
+                              selectedBackend == backend else { return }
+                        applyModelDownloadSnapshot(snapshot, backend: backend, generation: generation)
                     }
                 }
                 await MainActor.run {
-                    guard selectedBackend == backend else { return }
+                    guard modelDownloadGeneration == generation,
+                          modelDownloadBackend == backend,
+                          selectedBackend == backend else { return }
                     modelReadyBackend = backend
                     modelDownloadProgress = 1.0
+                    modelDownloadSnapshot = nil
                     isModelPreparingAfterDownload = false
                     modelDownloadStatus = "\(backend.label) ready"
                     modelDownloadError = nil
@@ -1678,10 +1848,18 @@ struct OnboardingView: View {
                 // Backend changes cancel the old task; the new selection owns the download UI.
             } catch {
                 await MainActor.run {
-                    guard selectedBackend == backend else { return }
+                    guard modelDownloadGeneration == generation,
+                          modelDownloadBackend == backend,
+                          selectedBackend == backend else { return }
                     modelDownloadError = modelPreparationFailureMessage(for: backend)
                     modelDownloadStatus = backend.isDownloaded ? "Model setup paused" : "Download paused"
                     modelDownloadProgress = nil
+                    if let snapshot = modelDownloadSnapshot {
+                        modelDownloadSnapshot = snapshot.replacing(
+                            phase: .failed,
+                            message: modelDownloadError
+                        )
+                    }
                     isModelPreparingAfterDownload = false
                     isModelStillDownloading = false
                     publishModelPreparationStatus(
@@ -1697,7 +1875,66 @@ struct OnboardingView: View {
         }
     }
 
-    private func applyModelPreparationProgress(_ progress: Double, status: String?, backend: BackendOption) {
+    private func applyModelDownloadSnapshot(
+        _ snapshot: ModelDownloadProgress,
+        backend: BackendOption,
+        generation: UUID
+    ) {
+        guard modelDownloadGeneration == generation,
+              modelDownloadBackend == backend,
+              selectedBackend == backend else { return }
+        modelDownloadSnapshot = snapshot
+        modelDownloadError = nil
+
+        switch snapshot.phase {
+        case .downloading:
+            isModelStillDownloading = true
+            isModelPreparingAfterDownload = false
+            if let fraction = snapshot.fractionCompleted {
+                modelDownloadProgress = max(modelDownloadProgress ?? 0.02, fraction)
+            }
+            modelDownloadStatus = modelDownloadSnapshotDetail(snapshot)
+        case .preparing:
+            isModelStillDownloading = true
+            isModelPreparingAfterDownload = true
+            modelDownloadProgress = nil
+            modelDownloadStatus = snapshot.message ?? "Preparing \(backend.label)..."
+        case .ready:
+            modelDownloadStatus = snapshot.message ?? "\(backend.label) ready"
+        case .paused:
+            isModelStillDownloading = false
+            isModelPreparingAfterDownload = false
+            modelDownloadStatus = snapshot.message ?? "Download paused"
+        case .failed:
+            isModelStillDownloading = false
+            isModelPreparingAfterDownload = false
+            modelDownloadError = snapshot.message
+            modelDownloadStatus = snapshot.message ?? "Download failed"
+        }
+
+        if OnboardingFlow.shouldPublishModelDownloadSnapshot(
+            isReadySnapshot: snapshot.phase == .ready,
+            backendIsReady: modelReadyBackend == backend
+        ) {
+            publishModelPreparationStatus(
+                title: modelDownloadIndicatorTitle,
+                detail: modelDownloadStatus,
+                progress: modelDownloadProgress,
+                isPreparing: isModelPreparingAfterDownload,
+                isComplete: false
+            )
+        }
+    }
+
+    private func applyModelPreparationProgress(
+        _ progress: Double,
+        status: String?,
+        backend: BackendOption,
+        generation: UUID
+    ) {
+        guard modelDownloadGeneration == generation,
+              modelDownloadBackend == backend,
+              selectedBackend == backend else { return }
         let detail = status ?? "Preparing \(backend.label)..."
         let lowercasedDetail = detail.lowercased()
         let isPreparing = lowercasedDetail.contains("compiling")
@@ -1740,6 +1977,8 @@ struct OnboardingView: View {
     }
 
     private func resetModelDownloadForBackendChange() {
+        cancelModelDownload(for: modelDownloadBackend)
+        modelDownloadGeneration = UUID()
         modelDownloadTask?.cancel()
         modelDownloadTask = nil
         modelReadyIndicatorTask?.cancel()
@@ -1748,10 +1987,18 @@ struct OnboardingView: View {
         modelReadyIndicatorBackend = nil
         modelDownloadBackend = nil
         modelDownloadProgress = nil
+        modelDownloadSnapshot = nil
         isModelPreparingAfterDownload = false
         modelDownloadStatus = nil
         modelDownloadError = nil
         isModelStillDownloading = false
+    }
+
+    private func cancelModelDownload(for backend: BackendOption?) {
+        guard let backend else { return }
+        Task {
+            await ManagedASRModelDownloader.cancel(modelID: backend.model)
+        }
     }
 
     private func initialDownloadStatus(for backend: BackendOption) -> String {
@@ -1920,6 +2167,7 @@ struct OnboardingView: View {
         OnboardingProgress.clear()
         let shouldContinueModelPreparation = modelDownloadTask != nil && modelReadyBackend != selectedBackend
         if shouldContinueModelPreparation {
+            modelDownloadGeneration = UUID()
             modelDownloadTask?.cancel()
             modelDownloadTask = nil
             modelDownloadBackend = nil

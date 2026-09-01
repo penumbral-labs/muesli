@@ -60,4 +60,4 @@ Plain `./scripts/dev-test.sh` keeps the existing cloud-entitlement-capable `Mues
 
 Use the shared SwiftPM scratch path resolver. For direct SwiftPM commands, pass `--scratch-path` yourself. Never run concurrent worktrees into the same scratch path.
 
-If `/Volumes/MuesliBuildCache/muesli-spm` is mounted, prefer it. Otherwise scripts fall back to `~/Library/Caches/muesli-spm`.
+Use the canonical maintainer cache at `~/Library/Caches/muesli-spm` by default. Use `MUESLI_EXTERNAL_SPM_CACHE_ROOT` only when the user explicitly provides another cache root.

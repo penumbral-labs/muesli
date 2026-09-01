@@ -140,8 +140,23 @@ struct RouteAwareDictationRecorderTests {
         ])
     }
 
-    @Test("switching recorder cancels inactive warmed graph")
-    func switchingRecorderCancelsInactiveWarmedGraph() throws {
+    @Test("audio buffers are forwarded only from the active child recorder")
+    func audioBuffersAreForwardedOnlyFromActiveChildRecorder() throws {
+        let system = FakeRouteAwareChildRecorder()
+        let appScoped = FakeRouteAwareChildRecorder()
+        let recorder = RouteAwareDictationRecorder(systemDefaultRecorder: system, appScopedRecorder: appScoped)
+        var received: [[Float]] = []
+        recorder.onAudioBuffer = { received.append($0) }
+
+        _ = try recorder.start()
+        appScoped.onAudioBuffer?([9])
+        system.onAudioBuffer?([1, 2])
+
+        #expect(received == [[1, 2]])
+    }
+
+    @Test("switching recorder keeps the inactive graph warm")
+    func switchingRecorderKeepsInactiveGraphWarm() throws {
         let system = FakeRouteAwareChildRecorder()
         let appScoped = FakeRouteAwareChildRecorder()
         let recorder = RouteAwareDictationRecorder(systemDefaultRecorder: system, appScopedRecorder: appScoped)
@@ -151,7 +166,7 @@ struct RouteAwareDictationRecorderTests {
 
         #expect(recorder.activeRecorderKindForDebug() == .appScoped)
         #expect(system.warmUpCalls == 1)
-        #expect(system.cancelCalls == 1)
+        #expect(system.cancelCalls == 0)
         #expect(appScoped.activateCalls == 1)
     }
 
@@ -167,8 +182,8 @@ struct RouteAwareDictationRecorderTests {
         #expect(appScoped.coolDownCalls == 1)
     }
 
-    @Test("route switch waits for in-flight app scoped explicit warmup teardown")
-    func routeSwitchWaitsForInFlightAppScopedExplicitWarmupTeardown() throws {
+    @Test("route switch does not tear down in-flight app scoped explicit warmup")
+    func routeSwitchDoesNotTearDownInFlightAppScopedExplicitWarmup() throws {
         let system = FakeRouteAwareChildRecorder()
         let appScopedStreaming = FakeRouteAwareStreamingRecorder()
         let prepareStarted = DispatchSemaphore(value: 0)
@@ -192,14 +207,15 @@ struct RouteAwareDictationRecorderTests {
             routeSwitchReturned.signal()
         }
 
-        #expect(routeSwitchReturned.wait(timeout: .now() + 0.1) == .timedOut)
+        // The switch no longer cancels the outgoing slot's in-flight prepare,
+        // so it returns promptly instead of waiting for teardown.
+        #expect(routeSwitchReturned.wait(timeout: .now() + 0.5) == .success)
         finishPrepare.signal()
-        #expect(routeSwitchReturned.wait(timeout: .now() + 1) == .success)
 
         #expect(recorder.activeRecorderKindForDebug() == .systemDefault)
         #expect(system.warmUpCalls == 1)
         #expect(appScopedStreaming.prepareCalls == 1)
-        #expect(appScopedStreaming.cancelCalls >= 1)
+        #expect(appScopedStreaming.cancelCalls == 0)
     }
 }
 
@@ -211,6 +227,7 @@ private final class FakeRouteAwareChildRecorder: DictationAudioRecording {
     var onNoAudioTimeout: ((Date) -> Void)?
     var onRecordingFailed: ((Error, UUID) -> Void)?
     var onLatencyEvent: ((String, Date) -> Void)?
+    var onAudioBuffer: (([Float]) -> Void)?
 
     var warmUpCalls = 0
     var explicitWarmupCalls = 0

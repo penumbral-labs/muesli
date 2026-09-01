@@ -5,11 +5,25 @@ struct DashboardRootView: View {
     let appState: AppState
     let controller: MuesliController
     @State private var featureTourTargetFrames: [FeatureTourTarget: CGRect] = [:]
+    @State private var isSidebarCollapsed = false
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(appState: appState, controller: controller)
-                .navigationSplitViewColumnWidth(min: 240, ideal: 260, max: 300)
+            SidebarView(
+                appState: appState,
+                controller: controller,
+                isCollapsed: isSidebarCollapsed,
+                onToggleCollapsed: {
+                    withAnimation(.easeInOut(duration: 0.22)) {
+                        isSidebarCollapsed.toggle()
+                    }
+                }
+            )
+            .navigationSplitViewColumnWidth(
+                min: isSidebarCollapsed ? 68 : 240,
+                ideal: isSidebarCollapsed ? 68 : 260,
+                max: isSidebarCollapsed ? 68 : 300
+            )
         } detail: {
             detailContent
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -125,17 +139,31 @@ struct DashboardRootView: View {
                 backLabel: "Back to Search"
             )
             .id(id)
+        } else if appState.selectedTab == .timeline,
+                  appState.meetingDetailReturnDestination == .timeline,
+                  case .document(let id) = appState.meetingsNavigationState {
+            MeetingDetailView(
+                meeting: appState.selectedMeeting,
+                controller: controller,
+                appState: appState,
+                onBack: { controller.showTimelineHome() },
+                backLabel: "Back to Timeline"
+            )
+            .id(id)
         } else if appState.isSearchActive {
             SearchResultsView(appState: appState, controller: controller)
         } else {
             switch appState.selectedTab {
+            case .timeline:
+                TimelineView(appState: appState, controller: controller)
             case .dictations:
                 DictationsView(appState: appState, controller: controller)
             case .insights:
                 InsightsView(
                     initialSection: appState.insightsInitialSection,
                     loadSnapshot: { range in try await controller.insightsSnapshot(range: range) },
-                    onBack: { controller.closeInsights() }
+                    onBack: { controller.closeInsights() },
+                    backLabel: appState.insightsBackLabel
                 )
             case .meetings:
                 MeetingsView(appState: appState, controller: controller)

@@ -28,6 +28,7 @@ struct MeetingSignals {
 struct CalendarEventContext {
     let id: String
     let title: String
+    var calendarOccurrence: CalendarOccurrenceReference? = nil
 }
 
 /// A running application on the system.
@@ -343,5 +344,6 @@ final class MeetingDetector {
             || lowercased.contains("teams.microsoft.com")
             || lowercased.contains("webex.com")
             || lowercased.contains("facetime.apple.com")
+            || lowercased.contains("app.slack.com/huddle/")
     }
 }

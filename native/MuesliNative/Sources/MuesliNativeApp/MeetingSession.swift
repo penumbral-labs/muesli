@@ -104,6 +104,7 @@ struct MeetingSessionResult {
     let retainedRecordingError: Error?
     let systemRecordingURL: URL?
     let templateSnapshot: MeetingTemplateSnapshot
+    var visualContext: String? = nil
 }
 
 extension MeetingSessionResult {
@@ -114,7 +115,8 @@ extension MeetingSessionResult {
         startTime newStartTime: Date? = nil,
         durationSeconds newDurationSeconds: Double? = nil,
         rawTranscript: String,
-        formattedNotes: String
+        formattedNotes: String,
+        visualContext newVisualContext: String? = nil
     ) -> MeetingSessionResult {
         let resolvedStart = newStartTime ?? startTime
         let resolvedDuration = newDurationSeconds ?? durationSeconds
@@ -130,7 +132,8 @@ extension MeetingSessionResult {
             retainedRecordingURL: retainedRecordingURL,
             retainedRecordingError: retainedRecordingError,
             systemRecordingURL: systemRecordingURL,
-            templateSnapshot: templateSnapshot
+            templateSnapshot: templateSnapshot,
+            visualContext: newVisualContext ?? visualContext
         )
     }
 }
@@ -140,6 +143,15 @@ enum MeetingProcessingStage {
     case cleaningAudio
     case generatingTitle
     case summarizingNotes
+
+    var allowsDictation: Bool {
+        switch self {
+        case .transcribingAudio, .cleaningAudio:
+            false
+        case .generatingTitle, .summarizingNotes:
+            true
+        }
+    }
 }
 
 private enum MeetingTranscriptRecoveryResult {
@@ -174,13 +186,31 @@ final class MeetingSession {
     private let micChunkHealthTracker = MeetingTranscriptChunkHealthTracker()
     private let systemChunkHealthTracker = MeetingTranscriptChunkHealthTracker()
     private let micHealthTracker = MeetingMicHealthTracker()
+    private let micRecoveryCoordinator = MeetingMicRecoveryCoordinator()
+    private let systemAudioWatchdog = MeetingSystemAudioWatchdog()
+    private var systemAudioWatchdogTimer: DispatchSourceTimer?
     private let chunkRotationQueue = DispatchQueue(label: "MuesliNative.MeetingSession.chunkRotation")
+    /// Keeps HAL mute reads and recovery dispatches out of the latency-sensitive
+    /// audio processing queue while preserving health snapshot ordering.
+    private let micHealthQueue = DispatchQueue(label: "MuesliNative.MeetingSession.micHealth")
     private let pausedDisplayLock = OSAllocatedUnfairLock(initialState: false)
     private var chunkTimingTracker = MeetingChunkTimingTracker()
     private var systemChunkTimingTracker = MeetingChunkTimingTracker()
     private var systemChunkRecorder: PCMChunkRecorder?
     var onProgress: ((MeetingProcessingStage) -> Void)?
     var onMicHealthChanged: ((MeetingMicHealthSnapshot) -> Void)?
+    /// Episode-level mic-health events: one degraded/recovered pair per actual
+    /// degradation episode, or a single unrecovered event if the meeting ends
+    /// while degraded. Feed telemetry here; keep per-snapshot UI updates on
+    /// onMicHealthChanged.
+    var onMicHealthEpisode: ((MeetingMicHealthEpisodeEvent) -> Void)?
+    /// Fired at most once per meeting when confirmed degradation is classified
+    /// as user-muted input (no recovery episode is opened in that case).
+    var onMicHealthUserMuted: (() -> Void)?
+    /// Episode-level system-audio (tap) health events: degraded when the IO
+    /// heartbeat stalls or a rebuild fails terminally, recovered when capture
+    /// resumes, unrecovered if the meeting ends dead.
+    var onSystemAudioHealthEpisode: ((MeetingSystemAudioHealthEvent) -> Void)?
     var manualNotesProvider: (() async -> String?)?
     var liveTitleProvider: (() async -> String?)?
     /// Formatted notes of the predecessor meeting when this session records a
@@ -242,6 +272,73 @@ final class MeetingSession {
         } else {
             self.systemAudioRecorder = SystemAudioRecorder()
         }
+        micRecoveryCoordinator.recoveryRequest = { [weak meetingMicRecorder] reason in
+            guard let meetingMicRecorder else { return .unavailable }
+            return meetingMicRecorder.requestSameRouteRecovery(reason: reason)
+        }
+        // Recovery handoffs mid-transition reliably fail their first-buffer
+        // window; defer them until the daemon settles (same signal the tap
+        // watchdog uses — BT transitions move input and output together).
+        micRecoveryCoordinator.isRouteSettling = { [weak systemAudioRecorder] in
+            systemAudioRecorder?.isRouteSettling ?? false
+        }
+        micRecoveryCoordinator.onEpisodeEvent = { [weak self] event in
+            self?.onMicHealthEpisode?(event)
+        }
+        micRecoveryCoordinator.isInputMuted = { [weak self] in
+            self?.isCaptureInputMuted() ?? false
+        }
+        micRecoveryCoordinator.onUserMuted = { [weak self] in
+            self?.onMicHealthUserMuted?()
+        }
+        micRecoveryCoordinator.contextProvider = { [weak meetingMicRecorder] in
+            guard let snapshot = meetingMicRecorder?.diagnosticsSnapshot() else {
+                return MeetingMicEpisodeContext()
+            }
+            return MeetingMicEpisodeContext(
+                recorderKind: snapshot.recorderKind.rawValue,
+                routeCategory: snapshot.route?.outputRouteKind,
+                selectedInputResolved: snapshot.route?.selectedInputDeviceResolved
+            )
+        }
+        meetingMicRecorder.onHandoffOutcome = { [weak self] outcome in
+            self?.micHealthQueue.async { [weak self] in
+                self?.micRecoveryCoordinator.noteHandoffOutcome(outcome)
+            }
+        }
+        systemAudioWatchdog.captureHeartbeat = { [weak systemAudioRecorder] in
+            systemAudioRecorder?.captureHeartbeat ?? 0
+        }
+        systemAudioWatchdog.isCaptureActive = { [weak systemAudioRecorder] in
+            guard let recorder = systemAudioRecorder else { return false }
+            return recorder.isRecording && !recorder.isPaused && !recorder.isRebuilding
+        }
+        systemAudioWatchdog.isPaused = { [weak systemAudioRecorder] in
+            systemAudioRecorder?.isPaused ?? false
+        }
+        systemAudioWatchdog.isRebuilding = { [weak systemAudioRecorder] in
+            systemAudioRecorder?.isRebuilding ?? false
+        }
+        systemAudioWatchdog.isRouteSettling = { [weak systemAudioRecorder] in
+            systemAudioRecorder?.isRouteSettling ?? false
+        }
+        systemAudioWatchdog.lastMicCallbackAt = { [weak self] in
+            self?.micHealthTracker.snapshot().lastRawMicCallbackAt
+        }
+        systemAudioWatchdog.recoveryRequest = { [weak systemAudioRecorder] reason in
+            systemAudioRecorder?.rebuildForHealthRecovery(reason: reason) ?? false
+        }
+        systemAudioWatchdog.onMicBlindnessDegradation = { [weak self] reason in
+            self?.micHealthQueue.async { [weak self] in
+                self?.micRecoveryCoordinator.noteExternalDegradation(reason: reason)
+            }
+        }
+        systemAudioWatchdog.onEpisodeEvent = { [weak self] event in
+            self?.onSystemAudioHealthEpisode?(event)
+        }
+        systemAudioRecorder.onCaptureFailure = { [weak systemAudioWatchdog] error in
+            systemAudioWatchdog?.noteCaptureFailure(reason: "rebuild_exhausted: \(error.localizedDescription)")
+        }
     }
 
     func updateBackend(_ backend: BackendOption) {
@@ -250,6 +347,111 @@ final class MeetingSession {
 
     func setPreferredMicrophoneInputDeviceID(_ deviceID: AudioObjectID?) {
         meetingMicRecorder.preferredInputDeviceID = deviceID
+    }
+
+    static func inputIsMuted(
+        muteValues: [Bool?],
+        mainVolume: Float?,
+        channelVolumes: [Float?]
+    ) -> Bool {
+        if muteValues.contains(true) { return true }
+        if let mainVolume, mainVolume <= 0.0001 { return true }
+        let readableChannelVolumes = channelVolumes.compactMap { $0 }
+        return !readableChannelVolumes.isEmpty
+            && readableChannelVolumes.allSatisfy { $0 <= 0.0001 }
+    }
+
+    /// True when the capture device is muted or zero-gain at the source (user
+    /// intent), which presents the same all-zero signature as a broken route.
+    /// Called by the coordinator at episode confirmation and at most 1Hz while
+    /// a suppressed degradation continues — never per sample batch.
+    private func isCaptureInputMuted() -> Bool {
+        var deviceID = meetingMicRecorder.preferredInputDeviceID ?? kAudioObjectUnknown
+        if deviceID == kAudioObjectUnknown {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var size = UInt32(MemoryLayout<AudioObjectID>.size)
+            guard AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID
+            ) == noErr, deviceID != kAudioObjectUnknown else { return false }
+        }
+        // Volume and mute controls may live on the main element (0) or on any
+        // input channel. Enumerate the device's actual input channel count via
+        // the stream configuration and probe every channel; a read failure
+        // just means "no control there".
+        var elements: [AudioObjectPropertyElement] = [kAudioObjectPropertyElementMain]
+        var configAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var configSize: UInt32 = 0
+        if AudioObjectGetPropertyDataSize(deviceID, &configAddress, 0, nil, &configSize) == noErr, configSize > 0 {
+            let raw = UnsafeMutableRawPointer.allocate(
+                byteCount: Int(configSize),
+                alignment: MemoryLayout<AudioBufferList>.alignment
+            )
+            defer { raw.deallocate() }
+            if AudioObjectGetPropertyData(deviceID, &configAddress, 0, nil, &configSize, raw) == noErr {
+                let bufferList = raw.assumingMemoryBound(to: AudioBufferList.self)
+                let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
+                let channelCount = buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
+                if channelCount > 0 {
+                    elements.append(contentsOf: (1...channelCount).map { AudioObjectPropertyElement($0) })
+                }
+            }
+        }
+        var muteValues: [Bool?] = []
+        var mainVolume: Float?
+        var channelVolumes: [Float?] = []
+        for element in elements {
+            var muteAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyMute,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: element
+            )
+            var muted: UInt32 = 0
+            var muteSize = UInt32(MemoryLayout<UInt32>.size)
+            let muteStatus = AudioObjectGetPropertyData(
+                deviceID,
+                &muteAddress,
+                0,
+                nil,
+                &muteSize,
+                &muted
+            )
+            muteValues.append(muteStatus == noErr ? muted != 0 : nil)
+
+            var volumeAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: element
+            )
+            var volume: Float32 = 1
+            var volumeSize = UInt32(MemoryLayout<Float32>.size)
+            let volumeStatus = AudioObjectGetPropertyData(
+                deviceID,
+                &volumeAddress,
+                0,
+                nil,
+                &volumeSize,
+                &volume
+            )
+            let readableVolume = volumeStatus == noErr ? volume : nil
+            if element == kAudioObjectPropertyElementMain {
+                mainVolume = readableVolume
+            } else {
+                channelVolumes.append(readableVolume)
+            }
+        }
+        return Self.inputIsMuted(
+            muteValues: muteValues,
+            mainVolume: mainVolume,
+            channelVolumes: channelVolumes
+        )
     }
 
     private func currentBackend() -> BackendOption {
@@ -277,14 +479,15 @@ final class MeetingSession {
             try meetingMicRecorder.prepare()
             setupRetainedRecordingWriterIfNeeded()
             try await systemAudioRecorder.start()
+            startSystemAudioWatchdog()
             try meetingMicRecorder.start()
         } catch {
+            stopSystemAudioWatchdog()
             vadController?.stop()
             vadController = nil
             systemVadController?.stop()
             systemVadController = nil
             meetingMicRecorder.onRawPCMSamples = nil
-            systemAudioRecorder.onPCMSamples = nil
             retainedRecordingWriter?.cancel()
             retainedRecordingWriter = nil
             rawMicChunkRecorder?.cancel()
@@ -493,6 +696,13 @@ final class MeetingSession {
             systemChunkRecorder = nil
             return (rawRecorder, systemRecorder)
         }
+        // Stop the tap watchdog from enqueueing new mic-health work, then drain
+        // health work enqueued by sample callbacks before closing the coordinator.
+        stopSystemAudioWatchdogTimer()
+        micHealthQueue.sync {
+            micRecoveryCoordinator.finishMeeting()
+        }
+        stopSystemAudioWatchdog()
         stopPartialSessions()
         vadController?.stop()
         vadController = nil
@@ -505,7 +715,6 @@ final class MeetingSession {
         systemRecorder?.cancel()
         meetingMicRecorder.onRawPCMSamples = nil
         meetingMicRecorder.cancel()
-        systemAudioRecorder.onPCMSamples = nil
         if let url = systemAudioRecorder.stop() {
             try? FileManager.default.removeItem(at: url)
         }
@@ -531,7 +740,6 @@ final class MeetingSession {
         systemVadController?.stop()
         systemVadController = nil
         meetingMicRecorder.onRawPCMSamples = nil
-        systemAudioRecorder.onPCMSamples = nil
         let (meetingStart, lastChunkTiming, lastRawMicURL, lastSystemChunkTiming, lastSystemChunkURL) = chunkRotationQueue.sync { () -> (Date, MeetingChunkTimingSnapshot?, URL?, MeetingChunkTimingSnapshot?, URL?) in
             isRecording = false
             setPausedStateOnQueue(false)
@@ -548,6 +756,18 @@ final class MeetingSession {
             let lastSystemChunkTiming = systemChunkTimingTracker.finish()
             return (meetingStart, lastChunkTiming, lastRawMicURL, lastSystemChunkTiming, lastSystemChunkURL)
         }
+        // The chunkRotationQueue barrier above guarantees every sample callback
+        // enqueued before teardown has been processed and that later callbacks
+        // bail on isRecording == false. Stop the watchdog from enqueueing more
+        // mic-health work, drain that queue, then close any open episode.
+        stopSystemAudioWatchdogTimer()
+        micHealthQueue.sync {
+            micRecoveryCoordinator.finishMeeting()
+        }
+        // Terminalize the watchdog before stopping the recorder. Cancelling its
+        // timer prevents future ticks; a tick already running is made harmless
+        // by the watchdog's finished state.
+        stopSystemAudioWatchdog()
         let rawStreamingMicURL = meetingMicRecorder.stop()
         let retainedRecordingURL = retainedRecordingWriter?.stop()
         retainedRecordingWriter = nil
@@ -607,7 +827,10 @@ final class MeetingSession {
                         at: lastSystemChunkURL,
                         backend: currentBackend(),
                         cohereLanguage: config.resolvedCohereLanguage,
-                        indicASRLanguage: config.resolvedIndicASRLanguage
+                        indicASRLanguage: config.resolvedIndicASRLanguage,
+                        whisperLanguage: config.resolvedWhisperLanguage,
+                        parakeetLanguage: config.resolvedParakeetLanguage,
+                        appleSpeechLanguage: config.resolvedAppleSpeechLanguage
                     )
                     let normalizedSegments = normalizeSystemTranscription(
                         result: result,
@@ -701,6 +924,7 @@ final class MeetingSession {
             meetingStart: meetingStart
         )
 
+        let titleManualNotes = await manualNotesProvider?()
         let generatedTitle: String
         onProgress?(.generatingTitle)
         if let liveTitle = await userEditedLiveTitle() {
@@ -710,7 +934,11 @@ final class MeetingSession {
             calendarEventID: calendarEventID
         ) {
             generatedTitle = calendarTitle
-        } else if let autoTitle = await MeetingSummaryClient.generateTitle(transcript: rawTranscript, config: config),
+        } else if let autoTitle = await MeetingSummaryClient.generateTitle(
+            transcript: rawTranscript,
+            manualNotes: titleManualNotes,
+            config: config
+        ),
            !autoTitle.isEmpty {
             generatedTitle = autoTitle
             fputs("[meeting] auto-generated title: \(generatedTitle)\n", stderr)
@@ -774,7 +1002,8 @@ final class MeetingSession {
             retainedRecordingURL: retainedRecordingURL,
             retainedRecordingError: retainedRecordingWriterError,
             systemRecordingURL: systemAudioURL,
-            templateSnapshot: templateSnapshot
+            templateSnapshot: templateSnapshot,
+            visualContext: visualContext.isEmpty ? nil : visualContext
         )
     }
 
@@ -898,7 +1127,10 @@ final class MeetingSession {
                     at: chunkURL,
                     backend: backend,
                     cohereLanguage: config.resolvedCohereLanguage,
-                    indicASRLanguage: config.resolvedIndicASRLanguage
+                    indicASRLanguage: config.resolvedIndicASRLanguage,
+                    whisperLanguage: config.resolvedWhisperLanguage,
+                    parakeetLanguage: config.resolvedParakeetLanguage,
+                    appleSpeechLanguage: config.resolvedAppleSpeechLanguage
                 )
                 if !result.text.isEmpty {
                     fputs("[meeting] system chunk transcribed: \"\(String(result.text.prefix(60)))...\"\n", stderr)
@@ -958,6 +1190,34 @@ final class MeetingSession {
         }
     }
 
+    private func startSystemAudioWatchdog() {
+        // Only heartbeat-capable backends can be stall-monitored: the SCK
+        // fallback reports heartbeat 0 permanently and would false-fire
+        // degraded episodes every meeting.
+        guard systemAudioRecorder.supportsHeartbeatMonitoring else { return }
+        stopSystemAudioWatchdogTimer()
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "MuesliNative.MeetingSession.systemAudioWatchdog"))
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak systemAudioWatchdog] in
+            systemAudioWatchdog?.tick()
+        }
+        systemAudioWatchdogTimer = timer
+        timer.resume()
+    }
+
+    /// Cancel future timer ticks and terminalize any open tap episode. A tick
+    /// already running is rejected after the watchdog enters its finished state.
+    /// Safe to call from stop() and discard().
+    private func stopSystemAudioWatchdog() {
+        stopSystemAudioWatchdogTimer()
+        systemAudioWatchdog.finishMeeting()
+    }
+
+    private func stopSystemAudioWatchdogTimer() {
+        systemAudioWatchdogTimer?.cancel()
+        systemAudioWatchdogTimer = nil
+    }
+
     private func prepareRealtimeAudioPipeline(vadManager: VadManager?) throws {
         rawMicChunkRecorder = try PCMChunkRecorder(directoryName: "muesli-meeting-mic-chunks")
         systemChunkRecorder = try PCMChunkRecorder(directoryName: "muesli-meeting-system-chunks")
@@ -1006,6 +1266,9 @@ final class MeetingSession {
 
             let healthSnapshot = self.micHealthTracker.noteRawMicSamples(rawSamples)
             self.onMicHealthChanged?(healthSnapshot)
+            self.micHealthQueue.async { [weak self] in
+                self?.micRecoveryCoordinator.process(healthSnapshot)
+            }
             self.retainedRecordingWriter?.appendMic(rawSamples)
 
             let floatSamples = rawSamples.map { Float($0) / 32767.0 }
@@ -1031,6 +1294,9 @@ final class MeetingSession {
 
             let healthSnapshot = self.micHealthTracker.noteSystemSamples(samples)
             self.onMicHealthChanged?(healthSnapshot)
+            self.micHealthQueue.async { [weak self] in
+                self?.micRecoveryCoordinator.process(healthSnapshot)
+            }
             self.retainedRecordingWriter?.appendSystem(samples)
             self.systemChunkRecorder?.append(samples)
             self.systemChunkTimingTracker.append(sampleCount: samples.count)
@@ -1099,7 +1365,10 @@ final class MeetingSession {
                 at: url,
                 backend: currentBackend(),
                 cohereLanguage: config.resolvedCohereLanguage,
-                indicASRLanguage: config.resolvedIndicASRLanguage
+                indicASRLanguage: config.resolvedIndicASRLanguage,
+                whisperLanguage: config.resolvedWhisperLanguage,
+                parakeetLanguage: config.resolvedParakeetLanguage,
+                appleSpeechLanguage: config.resolvedAppleSpeechLanguage
             )
             if !result.text.isEmpty {
                 fputs("[meeting] mic chunk transcribed (raw): \"\(String(result.text.prefix(60)))...\"\n", stderr)
@@ -1206,7 +1475,10 @@ final class MeetingSession {
                         at: segmentURL,
                         backend: currentBackend(),
                         cohereLanguage: config.resolvedCohereLanguage,
-                        indicASRLanguage: config.resolvedIndicASRLanguage
+                        indicASRLanguage: config.resolvedIndicASRLanguage,
+                        whisperLanguage: config.resolvedWhisperLanguage,
+                        parakeetLanguage: config.resolvedParakeetLanguage,
+                        appleSpeechLanguage: config.resolvedAppleSpeechLanguage
                     )
                     repairedSegments.append(contentsOf: normalizeSystemTranscription(
                         result: result,
@@ -1238,7 +1510,10 @@ final class MeetingSession {
                 at: systemAudioURL,
                 backend: currentBackend(),
                 cohereLanguage: config.resolvedCohereLanguage,
-                indicASRLanguage: config.resolvedIndicASRLanguage
+                indicASRLanguage: config.resolvedIndicASRLanguage,
+                whisperLanguage: config.resolvedWhisperLanguage,
+                parakeetLanguage: config.resolvedParakeetLanguage,
+                appleSpeechLanguage: config.resolvedAppleSpeechLanguage
             )
             return normalizeSystemTranscription(
                 result: result,

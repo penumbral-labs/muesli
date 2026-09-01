@@ -8,12 +8,13 @@ struct FeatureTourTests {
 
     @Test("marketing versions compare numeric components and ignore prerelease suffixes")
     func versionComparison() throws {
-        #expect(try #require(MarketingVersion("0.7.1")) < #require(MarketingVersion("0.8.0")))
-        #expect(try #require(MarketingVersion("0.8")) == #require(MarketingVersion("0.8.0")))
-        #expect(try #require(MarketingVersion("0.8.0-preprod.1")) == #require(MarketingVersion("0.8.0")))
+        #expect(try #require(MarketingVersion("0.8.1")) < #require(MarketingVersion("0.8.2")))
+        #expect(try #require(MarketingVersion("0.8.2")) == #require(MarketingVersion("0.8.2.0")))
+        #expect(try #require(MarketingVersion("0.8.2-preprod.2")) == #require(MarketingVersion("0.8.2")))
         #expect(MarketingVersion("not-a-version") == nil)
         #expect(MarketingVersion("999999999999999999999999.0") == nil)
-        #expect(tour.displayVersion == "0.8")
+        #expect(tour.displayVersion == "0.8.2")
+        #expect(FeatureTour(version: "0.8.0", steps: []).displayVersion == "0.8")
     }
 
     @Test("target frame tracking ignores subpixel layout churn")
@@ -70,10 +71,35 @@ struct FeatureTourTests {
         #expect(calloutFrame.maxY <= container.height - 20)
     }
 
+    @Test("dashboard presentation waits for its first ordered layout")
+    func dashboardPresentationReadiness() {
+        var readiness = DashboardPresentationReadiness<String>()
+
+        let queuedBeforeReady = readiness.enqueue("feature tour")
+        let firstLayoutRequest = readiness.requestInitialLayout()
+        let duplicateLayoutRequest = readiness.requestInitialLayout()
+        #expect(queuedBeforeReady == [])
+        #expect(firstLayoutRequest)
+        #expect(!duplicateLayoutRequest)
+
+        readiness.cancelInitialLayout()
+        let retriedLayoutRequest = readiness.requestInitialLayout()
+        #expect(!readiness.isReady)
+        #expect(retriedLayoutRequest)
+
+        let firstLayoutActions = readiness.completeInitialLayout()
+        let readyLayoutRequest = readiness.requestInitialLayout()
+        let immediateActions = readiness.enqueue("future tour")
+        #expect(firstLayoutActions == ["feature tour"])
+        #expect(readiness.isReady)
+        #expect(!readyLayoutRequest)
+        #expect(immediateActions == ["future tour"])
+    }
+
     @Test("existing users without legacy version markers see the first feature tour")
     func legacyUpgrade() {
         #expect(FeatureTourPresentationPolicy.shouldPresentAutomatically(
-            currentVersion: "0.8.0",
+            currentVersion: "0.8.2",
             previousVersion: nil,
             lastPresentedTourVersion: nil,
             hasCompletedOnboarding: true,
@@ -84,15 +110,15 @@ struct FeatureTourTests {
     @Test("fresh installs and pre-target versions do not see the tour")
     func ineligibleLaunches() {
         #expect(!FeatureTourPresentationPolicy.shouldPresentAutomatically(
-            currentVersion: "0.8.0",
+            currentVersion: "0.8.2",
             previousVersion: nil,
             lastPresentedTourVersion: nil,
             hasCompletedOnboarding: false,
             tour: tour
         ))
         #expect(!FeatureTourPresentationPolicy.shouldPresentAutomatically(
-            currentVersion: "0.7.1",
-            previousVersion: "0.7.0",
+            currentVersion: "0.8.1",
+            previousVersion: "0.8.0",
             lastPresentedTourVersion: nil,
             hasCompletedOnboarding: true,
             tour: tour
@@ -102,16 +128,16 @@ struct FeatureTourTests {
     @Test("upgrade crossing the target version presents once")
     func crossingTarget() {
         #expect(FeatureTourPresentationPolicy.shouldPresentAutomatically(
-            currentVersion: "0.8.0-preprod.1",
-            previousVersion: "0.7.1",
-            lastPresentedTourVersion: nil,
+            currentVersion: "0.8.2-preprod.2",
+            previousVersion: "0.8.1",
+            lastPresentedTourVersion: "0.8.0",
             hasCompletedOnboarding: true,
             tour: tour
         ))
         #expect(!FeatureTourPresentationPolicy.shouldPresentAutomatically(
-            currentVersion: "0.8.0",
-            previousVersion: "0.7.1",
-            lastPresentedTourVersion: "0.8.0",
+            currentVersion: "0.8.2",
+            previousVersion: "0.8.1",
+            lastPresentedTourVersion: "0.8.2",
             hasCompletedOnboarding: true,
             tour: tour
         ))
@@ -124,31 +150,74 @@ struct FeatureTourTests {
         ))
     }
 
-    @Test("0.8 catalog points each walkthrough step at a unique product location")
+    @Test("prerelease upgrade at the target version presents only to established users")
+    func prereleaseUpgradeAtTargetVersion() {
+        #expect(FeatureTourPresentationPolicy.shouldPresentAutomatically(
+            currentVersion: "0.8.2-preprod.2",
+            previousVersion: "0.8.2-preprod.1",
+            lastPresentedTourVersion: "0.8.0",
+            hasCompletedOnboarding: true,
+            tour: tour
+        ))
+        #expect(!FeatureTourPresentationPolicy.shouldPresentAutomatically(
+            currentVersion: "0.8.2-preprod.2",
+            previousVersion: "0.8.2-preprod.2",
+            lastPresentedTourVersion: nil,
+            hasCompletedOnboarding: true,
+            tour: tour
+        ))
+    }
+
+    @Test("0.8.2 catalog highlights a small set of unique product locations")
     func catalogShape() {
-        #expect(tour.version == "0.8.0")
-        #expect(tour.steps.count == 6)
-        #expect(Set(tour.steps.map(\.id)).count == tour.steps.count)
-        #expect(Set(tour.steps.map(\.target)).count == tour.steps.count)
+        #expect(tour.version == "0.8.2")
+        #expect(tour.steps.map(\.target) == [.timelineSidebar])
 
-        let authenticatedTour = FeatureTourCatalog.latest(includeCloudCleanup: true)
-        #expect(authenticatedTour.steps.count == 7)
-        #expect(authenticatedTour.steps.contains { $0.target == .cloudCleanupSetting })
+        let fullTour = FeatureTourCatalog.latest(
+            includeApplicationFilter: true,
+            includeAppleSpeech: true,
+            includeMeetingPeople: true
+        )
+        #expect(fullTour.steps.count == 4)
+        #expect(Set(fullTour.steps.map(\.id)).count == fullTour.steps.count)
+        #expect(Set(fullTour.steps.map(\.target)).count == fullTour.steps.count)
+        #expect(fullTour.steps.map(\.target) == [
+            .timelineSidebar,
+            .timelineApplications,
+            .appleSpeechCard,
+            .meetingPeople,
+        ])
 
-        let dictionaryStep = tour.steps.first { $0.target == .dictionarySuggestions }
-        #expect(dictionaryStep?.message.contains("off by default") == true)
+        let timelineStep = fullTour.steps.first
+        #expect(timelineStep?.message.contains("sidebar") == true)
 
-        let streamingStep = tour.steps.first { $0.target == .streamingModels }
-        #expect(streamingStep?.message.contains("Nemotron 3.5") == true)
-        #expect(streamingStep?.message.contains("Parakeet Realtime") == true)
-        #expect(streamingStep?.target.modelsCategory == .streaming)
+        let applicationStep = fullTour.steps.first { $0.target == .timelineApplications }
+        #expect(applicationStep?.id == "timeline-apps")
+        #expect(applicationStep?.message.contains("Mail") == true)
 
-        let experimentalStep = tour.steps.last
-        #expect(experimentalStep?.id == "experimental-models")
-        #expect(experimentalStep?.target == .experimentalModels)
-        #expect(experimentalStep?.message.contains("Indic ASR") == true)
-        #expect(experimentalStep?.message.contains("Gemma 4") == true)
-        #expect(experimentalStep?.target.modelsCategory == .dictation)
+        let appleSpeechStep = fullTour.steps.first { $0.target == .appleSpeechCard }
+        #expect(appleSpeechStep?.id == "apple-speech")
+        #expect(appleSpeechStep?.title == "Try Apple's native on-device speech model")
+        #expect(appleSpeechStep?.message.contains("macOS 26") == true)
+        #expect(appleSpeechStep?.target.modelsCategory == .dictation)
+
+        let peopleStep = fullTour.steps.last
+        #expect(peopleStep?.id == "meeting-people")
+        #expect(peopleStep?.title == "Meeting attendees are now available!")
+        #expect(peopleStep?.message.contains("Apple Contacts") == true)
+    }
+
+    @Test("catalog omits targets that cannot be rendered")
+    func unavailableTargetsAreOmitted() {
+        let tour = FeatureTourCatalog.latest(
+            includeApplicationFilter: false,
+            includeAppleSpeech: false,
+            includeMeetingPeople: false
+        )
+        #expect(tour.steps.map(\.target) == [.timelineSidebar])
+        #expect(!tour.steps.contains { $0.id == "timeline-apps" })
+        #expect(!tour.steps.contains { $0.id == "apple-speech" })
+        #expect(!tour.steps.contains { $0.id == "meeting-people" })
     }
 
     @Test("store suppresses fresh installs and presents a legacy upgrade only once")
@@ -159,15 +228,15 @@ struct FeatureTourTests {
         let store = FeatureTourStore(defaults: defaults)
 
         #expect(store.automaticTour(
-            currentVersion: "0.8.0",
+            currentVersion: "0.8.2",
             hasCompletedOnboarding: false,
             canPresent: false
         ) == nil)
 
         // A fresh install that later completes onboarding is already recorded at
-        // 0.8 and does not receive a second onboarding-like flow.
+        // 0.8.2 and does not receive a second onboarding-like flow.
         #expect(store.automaticTour(
-            currentVersion: "0.8.0",
+            currentVersion: "0.8.2",
             hasCompletedOnboarding: true,
             canPresent: true
         ) == nil)
@@ -175,14 +244,14 @@ struct FeatureTourTests {
         defaults.removePersistentDomain(forName: suiteName)
         let legacyStore = FeatureTourStore(defaults: defaults)
         let presented = try #require(legacyStore.automaticTour(
-            currentVersion: "0.8.0",
+            currentVersion: "0.8.2",
             hasCompletedOnboarding: true,
             canPresent: true
         ))
         legacyStore.markOffered(presented)
 
         #expect(legacyStore.automaticTour(
-            currentVersion: "0.8.0",
+            currentVersion: "0.8.2",
             hasCompletedOnboarding: true,
             canPresent: true
         ) == nil)
@@ -196,12 +265,12 @@ struct FeatureTourTests {
         let store = FeatureTourStore(defaults: defaults)
 
         #expect(store.automaticTour(
-            currentVersion: "0.8.0",
+            currentVersion: "0.8.2",
             hasCompletedOnboarding: true,
             canPresent: false
         ) == nil)
         #expect(store.automaticTour(
-            currentVersion: "0.8.0",
+            currentVersion: "0.8.2",
             hasCompletedOnboarding: true,
             canPresent: true
         ) != nil)

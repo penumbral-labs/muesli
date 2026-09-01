@@ -66,4 +66,97 @@ struct OnboardingFlowTests {
         #expect(OnboardingFlow.completionTab(for: .dictation) == .dictations)
         #expect(OnboardingFlow.completionTab(for: .dictationAndMeetings) == .dictations)
     }
+
+    @Test("late ready download snapshots do not replace authoritative completion")
+    func lateReadySnapshotDoesNotPublish() {
+        #expect(OnboardingFlow.shouldPublishModelDownloadSnapshot(
+            isReadySnapshot: false,
+            backendIsReady: true
+        ))
+        #expect(OnboardingFlow.shouldPublishModelDownloadSnapshot(
+            isReadySnapshot: true,
+            backendIsReady: false
+        ))
+        #expect(!OnboardingFlow.shouldPublishModelDownloadSnapshot(
+            isReadySnapshot: true,
+            backendIsReady: true
+        ))
+    }
+
+    @Test("dictation monitor respects readiness and step threshold")
+    func dictationMonitorRespectsReadinessAndStepThreshold() {
+        let threshold = OnboardingFlow.dictationTestStep
+        #expect(OnboardingFlow.dictationTestMonitorAction(
+            currentStep: threshold - 1,
+            dictationTestStep: threshold,
+            modelReady: true,
+            monitorActive: false,
+            dictationTesting: false
+        ) == .none)
+        #expect(OnboardingFlow.dictationTestMonitorAction(
+            currentStep: threshold,
+            dictationTestStep: threshold,
+            modelReady: false,
+            monitorActive: false,
+            dictationTesting: false
+        ) == .stop(cancelTestDictation: false))
+        #expect(OnboardingFlow.dictationTestMonitorAction(
+            currentStep: threshold,
+            dictationTestStep: threshold,
+            modelReady: false,
+            monitorActive: true,
+            dictationTesting: true
+        ) == .stop(cancelTestDictation: true))
+    }
+
+    @Test("dictation monitor does not start twice for repeated ready updates")
+    func dictationMonitorDoesNotDuplicateStarts() {
+        #expect(OnboardingFlow.dictationTestMonitorAction(
+            currentStep: OnboardingFlow.dictationTestStep,
+            dictationTestStep: OnboardingFlow.dictationTestStep,
+            modelReady: true,
+            monitorActive: false,
+            dictationTesting: false
+        ) == .start)
+        #expect(OnboardingFlow.dictationTestMonitorAction(
+            currentStep: OnboardingFlow.dictationTestStep,
+            dictationTestStep: OnboardingFlow.dictationTestStep,
+            modelReady: true,
+            monitorActive: true,
+            dictationTesting: false
+        ) == .none)
+    }
+
+    @Test("dictation monitor does not start on a later meeting step")
+    func dictationMonitorDoesNotStartAfterSkippedStep() {
+        #expect(OnboardingFlow.dictationTestMonitorAction(
+            currentStep: OnboardingFlow.Step.meetingSummary.rawValue,
+            dictationTestStep: OnboardingFlow.dictationTestStep,
+            modelReady: true,
+            monitorActive: false,
+            dictationTesting: false
+        ) == .none)
+        #expect(OnboardingFlow.dictationTestMonitorAction(
+            currentStep: OnboardingFlow.Step.meetingSummary.rawValue,
+            dictationTestStep: OnboardingFlow.dictationTestStep,
+            modelReady: true,
+            monitorActive: true,
+            dictationTesting: true
+        ) == .stop(cancelTestDictation: true))
+    }
+
+    @Test("extreme ETA values are omitted instead of overflowing")
+    func extremeETAReturnsUnknown() {
+        #expect(ModelDownloadDisplayFormatting.eta(Double.greatestFiniteMagnitude) == nil)
+        #expect(ModelDownloadDisplayFormatting.eta(.infinity) == nil)
+        #expect(ModelDownloadDisplayFormatting.eta(3_600) == "1h 00m")
+    }
+
+    @Test("download rates preserve useful units at every scale")
+    func downloadRatesUseAppropriateUnits() {
+        #expect(ModelDownloadDisplayFormatting.rate(40) == "40 B/s")
+        #expect(ModelDownloadDisplayFormatting.rate(1_500) == "1.5 KB/s")
+        #expect(ModelDownloadDisplayFormatting.rate(1_500_000) == "1.5 MB/s")
+        #expect(ModelDownloadDisplayFormatting.rate(1_500_000_000) == "1.5 GB/s")
+    }
 }

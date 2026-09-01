@@ -4,6 +4,93 @@ import Foundation
 import MuesliCore
 @testable import MuesliNativeApp
 
+private enum OpenRouterDisconnectTestError: Error {
+    case expected
+}
+
+private final class DisconnectHostedDictationSessionSpy: HostedDictationSession {
+    let acceptsLiveAudio = false
+    private(set) var cancelCount = 0
+    private(set) var finishCount = 0
+
+    func append(_: [Float]) {}
+
+    func finish(recordedWAVURL _: URL) async throws -> HostedDictationResult {
+        finishCount += 1
+        return HostedDictationResult(text: "unexpected", backend: "test")
+    }
+
+    func cancel() {
+        cancelCount += 1
+    }
+}
+
+private actor OpenRouterCatalogVisibilityProbe {
+    private(set) var requestCount = 0
+
+    func recordRequest() {
+        requestCount += 1
+    }
+
+    func waitForRequest() async {
+        for _ in 0..<100 where requestCount == 0 {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+private actor OpenRouterCatalogRaceProbe {
+    private struct PendingResponse {
+        let url: URL
+        let continuation: CheckedContinuation<(Data, URLResponse), Never>
+    }
+
+    private var nextRequestID = 0
+    private var pendingResponses: [Int: PendingResponse] = [:]
+    private var returnedRequestIDs = Set<Int>()
+
+    func load(_ request: URLRequest) async -> (id: Int, data: Data, response: URLResponse) {
+        nextRequestID += 1
+        let requestID = nextRequestID
+        let result = await withCheckedContinuation { continuation in
+            pendingResponses[requestID] = PendingResponse(
+                url: request.url!,
+                continuation: continuation
+            )
+        }
+        returnedRequestIDs.insert(requestID)
+        return (requestID, result.0, result.1)
+    }
+
+    func waitForRequestCount(_ count: Int) async {
+        for _ in 0..<100 where nextRequestID < count {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func waitForReturn(_ requestID: Int) async {
+        for _ in 0..<100 where !returnedRequestIDs.contains(requestID) {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func complete(_ requestID: Int, modelID: String, name: String) {
+        guard let pending = pendingResponses.removeValue(forKey: requestID) else { return }
+        let data = Data("""
+        {"data":[
+          {"id":"\(modelID)","name":"\(name)","pricing":{},"architecture":{"output_modalities":["transcription"]}}
+        ]}
+        """.utf8)
+        let response = HTTPURLResponse(
+            url: pending.url,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        pending.continuation.resume(returning: (data, response))
+    }
+}
+
 @MainActor
 @Suite("Meetings navigation")
 struct MeetingsNavigationTests {
@@ -61,8 +148,25 @@ struct MeetingsNavigationTests {
     func meetingsDefaultToBrowser() {
         let appState = AppState()
 
+        #expect(appState.selectedTab == .timeline)
         #expect(appState.meetingsNavigationState == .browser)
         #expect(appState.selectedMeeting == nil)
+    }
+
+    @Test("foreground meeting starts open and present notes")
+    func foregroundMeetingStartPresentation() {
+        let presentation = MeetingStartPresentation.foregroundNotes
+
+        #expect(presentation.opensMeetingDocument)
+        #expect(presentation.presentsHistoryWindow)
+    }
+
+    @Test("background meeting starts only transition the recording pill")
+    func backgroundMeetingStartPresentation() {
+        let presentation = MeetingStartPresentation.backgroundPill
+
+        #expect(!presentation.opensMeetingDocument)
+        #expect(!presentation.presentsHistoryWindow)
     }
 
     @Test("each dashboard statistic opens insights with its originating section")
@@ -76,15 +180,22 @@ struct MeetingsNavigationTests {
         }
     }
 
-    @Test("closing insights returns to dictations")
-    func closingInsightsReturnsToDictations() {
+    @Test("closing insights returns to the originating history view")
+    func closingInsightsReturnsToOrigin() {
         let controller = makeController()
         controller.openInsights(section: .meetings)
+        #expect(controller.appState.insightsBackLabel == "Back to Timeline")
 
         controller.closeInsights()
 
-        #expect(controller.appState.selectedTab == .dictations)
+        #expect(controller.appState.selectedTab == .timeline)
         #expect(controller.appState.insightsInitialSection == .meetings)
+
+        controller.appState.selectedTab = .dictations
+        controller.openInsights(section: .words)
+        #expect(controller.appState.insightsBackLabel == "Back to Dictations")
+        controller.closeInsights()
+        #expect(controller.appState.selectedTab == .dictations)
     }
 
     @Test("discard confirmation maps checkbox selections to meeting discard resolutions")
@@ -155,6 +266,85 @@ struct MeetingsNavigationTests {
         #expect(controller.appState.selectedMeetingID == 202)
         #expect(controller.appState.meetingsNavigationState == .document(202))
         #expect(controller.appState.selectedFolderID == 55)
+    }
+
+    @Test("timeline meeting route preserves timeline filters and scroll anchor")
+    func timelineMeetingRoutePreservesTimelineState() throws {
+        let store = try makeStore()
+        let meetingID = try insertMeeting(in: store, title: "Timeline meeting", savedRecordingPath: nil)
+        let controller = makeController(dictationStore: store)
+        controller.appState.timelineOriginFilter = .fromIPhone
+        controller.appState.timelineDateFilter = .lastWeek
+        controller.appState.timelineFromDate = "2026-08-09T00:00:00Z"
+        let notes = DictationTargetApplication(name: "Notes", bundleID: "com.apple.Notes")
+        controller.appState.timelineApplicationFilter = notes
+        controller.appState.timelineScrollAnchor = "dictation:77"
+
+        controller.showTimelineMeetingDocument(id: meetingID)
+
+        #expect(controller.appState.selectedTab == .timeline)
+        #expect(controller.appState.meetingDetailReturnDestination == .timeline)
+        #expect(controller.appState.meetingsNavigationState == .document(meetingID))
+        #expect(controller.appState.timelineOriginFilter == .fromIPhone)
+        #expect(controller.appState.timelineDateFilter == .lastWeek)
+        #expect(controller.appState.timelineFromDate == "2026-08-09T00:00:00Z")
+        #expect(controller.appState.timelineApplicationFilter == notes)
+        #expect(controller.appState.timelineScrollAnchor == "dictation:77")
+
+        controller.showTimelineHome()
+        #expect(controller.appState.meetingsNavigationState == .browser)
+        #expect(controller.appState.selectedMeetingID == nil)
+        #expect(controller.appState.timelineOriginFilter == .fromIPhone)
+        #expect(controller.appState.timelineDateFilter == .lastWeek)
+        #expect(controller.appState.timelineApplicationFilter == notes)
+        #expect(controller.appState.timelineScrollAnchor == "dictation:77")
+    }
+
+    @Test("timeline pagination and filter changes reset to the newest composite anchor")
+    func timelinePaginationAndFilterReset() throws {
+        let store = try makeStore()
+        let base = Date(timeIntervalSince1970: 1_776_000_000)
+        let notes = DictationTargetApplication(name: "Notes", bundleID: "com.apple.Notes")
+        for index in 0..<3 {
+            let endedAt = base.addingTimeInterval(Double(index))
+            _ = try store.insertDictation(
+                text: "Row \(index)",
+                durationSeconds: 1,
+                targetAppName: index == 0 ? notes.name : "TextEdit",
+                targetAppBundleID: index == 0 ? notes.bundleID : "com.apple.TextEdit",
+                startedAt: endedAt.addingTimeInterval(-1),
+                endedAt: endedAt
+            )
+        }
+        let controller = makeController(dictationStore: store)
+        controller.appState.timelinePageSize = 2
+        controller.syncAppState()
+
+        #expect(controller.appState.timelineRows.count == 2)
+        #expect(controller.appState.hasMoreTimelineEntries)
+        controller.loadMoreTimelineEntries()
+        #expect(controller.appState.timelineRows.count == 3)
+        #expect(!controller.appState.hasMoreTimelineEntries)
+
+        controller.appState.timelineScrollAnchor = controller.appState.timelineRows.last?.id
+        controller.filterTimeline(origin: .thisMac)
+        #expect(controller.appState.timelineRows.count == 2)
+        #expect(controller.appState.timelineScrollAnchor == controller.appState.timelineRows.first?.id)
+
+        controller.filterTimeline(dateFilter: .last2Days)
+        #expect(controller.appState.timelineDateFilter == .last2Days)
+        #expect(controller.appState.timelineScrollAnchor == controller.appState.timelineRows.first?.id)
+
+        controller.filterTimeline(dateFilter: .all)
+        controller.filterTimeline(application: notes)
+        #expect(controller.appState.timelineApplicationFilter == notes)
+        #expect(controller.appState.timelineRows.count == 1)
+        #expect(controller.appState.timelineScrollAnchor == controller.appState.timelineRows.first?.id)
+
+        controller.filterDictations(application: notes)
+        #expect(controller.appState.dictationApplicationFilter == notes)
+        #expect(controller.appState.dictationRows.count == 1)
+        #expect(controller.appState.filteredDictationStats.totalSessions == 1)
     }
 
     @Test("showMeetingsHome returns to browser and preserves prior meeting selection")
@@ -1137,6 +1327,312 @@ struct MeetingsNavigationTests {
         #expect(controller.appState.selectedBackend == .gemma4E2BLiteRT)
         #expect(controller.appState.selectedPostProcessorBackend == .local)
         #expect(controller.appState.config.postProcessorBackend == TranscriptCleanupBackendOption.local.backend)
+    }
+
+    @Test("switching to Indic ASR disables S1-mini cleanup")
+    func switchingToIndicASRDisablesS1MiniCleanup() {
+        let controller = makeController()
+        controller.updateConfig {
+            $0.sttBackend = BackendOption.parakeetMultilingual.backend
+            $0.sttModel = BackendOption.parakeetMultilingual.model
+            $0.activePostProcessorId = PostProcessorOption.s1Mini.id
+            $0.enablePostProcessor = true
+        }
+
+        controller.selectBackend(.indicASR)
+
+        #expect(controller.appState.config.activePostProcessorId == PostProcessorOption.s1Mini.id)
+        #expect(!controller.appState.config.enablePostProcessor)
+    }
+
+    @Test("switching from hosted cleanup to local disables incompatible S1-mini cleanup")
+    func switchingFromHostedCleanupToLocalDisablesIncompatibleS1MiniCleanup() {
+        let controller = makeController()
+        controller.updateConfig {
+            $0.sttBackend = BackendOption.indicASR.backend
+            $0.sttModel = BackendOption.indicASR.model
+            $0.postProcessorBackend = LLMBackendOption.chatGPT.backend
+            $0.activePostProcessorId = PostProcessorOption.s1Mini.id
+            $0.enablePostProcessor = true
+        }
+
+        controller.selectPostProcessorBackend(.local)
+
+        #expect(controller.selectedPostProcessorBackend == .local)
+        #expect(!controller.appState.config.enablePostProcessor)
+    }
+
+    @Test("disconnecting OpenRouter updates future providers without interrupting active dictation")
+    func disconnectingOpenRouterFallsBackSafely() throws {
+        let supportDirectory = makeSupportDirectory()
+        let configStore = ConfigStore(supportDirectory: supportDirectory)
+        let credentialStore = OpenRouterCredentialStore(supportDirectory: supportDirectory)
+        let openRouterAuth = OpenRouterAuthManager(
+            credentialStore: credentialStore,
+            loadData: { _ in throw URLError(.unsupportedURL) },
+            openURL: { _ in false },
+            environment: { [:] }
+        )
+        try openRouterAuth.storeManualAPIKey("sk-or-v1-test")
+        let controller = MuesliController(
+            runtime: RuntimePaths(
+                repoRoot: FileManager.default.temporaryDirectory,
+                menuIcon: nil,
+                appIcon: nil,
+                bundlePath: nil
+            ),
+            configStore: configStore,
+            openRouterAuth: openRouterAuth
+        )
+        controller.updateConfig {
+            $0.meetingSummaryBackend = MeetingSummaryBackendOption.openRouter.backend
+            $0.postProcessorBackend = LLMBackendOption.openRouter.backend
+            $0.quilBackend = LLMBackendOption.openRouter.backend
+            $0.quilModel = "openai/gpt-5.4"
+            $0.dictationProvider = DictationProvider.openRouter.rawValue
+            $0.openRouterDictationModel = "provider/transcribe"
+        }
+        let recordingSession = DisconnectHostedDictationSessionSpy()
+        let finalizingSession = DisconnectHostedDictationSessionSpy()
+        controller.installHostedDictationSessionsForTesting(
+            recording: recordingSession,
+            finalizing: finalizingSession
+        )
+
+        #expect(controller.signOutOpenRouter() == nil)
+
+        #expect(!openRouterAuth.isAuthenticated)
+        #expect(recordingSession.cancelCount == 0)
+        #expect(recordingSession.finishCount == 0)
+        #expect(finalizingSession.cancelCount == 0)
+        #expect(finalizingSession.finishCount == 0)
+        #expect(controller.hostedDictationSessionPresenceForTesting.recording)
+        #expect(controller.hostedDictationSessionPresenceForTesting.finalizing)
+        #expect(controller.selectedDictationProvider == .local)
+        #expect(controller.dictationBackendReadiness == .preparing)
+        #expect(controller.selectedMeetingSummaryBackend == .openAI)
+        #expect(controller.config.meetingSummaryBackend == MeetingSummaryBackendOption.openAI.backend)
+        #expect(controller.selectedPostProcessorBackend == .local)
+        #expect(controller.config.postProcessorBackend == TranscriptCleanupBackendOption.local.backend)
+        #expect(controller.config.quilBackend == TranscriptCleanupBackendOption.local.backend)
+        #expect(controller.config.quilModel == PostProcessorOption.defaultQuilOption.id)
+
+        let persisted = configStore.load()
+        #expect(persisted.meetingSummaryBackend == MeetingSummaryBackendOption.openAI.backend)
+        #expect(persisted.postProcessorBackend == TranscriptCleanupBackendOption.local.backend)
+        #expect(persisted.quilBackend == TranscriptCleanupBackendOption.local.backend)
+        #expect(persisted.resolvedDictationProvider == .local)
+        #expect(persisted.openRouterDictationModel == "provider/transcribe")
+    }
+
+    @Test("OpenRouter transcription catalog stays hidden until authentication")
+    func openRouterCatalogRequiresAuthentication() async throws {
+        let supportDirectory = makeSupportDirectory()
+        let openRouterAuth = OpenRouterAuthManager(
+            credentialStore: OpenRouterCredentialStore(supportDirectory: supportDirectory),
+            loadData: { _ in throw URLError(.unsupportedURL) },
+            openURL: { _ in false },
+            environment: { [:] }
+        )
+        let probe = OpenRouterCatalogVisibilityProbe()
+        let catalogClient = OpenRouterModelCatalogClient { request in
+            await probe.recordRequest()
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil
+            )!
+            let data = Data("""
+            {"data":[
+              {"id":"provider/asr","name":"Provider ASR","pricing":{},"architecture":{"output_modalities":["transcription"]}}
+            ]}
+            """.utf8)
+            return (data, response)
+        }
+        let controller = MuesliController(
+            runtime: RuntimePaths(
+                repoRoot: FileManager.default.temporaryDirectory,
+                menuIcon: nil,
+                appIcon: nil,
+                bundlePath: nil
+            ),
+            configStore: ConfigStore(supportDirectory: supportDirectory),
+            openRouterAuth: openRouterAuth,
+            openRouterModelCatalogClient: catalogClient
+        )
+        controller.appState.openRouterTranscriptionModels = [
+            SummaryModelPreset(id: "stale/model", label: "Stale")
+        ]
+        controller.appState.openRouterTranscriptionCatalogState = .loaded
+
+        controller.loadOpenRouterModels(.transcription, force: true)
+        await Task.yield()
+
+        let unauthenticatedRequestCount = await probe.requestCount
+        #expect(unauthenticatedRequestCount == 0)
+        #expect(controller.appState.openRouterTranscriptionModels.isEmpty)
+        #expect(controller.appState.openRouterTranscriptionCatalogState == .idle)
+
+        try openRouterAuth.storeManualAPIKey("sk-or-v1-test")
+        controller.loadOpenRouterModels(.transcription, force: true)
+        await probe.waitForRequest()
+        for _ in 0..<100 where controller.appState.openRouterTranscriptionCatalogState != .loaded {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let authenticatedRequestCount = await probe.requestCount
+        #expect(authenticatedRequestCount == 1)
+        #expect(controller.appState.openRouterTranscriptionModels.map(\.id) == ["provider/asr"])
+        #expect(controller.appState.openRouterTranscriptionCatalogState == .loaded)
+    }
+
+    @Test("legacy OpenRouter credentials expose the same model controls as stored credentials")
+    func legacyOpenRouterCredentialShowsModels() {
+        let configDirectory = makeSupportDirectory()
+        let authDirectory = makeSupportDirectory()
+        let openRouterAuth = OpenRouterAuthManager(
+            credentialStore: OpenRouterCredentialStore(supportDirectory: authDirectory),
+            loadData: { _ in throw URLError(.unsupportedURL) },
+            openURL: { _ in false },
+            environment: { [:] }
+        )
+        let controller = MuesliController(
+            runtime: RuntimePaths(
+                repoRoot: FileManager.default.temporaryDirectory,
+                menuIcon: nil,
+                appIcon: nil,
+                bundlePath: nil
+            ),
+            configStore: ConfigStore(supportDirectory: configDirectory),
+            openRouterAuth: openRouterAuth
+        )
+        controller.updateConfig { $0.openRouterAPIKey = " sk-or-v1-legacy " }
+
+        #expect(!openRouterAuth.isAuthenticated)
+        #expect(controller.hostedDictationModelVisibility.shows(.openRouter))
+    }
+
+    @Test("an older cancelled catalog request cannot overwrite a newer reload")
+    func staleOpenRouterCatalogLoadCannotReplaceNewerModels() async throws {
+        let supportDirectory = makeSupportDirectory()
+        let openRouterAuth = OpenRouterAuthManager(
+            credentialStore: OpenRouterCredentialStore(supportDirectory: supportDirectory),
+            loadData: { _ in throw URLError(.unsupportedURL) },
+            openURL: { _ in false },
+            environment: { [:] }
+        )
+        try openRouterAuth.storeManualAPIKey("sk-or-v1-first")
+        let probe = OpenRouterCatalogRaceProbe()
+        let catalogClient = OpenRouterModelCatalogClient { request in
+            let result = await probe.load(request)
+            return (result.data, result.response)
+        }
+        let controller = MuesliController(
+            runtime: RuntimePaths(
+                repoRoot: FileManager.default.temporaryDirectory,
+                menuIcon: nil,
+                appIcon: nil,
+                bundlePath: nil
+            ),
+            configStore: ConfigStore(supportDirectory: supportDirectory),
+            openRouterAuth: openRouterAuth,
+            openRouterModelCatalogClient: catalogClient
+        )
+
+        controller.loadOpenRouterModels(.transcription, force: true)
+        await probe.waitForRequestCount(1)
+        #expect(controller.signOutOpenRouter() == nil)
+
+        try openRouterAuth.storeManualAPIKey("sk-or-v1-second")
+        controller.loadOpenRouterModels(.transcription, force: true)
+        await probe.waitForRequestCount(2)
+        await probe.complete(2, modelID: "new/model", name: "New Model")
+        for _ in 0..<100 where controller.appState.openRouterTranscriptionCatalogState != .loaded {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(controller.appState.openRouterTranscriptionModels.map(\.id) == ["new/model"])
+
+        await probe.complete(1, modelID: "stale/model", name: "Stale Model")
+        await probe.waitForReturn(1)
+        for _ in 0..<20 { await Task.yield() }
+
+        #expect(controller.appState.openRouterTranscriptionModels.map(\.id) == ["new/model"])
+        #expect(controller.appState.openRouterTranscriptionCatalogState == .loaded)
+    }
+
+    @Test("failed OpenRouter credential deletion preserves provider selections")
+    func failedOpenRouterDisconnectPreservesSelections() throws {
+        let supportDirectory = makeSupportDirectory()
+        let configStore = ConfigStore(supportDirectory: supportDirectory)
+        let credentialStore = OpenRouterCredentialStore(supportDirectory: supportDirectory)
+        try credentialStore.save(OpenRouterCredential(apiKey: "sk-or-v1-retained", userID: nil))
+        let openRouterAuth = OpenRouterAuthManager(
+            credentialStore: credentialStore,
+            loadData: { _ in throw URLError(.unsupportedURL) },
+            openURL: { _ in false },
+            environment: { [:] },
+            deleteCredential: { throw OpenRouterDisconnectTestError.expected }
+        )
+        let controller = MuesliController(
+            runtime: RuntimePaths(
+                repoRoot: FileManager.default.temporaryDirectory,
+                menuIcon: nil,
+                appIcon: nil,
+                bundlePath: nil
+            ),
+            configStore: configStore,
+            openRouterAuth: openRouterAuth
+        )
+        controller.updateConfig {
+            $0.meetingSummaryBackend = MeetingSummaryBackendOption.openRouter.backend
+            $0.postProcessorBackend = LLMBackendOption.openRouter.backend
+            $0.quilBackend = LLMBackendOption.openRouter.backend
+        }
+
+        let error = controller.signOutOpenRouter()
+
+        #expect(error == OpenRouterAuthError.credentialDeletionFailed.errorDescription)
+        #expect(openRouterAuth.isAuthenticated)
+        #expect(controller.selectedMeetingSummaryBackend == .openRouter)
+        #expect(controller.selectedPostProcessorBackend == .hosted(.openRouter))
+        #expect(controller.config.quilBackend == LLMBackendOption.openRouter.backend)
+    }
+
+    @Test("environment OpenRouter credential survives local disconnect without resetting providers")
+    func environmentOpenRouterCredentialPreservesSelections() throws {
+        let supportDirectory = makeSupportDirectory()
+        let configStore = ConfigStore(supportDirectory: supportDirectory)
+        let credentialStore = OpenRouterCredentialStore(supportDirectory: supportDirectory)
+        let openRouterAuth = OpenRouterAuthManager(
+            credentialStore: credentialStore,
+            loadData: { _ in throw URLError(.unsupportedURL) },
+            openURL: { _ in false },
+            environment: { ["OPENROUTER_API_KEY": "sk-or-v1-environment"] }
+        )
+        try openRouterAuth.storeManualAPIKey("sk-or-v1-local")
+        let controller = MuesliController(
+            runtime: RuntimePaths(
+                repoRoot: FileManager.default.temporaryDirectory,
+                menuIcon: nil,
+                appIcon: nil,
+                bundlePath: nil
+            ),
+            configStore: configStore,
+            openRouterAuth: openRouterAuth
+        )
+        controller.updateConfig {
+            $0.meetingSummaryBackend = MeetingSummaryBackendOption.openRouter.backend
+            $0.postProcessorBackend = LLMBackendOption.openRouter.backend
+            $0.quilBackend = LLMBackendOption.openRouter.backend
+        }
+
+        #expect(controller.signOutOpenRouter() == nil)
+
+        #expect(openRouterAuth.isAuthenticated)
+        #expect(openRouterAuth.hasEnvironmentCredential)
+        #expect(!openRouterAuth.hasStoredCredential)
+        #expect(controller.appState.isOpenRouterEnvironmentManaged)
+        #expect(controller.selectedMeetingSummaryBackend == .openRouter)
+        #expect(controller.selectedPostProcessorBackend == .hosted(.openRouter))
+        #expect(controller.config.quilBackend == LLMBackendOption.openRouter.backend)
     }
 
     @Test("startup repairs a persisted Gemma dictation and cleanup conflict")

@@ -80,6 +80,38 @@ struct FloatingIndicatorVisibilityTests {
         #expect(config.showFloatingIndicator == false)
     }
 
+    @Test("floating hotkey defaults off while menu bar hotkey defaults on")
+    func hotkeyVisibilityRoundTrip() throws {
+        var config = AppConfig()
+        #expect(!config.showHotkeyOnFloatingIndicator)
+        #expect(config.showHotkeyInMenuBar)
+
+        config.showHotkeyOnFloatingIndicator = true
+        config.showHotkeyInMenuBar = false
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(AppConfig.self, from: data)
+
+        #expect(decoded.showHotkeyOnFloatingIndicator)
+        #expect(!decoded.showHotkeyInMenuBar)
+    }
+
+    @Test("missing hotkey visibility preferences use fresh-install defaults")
+    func hotkeyVisibilityMissingKeysUseDefaults() throws {
+        let config = try JSONDecoder().decode(AppConfig.self, from: Data("{}".utf8))
+
+        #expect(!config.showHotkeyOnFloatingIndicator)
+        #expect(config.showHotkeyInMenuBar)
+    }
+
+    @Test("hotkey visibility controls decode from snake_case JSON")
+    func hotkeyVisibilitySnakeCaseDecode() throws {
+        let json = #"{"show_hotkey_on_floating_indicator": false, "show_hotkey_in_menu_bar": false}"#
+        let config = try JSONDecoder().decode(AppConfig.self, from: Data(json.utf8))
+
+        #expect(!config.showHotkeyOnFloatingIndicator)
+        #expect(!config.showHotkeyInMenuBar)
+    }
+
     @Test("meeting transcript hover defaults on and persists")
     func meetingTranscriptHoverRoundTrip() throws {
         var config = AppConfig()
@@ -115,11 +147,27 @@ struct FloatingIndicatorVisibilityTests {
     func postProcessorRoundTrip() throws {
         var config = AppConfig()
         config.enablePostProcessor = true
-        config.activePostProcessorId = PostProcessorOption.finetunedV2.id
+        config.activePostProcessorId = PostProcessorOption.qwen35_0_8b.id
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(AppConfig.self, from: data)
         #expect(decoded.enablePostProcessor == true)
-        #expect(decoded.activePostProcessorId == PostProcessorOption.finetunedV2.id)
+        #expect(decoded.activePostProcessorId == PostProcessorOption.qwen35_0_8b.id)
+    }
+
+    @Test("cached legacy post processor persists through JSON round-trip")
+    func cachedLegacyPostProcessorRoundTrip() throws {
+        let json = #"{"active_post_processor_id":"qwen3-postproc-v2"}"#
+        let decoded = try JSONDecoder().decode(AppConfig.self, from: json.data(using: .utf8)!)
+        #expect(decoded.activePostProcessorId == PostProcessorOption.legacyV2.id)
+
+        let data = try JSONEncoder().encode(decoded)
+        let reloaded = try JSONDecoder().decode(AppConfig.self, from: data)
+        #expect(reloaded.activePostProcessorId == PostProcessorOption.legacyV2.id)
+        #expect(PostProcessorOption.runtimeOption(
+            id: reloaded.activePostProcessorId,
+            downloadedIDs: [PostProcessorOption.legacyV2.id],
+            hasDevOverride: false
+        ) == .legacyV2)
     }
 
     @Test("post processor decodes from snake_case JSON")
@@ -191,6 +239,103 @@ struct IndicatorFrameSizeTests {
         )
     }
 
+    @Test("custom idle hover keeps the collapsed pill's left edge")
+    @MainActor
+    func customIdleHoverKeepsLeftEdge() {
+        let visibleFrame = NSRect(x: 100, y: 50, width: 1200, height: 800)
+        let positionCenter = CGPoint(x: 422, y: 450)
+        let collapsed = FloatingIndicatorController.customIdleFrame(
+            positionCenter: positionCenter,
+            size: NSSize(width: 44, height: 28),
+            in: visibleFrame
+        )
+        let expanded = FloatingIndicatorController.customIdleFrame(
+            positionCenter: positionCenter,
+            size: NSSize(width: 220, height: 36),
+            in: visibleFrame
+        )
+
+        #expect(collapsed.minX == 400)
+        #expect(expanded.minX == collapsed.minX)
+        #expect(expanded.midY == collapsed.midY)
+    }
+
+    @Test("custom indicator uses the display containing its saved position")
+    @MainActor
+    func customIndicatorUsesSecondaryDisplay() {
+        let primary = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let secondary = NSRect(x: -1920, y: -180, width: 1920, height: 1080)
+        let savedPosition = CGPoint(x: -960, y: 360)
+
+        let selectedFrame = FloatingIndicatorController.visibleFrameForCustomIndicator(
+            customPositionCenter: nil,
+            indicatorFrame: nil,
+            savedPositionCenter: savedPosition,
+            availableVisibleFrames: [primary, secondary],
+            fallback: primary
+        )
+        let expanded = FloatingIndicatorController.customIdleFrame(
+            positionCenter: savedPosition,
+            size: NSSize(width: 220, height: 36),
+            in: selectedFrame
+        )
+
+        #expect(selectedFrame == secondary)
+        #expect(secondary.contains(expanded))
+        #expect(expanded.minX == savedPosition.x - 22)
+    }
+
+    @Test("idle hover width leaves room for the complete hotkey instruction")
+    @MainActor
+    func idleHoverWidthFitsInstruction() {
+        let standard = FloatingIndicatorController.idleHoverPillSize(
+            hotkeyLabel: "Left Option",
+            screenWidth: 1200
+        )
+        let combination = FloatingIndicatorController.idleHoverPillSize(
+            hotkeyLabel: "Control Option Shift R",
+            screenWidth: 1200
+        )
+
+        #expect(standard.width >= 220)
+        #expect(combination.width > standard.width)
+        #expect(combination.width <= 1168)
+        #expect(standard.height == 36)
+    }
+
+    @Test("expanded idle drag saves the equivalent collapsed center")
+    @MainActor
+    func expandedIdleDragSavesCollapsedCenter() {
+        let expanded = NSRect(x: 515, y: 240, width: 220, height: 36)
+        #expect(
+            FloatingIndicatorController.positionCenter(
+                for: expanded,
+                preservesCollapsedLeftEdge: true
+            ) ==
+            CGPoint(x: 537, y: 258)
+        )
+    }
+
+    @Test("centered loading and warning drags save their true midpoint")
+    @MainActor
+    func centeredTransientIdleDragsSaveMidpoint() {
+        let loading = NSRect(x: 515, y: 240, width: 180, height: 36)
+        let warning = NSRect(x: 280, y: 180, width: 312, height: 36)
+
+        #expect(
+            FloatingIndicatorController.positionCenter(
+                for: loading,
+                preservesCollapsedLeftEdge: false
+            ) == CGPoint(x: 605, y: 258)
+        )
+        #expect(
+            FloatingIndicatorController.positionCenter(
+                for: warning,
+                preservesCollapsedLeftEdge: false
+            ) == CGPoint(x: 436, y: 198)
+        )
+    }
+
     @Test("transcribing pill widens for live CUA status labels")
     @MainActor
     func transcribingPillWidensForStatusText() {
@@ -237,6 +382,37 @@ struct IndicatorFrameSizeTests {
         #expect(short.height >= 44)
         #expect(long.width <= 372)
         #expect(long.height > short.height)
+    }
+
+    @Test("Quill instruction pill reserves room for its progress spinner")
+    @MainActor
+    func quillInstructionPillIncludesProgressChrome() {
+        let transcript = "Rewrite this as a concise professional email"
+        let computerUseSize = FloatingIndicatorController.computerUseTranscriptPillSizeForTesting(
+            transcript: transcript,
+            screenWidth: 1200
+        )
+        let quillSize = FloatingIndicatorController.quillInstructionPillSizeForTesting(
+            transcript: transcript,
+            screenWidth: 1200
+        )
+
+        #expect(quillSize.width > computerUseSize.width)
+        #expect(quillSize.height == computerUseSize.height)
+    }
+
+    @Test("Quill instruction pill keeps its final wrapped words visible")
+    @MainActor
+    func quillInstructionPillFitsRenderedTextField() {
+        // This ends at an AppKit word-wrap boundary where NSString boundingRect
+        // reports seven lines but NSTextField renders eight.
+        let transcript = "Rewrite this as a concise professional email while preserving every detail and ensuring the final words remain visible in the floating pill please make the tone warm but direct and retain all"
+        let heights = FloatingIndicatorController.quillInstructionTextHeightsForTesting(
+            transcript: transcript,
+            screenWidth: 300
+        )
+
+        #expect(heights.allocated >= heights.required)
     }
 }
 
