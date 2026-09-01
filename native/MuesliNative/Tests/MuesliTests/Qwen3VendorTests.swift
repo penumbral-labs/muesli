@@ -29,8 +29,14 @@ struct Qwen3VendorTests {
 
     @Test("streaming config clamps duration and retains the mel frame floor")
     func streamingLimits() {
-        let config = MuesliQwen3StreamingConfig(maxAudioSeconds: 120)
-        #expect(config.maxAudioSeconds == MuesliQwen3AsrConfig.maxAudioSeconds)
+        let minimumAudioSeconds = Double(MuesliQwen3StreamingConfig.finalAudioSampleFloor) / 16_000
+        let oversized = MuesliQwen3StreamingConfig(maxAudioSeconds: 120)
+        let negative = MuesliQwen3StreamingConfig(maxAudioSeconds: -1)
+        let tooSmall = MuesliQwen3StreamingConfig(maxAudioSeconds: minimumAudioSeconds / 2)
+
+        #expect(oversized.maxAudioSeconds == MuesliQwen3AsrConfig.maxAudioSeconds)
+        #expect(negative.maxAudioSeconds == minimumAudioSeconds)
+        #expect(tooSmall.maxAudioSeconds == minimumAudioSeconds)
         #expect(MuesliQwen3StreamingConfig.finalAudioSampleFloor == 160)
     }
 

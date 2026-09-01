@@ -32,7 +32,11 @@ public struct MuesliQwen3StreamingConfig: Sendable {
     ) {
         self.minAudioSeconds = minAudioSeconds
         self.chunkSeconds = chunkSeconds
-        self.maxAudioSeconds = min(maxAudioSeconds, MuesliQwen3AsrConfig.maxAudioSeconds)
+        let minimumAudioSeconds = Double(Self.finalAudioSampleFloor) / 16_000
+        self.maxAudioSeconds = min(
+            max(maxAudioSeconds, minimumAudioSeconds),
+            MuesliQwen3AsrConfig.maxAudioSeconds
+        )
         self.language = language
     }
 
