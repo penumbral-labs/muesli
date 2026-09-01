@@ -91,6 +91,71 @@ struct AppleSpeechAnalyzerBackendTests {
         #expect(await counter.value == 1)
     }
 
+    @Test("cancelling one preparation waiter preserves shared work for the other")
+    func cancellingOnePreparationWaiterPreservesSharedWork() async throws {
+        let cache = AppleSpeechPreparationTaskCache()
+        let operation = AppleSpeechControllablePreparation()
+
+        let first = Task {
+            try await cache.value(for: "en-US") {
+                try await operation.run()
+            }
+        }
+        await operation.waitUntilStarted()
+        let second = Task {
+            try await cache.value(for: "en-US") {
+                Issue.record("Coalesced waiter unexpectedly started a second operation")
+                return Locale(identifier: "en-US")
+            }
+        }
+        await waitForWaiterCount(2, in: cache, localeIdentifier: "en-US")
+
+        first.cancel()
+        await #expect(throws: CancellationError.self) {
+            _ = try await first.value
+        }
+        #expect(!(await operation.wasCancelled))
+
+        await operation.succeed()
+        let locale = try await second.value
+        #expect(locale.identifier(.bcp47) == "en-US")
+        #expect(await operation.startCount == 1)
+    }
+
+    @Test("retry waits for cancelled preparation to drain before starting")
+    func retryWaitsForCancelledPreparationToDrain() async throws {
+        let cache = AppleSpeechPreparationTaskCache()
+        let operation = AppleSpeechControllablePreparation()
+        let retryCounter = AppleSpeechTestCounter()
+
+        let waiter = Task {
+            try await cache.value(for: "en-US") {
+                try await operation.run()
+            }
+        }
+        await operation.waitUntilStarted()
+        waiter.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await waiter.value
+        }
+        await operation.waitUntilCancelled()
+
+        let retry = Task {
+            try await cache.value(for: "en-US") {
+                await retryCounter.increment()
+                return Locale(identifier: "en-US")
+            }
+        }
+        await waitForWaiterCount(1, in: cache, localeIdentifier: "en-US")
+        #expect(await retryCounter.value == 0)
+
+        await operation.finishCancellation()
+        let locale = try await retry.value
+        #expect(locale.identifier(.bcp47) == "en-US")
+        #expect(await retryCounter.value == 1)
+    }
+
     @Test("failed preparation is removed so a later attempt can retry")
     func failedPreparationCanRetry() async throws {
         let cache = AppleSpeechPreparationTaskCache()
@@ -135,14 +200,30 @@ struct AppleSpeechAnalyzerBackendTests {
         )
     }
 
-    @Test("initial reservation cleanup keeps only the selected locale")
-    func initialReservationCleanupKeepsSelectedLocale() {
-        let releases = AppleSpeechInitialReservationPolicy.localesToRelease(
+    @Test("reservation reconciliation keeps only the selected locale")
+    func reservationReconciliationKeepsSelectedLocale() {
+        let releases = AppleSpeechReservationPolicy.localesToRelease(
             [Locale(identifier: "en-US"), Locale(identifier: "fr-FR"), Locale(identifier: "de-DE")],
             keeping: Locale(identifier: "fr-FR")
         )
 
         #expect(releases.map { $0.identifier(.bcp47) } == ["en-US", "de-DE"])
+    }
+
+    private func waitForWaiterCount(
+        _ count: Int,
+        in cache: AppleSpeechPreparationTaskCache,
+        localeIdentifier: String
+    ) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while await cache.waiterCount(for: localeIdentifier) != count {
+            guard clock.now < deadline else {
+                Issue.record("Timed out waiting for \(count) preparation waiters")
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
     }
 
     @Test("backend is system managed and only catalogued when supported")
@@ -195,6 +276,97 @@ private actor AppleSpeechTestCounter {
 
     func increment() {
         value += 1
+    }
+}
+
+private actor AppleSpeechControllablePreparation {
+    private(set) var startCount = 0
+    private(set) var wasCancelled = false
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var completion: CheckedContinuation<Locale, Error>?
+    private var pendingResult: Result<Locale, Error>?
+    private var cancellationCompletion: CheckedContinuation<Void, Never>?
+    private var cancellationMayFinish = false
+
+    func run() async throws -> Locale {
+        startCount += 1
+        let started = startedWaiters
+        startedWaiters.removeAll()
+        started.forEach { $0.resume() }
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if let pendingResult {
+                    self.pendingResult = nil
+                    continuation.resume(with: pendingResult)
+                } else {
+                    completion = continuation
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.noteCancellation()
+                await self.waitForCancellationCompletion()
+                await self.cancelOperation()
+            }
+        }
+    }
+
+    func waitUntilStarted() async {
+        if startCount > 0 { return }
+        await withCheckedContinuation { continuation in
+            startedWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilCancelled() async {
+        if wasCancelled { return }
+        await withCheckedContinuation { continuation in
+            cancellationWaiters.append(continuation)
+        }
+    }
+
+    func succeed() {
+        complete(with: .success(Locale(identifier: "en-US")))
+    }
+
+    func finishCancellation() {
+        cancellationMayFinish = true
+        cancellationCompletion?.resume()
+        cancellationCompletion = nil
+    }
+
+    private func noteCancellation() {
+        guard !wasCancelled else { return }
+        wasCancelled = true
+        let waiters = cancellationWaiters
+        cancellationWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func waitForCancellationCompletion() async {
+        if cancellationMayFinish { return }
+        await withCheckedContinuation { continuation in
+            if cancellationMayFinish {
+                continuation.resume()
+            } else {
+                cancellationCompletion = continuation
+            }
+        }
+    }
+
+    private func cancelOperation() {
+        complete(with: .failure(CancellationError()))
+    }
+
+    private func complete(with result: Result<Locale, Error>) {
+        if let completion {
+            self.completion = nil
+            completion.resume(with: result)
+        } else {
+            pendingResult = result
+        }
     }
 }
 

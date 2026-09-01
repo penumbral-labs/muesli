@@ -190,6 +190,9 @@ final class MeetingSession {
     private let systemAudioWatchdog = MeetingSystemAudioWatchdog()
     private var systemAudioWatchdogTimer: DispatchSourceTimer?
     private let chunkRotationQueue = DispatchQueue(label: "MuesliNative.MeetingSession.chunkRotation")
+    /// Keeps HAL mute reads and recovery dispatches out of the latency-sensitive
+    /// audio processing queue while preserving health snapshot ordering.
+    private let micHealthQueue = DispatchQueue(label: "MuesliNative.MeetingSession.micHealth")
     private let pausedDisplayLock = OSAllocatedUnfairLock(initialState: false)
     private var chunkTimingTracker = MeetingChunkTimingTracker()
     private var systemChunkTimingTracker = MeetingChunkTimingTracker()
@@ -298,8 +301,10 @@ final class MeetingSession {
                 selectedInputResolved: snapshot.route?.selectedInputDeviceResolved
             )
         }
-        meetingMicRecorder.onHandoffOutcome = { [weak micRecoveryCoordinator] outcome in
-            micRecoveryCoordinator?.noteHandoffOutcome(outcome)
+        meetingMicRecorder.onHandoffOutcome = { [weak self] outcome in
+            self?.micHealthQueue.async { [weak self] in
+                self?.micRecoveryCoordinator.noteHandoffOutcome(outcome)
+            }
         }
         systemAudioWatchdog.captureHeartbeat = { [weak systemAudioRecorder] in
             systemAudioRecorder?.captureHeartbeat ?? 0
@@ -320,8 +325,10 @@ final class MeetingSession {
         systemAudioWatchdog.recoveryRequest = { [weak systemAudioRecorder] reason in
             systemAudioRecorder?.rebuildForHealthRecovery(reason: reason) ?? false
         }
-        systemAudioWatchdog.onMicBlindnessDegradation = { [weak micRecoveryCoordinator] reason in
-            micRecoveryCoordinator?.noteExternalDegradation(reason: reason)
+        systemAudioWatchdog.onMicBlindnessDegradation = { [weak self] reason in
+            self?.micHealthQueue.async { [weak self] in
+                self?.micRecoveryCoordinator.noteExternalDegradation(reason: reason)
+            }
         }
         systemAudioWatchdog.onEpisodeEvent = { [weak self] event in
             self?.onSystemAudioHealthEpisode?(event)
@@ -443,7 +450,6 @@ final class MeetingSession {
             systemVadController?.stop()
             systemVadController = nil
             meetingMicRecorder.onRawPCMSamples = nil
-            systemAudioRecorder.onPCMSamples = nil
             retainedRecordingWriter?.cancel()
             retainedRecordingWriter = nil
             rawMicChunkRecorder?.cancel()
@@ -652,9 +658,12 @@ final class MeetingSession {
             systemChunkRecorder = nil
             return (rawRecorder, systemRecorder)
         }
-        // Same contract as stop(): the queue barrier above drains pending
-        // sample callbacks; only then is episode state final.
-        micRecoveryCoordinator.finishMeeting()
+        // Stop the tap watchdog from enqueueing new mic-health work, then drain
+        // health work enqueued by sample callbacks before closing the coordinator.
+        stopSystemAudioWatchdogTimer()
+        micHealthQueue.sync {
+            micRecoveryCoordinator.finishMeeting()
+        }
         stopSystemAudioWatchdog()
         stopPartialSessions()
         vadController?.stop()
@@ -668,7 +677,6 @@ final class MeetingSession {
         systemRecorder?.cancel()
         meetingMicRecorder.onRawPCMSamples = nil
         meetingMicRecorder.cancel()
-        systemAudioRecorder.onPCMSamples = nil
         if let url = systemAudioRecorder.stop() {
             try? FileManager.default.removeItem(at: url)
         }
@@ -694,7 +702,6 @@ final class MeetingSession {
         systemVadController?.stop()
         systemVadController = nil
         meetingMicRecorder.onRawPCMSamples = nil
-        systemAudioRecorder.onPCMSamples = nil
         let (meetingStart, lastChunkTiming, lastRawMicURL, lastSystemChunkTiming, lastSystemChunkURL) = chunkRotationQueue.sync { () -> (Date, MeetingChunkTimingSnapshot?, URL?, MeetingChunkTimingSnapshot?, URL?) in
             isRecording = false
             setPausedStateOnQueue(false)
@@ -713,12 +720,15 @@ final class MeetingSession {
         }
         // The chunkRotationQueue barrier above guarantees every sample callback
         // enqueued before teardown has been processed and that later callbacks
-        // bail on isRecording == false. Only now is the coordinator's episode
-        // state final; close any open degradation episode as unrecovered.
-        micRecoveryCoordinator.finishMeeting()
-        // Cancel the watchdog before stopping the recorder so no late tick can
-        // request a rebuild mid-teardown, then terminalize any open tap
-        // episode.
+        // bail on isRecording == false. Stop the watchdog from enqueueing more
+        // mic-health work, drain that queue, then close any open episode.
+        stopSystemAudioWatchdogTimer()
+        micHealthQueue.sync {
+            micRecoveryCoordinator.finishMeeting()
+        }
+        // Terminalize the watchdog before stopping the recorder. Cancelling its
+        // timer prevents future ticks; a tick already running is made harmless
+        // by the watchdog's finished state.
         stopSystemAudioWatchdog()
         let rawStreamingMicURL = meetingMicRecorder.stop()
         let retainedRecordingURL = retainedRecordingWriter?.stop()
@@ -1157,8 +1167,9 @@ final class MeetingSession {
         timer.resume()
     }
 
-    /// Cancel the tick timer (no late rebuilds mid-teardown) and terminalize
-    /// any open tap episode. Safe to call from stop() and discard().
+    /// Cancel future timer ticks and terminalize any open tap episode. A tick
+    /// already running is rejected after the watchdog enters its finished state.
+    /// Safe to call from stop() and discard().
     private func stopSystemAudioWatchdog() {
         stopSystemAudioWatchdogTimer()
         systemAudioWatchdog.finishMeeting()
@@ -1217,7 +1228,9 @@ final class MeetingSession {
 
             let healthSnapshot = self.micHealthTracker.noteRawMicSamples(rawSamples)
             self.onMicHealthChanged?(healthSnapshot)
-            self.micRecoveryCoordinator.process(healthSnapshot)
+            self.micHealthQueue.async { [weak self] in
+                self?.micRecoveryCoordinator.process(healthSnapshot)
+            }
             self.retainedRecordingWriter?.appendMic(rawSamples)
 
             let floatSamples = rawSamples.map { Float($0) / 32767.0 }
@@ -1243,7 +1256,9 @@ final class MeetingSession {
 
             let healthSnapshot = self.micHealthTracker.noteSystemSamples(samples)
             self.onMicHealthChanged?(healthSnapshot)
-            self.micRecoveryCoordinator.process(healthSnapshot)
+            self.micHealthQueue.async { [weak self] in
+                self?.micRecoveryCoordinator.process(healthSnapshot)
+            }
             self.retainedRecordingWriter?.appendSystem(samples)
             self.systemChunkRecorder?.append(samples)
             self.systemChunkTimingTracker.append(sampleCount: samples.count)

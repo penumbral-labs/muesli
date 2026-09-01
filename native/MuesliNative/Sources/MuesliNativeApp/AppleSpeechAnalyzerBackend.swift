@@ -59,7 +59,7 @@ struct AppleSpeechLanguageOption: Identifiable, Hashable, Sendable {
     }
 }
 
-enum AppleSpeechInitialReservationPolicy {
+enum AppleSpeechReservationPolicy {
     static func localesToRelease(_ reservations: [Locale], keeping locale: Locale) -> [Locale] {
         let keptIdentifier = locale.identifier(.bcp47)
         return reservations.filter { $0.identifier(.bcp47) != keptIdentifier }
@@ -84,26 +84,135 @@ struct AppleSpeechLocaleResolver: Sendable {
 }
 
 actor AppleSpeechPreparationTaskCache {
-    private var tasks: [String: Task<Locale, Error>] = [:]
+    private struct PendingWaiter {
+        let continuation: CheckedContinuation<Locale, Error>
+        let operation: @Sendable () async throws -> Locale
+    }
+
+    private struct Entry {
+        let id: UUID
+        let task: Task<Locale, Error>
+        var waiters: [UUID: CheckedContinuation<Locale, Error>]
+        var queuedWaiters: [UUID: PendingWaiter] = [:]
+        var isDraining = false
+    }
+
+    private var entries: [String: Entry] = [:]
 
     func value(
         for localeIdentifier: String,
         operation: @escaping @Sendable () async throws -> Locale
     ) async throws -> Locale {
-        if let task = tasks[localeIdentifier] {
-            return try await task.value
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                addWaiter(
+                    continuation,
+                    id: waiterID,
+                    localeIdentifier: localeIdentifier,
+                    operation: operation
+                )
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id: waiterID, localeIdentifier: localeIdentifier)
+            }
+        }
+    }
+
+    private func addWaiter(
+        _ continuation: CheckedContinuation<Locale, Error>,
+        id waiterID: UUID,
+        localeIdentifier: String,
+        operation: @escaping @Sendable () async throws -> Locale
+    ) {
+        guard !Task.isCancelled else {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        if var entry = entries[localeIdentifier] {
+            if entry.isDraining {
+                entry.queuedWaiters[waiterID] = PendingWaiter(
+                    continuation: continuation,
+                    operation: operation
+                )
+            } else {
+                entry.waiters[waiterID] = continuation
+            }
+            entries[localeIdentifier] = entry
+            return
         }
 
+        startEntry(
+            localeIdentifier: localeIdentifier,
+            waiters: [waiterID: PendingWaiter(continuation: continuation, operation: operation)]
+        )
+    }
+
+    private func startEntry(
+        localeIdentifier: String,
+        waiters: [UUID: PendingWaiter]
+    ) {
+        guard let operation = waiters.values.first?.operation else { return }
+        let entryID = UUID()
         let task = Task { try await operation() }
-        tasks[localeIdentifier] = task
-        do {
-            let locale = try await task.value
-            tasks.removeValue(forKey: localeIdentifier)
-            return locale
-        } catch {
-            tasks.removeValue(forKey: localeIdentifier)
-            throw error
+        entries[localeIdentifier] = Entry(
+            id: entryID,
+            task: task,
+            waiters: waiters.mapValues(\.continuation)
+        )
+        Task { [weak self] in
+            let result = await task.result
+            await self?.finish(
+                result,
+                entryID: entryID,
+                localeIdentifier: localeIdentifier
+            )
         }
+    }
+
+    private func cancelWaiter(id waiterID: UUID, localeIdentifier: String) {
+        guard var entry = entries[localeIdentifier] else { return }
+
+        if let continuation = entry.waiters.removeValue(forKey: waiterID) {
+            continuation.resume(throwing: CancellationError())
+            if entry.waiters.isEmpty {
+                entry.isDraining = true
+                entries[localeIdentifier] = entry
+                entry.task.cancel()
+            } else {
+                entries[localeIdentifier] = entry
+            }
+            return
+        }
+
+        if let waiter = entry.queuedWaiters.removeValue(forKey: waiterID) {
+            entries[localeIdentifier] = entry
+            waiter.continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    private func finish(
+        _ result: Result<Locale, Error>,
+        entryID: UUID,
+        localeIdentifier: String
+    ) {
+        guard let entry = entries[localeIdentifier], entry.id == entryID else { return }
+        if entry.isDraining {
+            entries.removeValue(forKey: localeIdentifier)
+            startEntry(localeIdentifier: localeIdentifier, waiters: entry.queuedWaiters)
+            return
+        }
+
+        entries.removeValue(forKey: localeIdentifier)
+        for continuation in entry.waiters.values {
+            continuation.resume(with: result)
+        }
+    }
+
+    func waiterCount(for localeIdentifier: String) -> Int {
+        guard let entry = entries[localeIdentifier] else { return 0 }
+        return entry.waiters.count + entry.queuedWaiters.count
     }
 }
 
@@ -162,8 +271,6 @@ actor AppleSpeechAnalyzerTranscriber {
     private let localeResolver: AppleSpeechLocaleResolver
     private let preparationTasks = AppleSpeechPreparationTaskCache()
     private var preparedLocale: Locale?
-    private var initialReservationReconciliationTask: Task<Void, Never>?
-    private var didReconcileInitialReservations = false
 
     init(localeResolver: AppleSpeechLocaleResolver = .live) {
         self.localeResolver = localeResolver
@@ -210,7 +317,7 @@ actor AppleSpeechAnalyzerTranscriber {
             message: "Preparing Apple Speech..."
         ))
 
-        await reconcileInitialReservations(keeping: locale)
+        await reconcileReservations(keeping: locale)
         do {
             _ = try await AssetInventory.reserve(locale: locale)
         } catch {
@@ -220,31 +327,38 @@ actor AppleSpeechAnalyzerTranscriber {
             }
             throw error
         }
-        try Task.checkCancellation()
 
-        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-            let progressBox = AppleSpeechProgressBox(request.progress)
-            let progressTask = Task { [callbacks] in
-                while !Task.isCancelled && !progressBox.progress.isFinished {
-                    let fraction = min(max(progressBox.progress.fractionCompleted, 0), 1)
-                    let mappedFraction = 0.1 + (fraction * 0.8)
-                    callbacks.progress?(mappedFraction, "Downloading Apple Speech...")
-                    callbacks.progressSnapshot?(downloadSnapshot(fraction: fraction))
-                    try? await Task.sleep(for: .milliseconds(200))
+        do {
+            try Task.checkCancellation()
+
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                let progressBox = AppleSpeechProgressBox(request.progress)
+                let progressTask = Task { [callbacks] in
+                    while !Task.isCancelled && !progressBox.progress.isFinished {
+                        let fraction = min(max(progressBox.progress.fractionCompleted, 0), 1)
+                        let mappedFraction = 0.1 + (fraction * 0.8)
+                        callbacks.progress?(mappedFraction, "Downloading Apple Speech...")
+                        callbacks.progressSnapshot?(downloadSnapshot(fraction: fraction))
+                        try? await Task.sleep(for: .milliseconds(200))
+                    }
+                }
+                defer { progressTask.cancel() }
+
+                try await withTaskCancellationHandler {
+                    try await request.downloadAndInstall()
+                } onCancel: {
+                    progressBox.progress.cancel()
                 }
             }
-            defer { progressTask.cancel() }
 
-            try await withTaskCancellationHandler {
-                try await request.downloadAndInstall()
-            } onCancel: {
-                progressBox.progress.cancel()
+            try Task.checkCancellation()
+            guard await AssetInventory.status(forModules: [transcriber]) == .installed else {
+                throw AppleSpeechAnalyzerError.assetUnavailable(locale.identifier(.bcp47))
             }
-        }
-
-        try Task.checkCancellation()
-        guard await AssetInventory.status(forModules: [transcriber]) == .installed else {
-            throw AppleSpeechAnalyzerError.assetUnavailable(locale.identifier(.bcp47))
+        } catch {
+            _ = await AssetInventory.release(reservedLocale: locale)
+            if preparedLocale == locale { preparedLocale = nil }
+            throw error
         }
 
         preparedLocale = locale
@@ -252,26 +366,21 @@ actor AppleSpeechAnalyzerTranscriber {
         return locale
     }
 
-    private func reconcileInitialReservations(keeping locale: Locale) async {
-        if didReconcileInitialReservations { return }
-        if let task = initialReservationReconciliationTask {
-            await task.value
-            return
+    private func reconcileReservations(keeping locale: Locale) async {
+        let reservations = await AssetInventory.reservedLocales
+        let localesToRelease = AppleSpeechReservationPolicy.localesToRelease(
+            reservations,
+            keeping: locale
+        )
+        for reservedLocale in localesToRelease {
+            _ = await AssetInventory.release(reservedLocale: reservedLocale)
         }
-
-        let task = Task {
-            let reservations = await AssetInventory.reservedLocales
-            for reservedLocale in AppleSpeechInitialReservationPolicy.localesToRelease(
-                reservations,
-                keeping: locale
-            ) {
-                _ = await AssetInventory.release(reservedLocale: reservedLocale)
-            }
+        if let preparedLocale,
+           localesToRelease.contains(where: {
+               $0.identifier(.bcp47) == preparedLocale.identifier(.bcp47)
+           }) {
+            self.preparedLocale = nil
         }
-        initialReservationReconciliationTask = task
-        await task.value
-        didReconcileInitialReservations = true
-        initialReservationReconciliationTask = nil
     }
 
     func releaseReservations() async {
@@ -291,25 +400,34 @@ actor AppleSpeechAnalyzerTranscriber {
         )
         let audioFile = try AVAudioFile(forReading: wavURL)
 
-        async let collected = collectResults(from: transcriber)
-        if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
-            try await analyzer.finalizeAndFinish(through: lastSample)
-        } else {
+        let collectionTask = Task { try await collectResults(from: transcriber) }
+        do {
+            if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
+                try await analyzer.finalizeAndFinish(through: lastSample)
+            } else {
+                await analyzer.cancelAndFinishNow()
+            }
+
+            let result = try await collectionTask.value
+            guard !result.text.isEmpty else {
+                throw AppleSpeechAnalyzerError.emptyTranscript
+            }
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
+            let elapsedText = String(format: "%.3f", elapsed)
+            fputs(
+                "[muesli-native] Apple Speech completed \(result.text.count) characters in \(elapsedText)s (locale \(locale.identifier(.bcp47)))\n",
+                stderr
+            )
+            return result
+        } catch {
+            // analyzeSequence/finalize cancellation and failures must terminate
+            // the analyzer's result stream before this transcription retires.
             await analyzer.cancelAndFinishNow()
+            collectionTask.cancel()
+            _ = await collectionTask.result
+            throw error
         }
-
-        let result = try await collected
-        guard !result.text.isEmpty else {
-            throw AppleSpeechAnalyzerError.emptyTranscript
-        }
-
-        let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
-        let elapsedText = String(format: "%.3f", elapsed)
-        fputs(
-            "[muesli-native] Apple Speech completed \(result.text.count) characters in \(elapsedText)s (locale \(locale.identifier(.bcp47)))\n",
-            stderr
-        )
-        return result
     }
 
     private func makeTranscriber(locale: Locale) -> SpeechTranscriber {

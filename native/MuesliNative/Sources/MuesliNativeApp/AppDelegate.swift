@@ -9,6 +9,8 @@ import MuesliCore
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: MuesliController?
     private var terminationTask: Task<Void, Never>?
+    private var terminationDeadlineTask: Task<Void, Never>?
+    private var terminationRequestID: UUID?
     private(set) var updaterController: SPUStandardUpdaterController?
     private let sparkleUpdateDelegate = SparkleUpdateDelegate()
 
@@ -76,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if terminationTask != nil {
+        if terminationRequestID != nil {
             return .terminateLater
         }
         if controller?.shouldTerminateApplication() == false {
@@ -84,12 +86,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard let controller else { return .terminateNow }
 
+        let requestID = UUID()
+        terminationRequestID = requestID
         terminationTask = Task { @MainActor [weak self] in
             await controller.shutdown()
-            self?.terminationTask = nil
-            sender.reply(toApplicationShouldTerminate: true)
+            self?.completeTermination(requestID: requestID, application: sender)
+        }
+        terminationDeadlineTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            self?.completeTermination(requestID: requestID, application: sender)
         }
         return .terminateLater
+    }
+
+    private func completeTermination(requestID: UUID, application: NSApplication) {
+        guard terminationRequestID == requestID else { return }
+        terminationRequestID = nil
+        terminationTask?.cancel()
+        terminationDeadlineTask?.cancel()
+        terminationTask = nil
+        terminationDeadlineTask = nil
+        application.reply(toApplicationShouldTerminate: true)
     }
 
     private static var hasConfiguredSparkleFeed: Bool {

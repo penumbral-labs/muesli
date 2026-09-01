@@ -119,7 +119,7 @@
   <p class="updated">Last updated: August 28, 2026</p>
 
   <div class="highlight">
-    <p><strong>Muesli is local-first.</strong> By default, speech-to-text processing runs on your Mac and audio never leaves your device. If you explicitly select an optional hosted dictation provider, Muesli sends that dictation audio to OpenAI or through OpenRouter to your selected upstream model for transcription. We do not operate servers that receive, store, or process your data.</p>
+    <p><strong>Muesli is local-first.</strong> By default, speech-to-text processing runs on your Mac and audio never leaves your device. If you explicitly select an optional hosted dictation provider, Muesli sends that dictation audio to OpenAI or through OpenRouter to your selected upstream model for transcription. Optional iCloud sync stores text records and sync metadata in your private iCloud database, but never uploads audio. We do not operate servers that receive, store, or process your data.</p>
   </div>
 
   <h2>What Muesli Does</h2>
@@ -131,12 +131,14 @@
     <li><strong>Audio recordings</strong> &mdash; microphone and system audio captured during dictation and meetings; dictation audio is sent to a hosted service only while you have explicitly selected OpenAI or OpenRouter as the dictation provider</li>
     <li><strong>Transcripts and meeting notes</strong> &mdash; stored in a local SQLite database</li>
     <li><strong>Configuration and preferences</strong> &mdash; stored in a local JSON file</li>
+    <li><strong>Meeting participants</strong> &mdash; organizer and attendee names and email addresses read from EventKit, plus people you optionally select or create through Contacts, are stored with the meeting in the local database. These participant records remain on your Mac and are not included in iCloud sync.</li>
     <li><strong>Speech-to-text models</strong> &mdash; downloaded once from public model repositories (HuggingFace) and cached locally</li>
   </ul>
 
   <h2>Optional Cloud Services</h2>
   <p>Muesli offers optional integrations that connect to external services. These are opt-in and require explicit user action:</p>
   <ul>
+    <li><strong>Private iCloud sync (Apple CloudKit)</strong> &mdash; if you turn on iCloud sync, Muesli stores eligible dictation and meeting text records in your private iCloud database so they can sync between your devices signed in to the same iCloud account. These records can include titles, transcripts, speaker transcripts, summaries, manual notes, record type and source, meeting status, engine identifier, timestamps, duration, word count, deletion status, and follow-up relationships. CloudKit also receives sync metadata such as record identifiers and linked-device records containing a random device identifier, device name, platform, app version, and last-seen time. Muesli keeps additional record-version, change-tracking, and account-scope metadata locally. Audio recordings are not uploaded to iCloud and remain local to the device where they were captured. Cloud data is stored by Apple in your private CloudKit database and is governed by <a href="https://www.apple.com/legal/privacy/">Apple's privacy policy</a>.</li>
     <li><strong>OpenAI dictation (OpenAI API)</strong> &mdash; if you select OpenAI as your dictation provider and add your own API key, microphone audio is streamed directly to OpenAI's Realtime transcription API. OpenAI's API data controls explain how API data is used, retained, and excluded from model training by default; see <a href="https://platform.openai.com/docs/models/default-usage-policies-by-endpoint">OpenAI's API data-controls documentation</a> for the current retention and data-sharing settings.</li>
     <li><strong>OpenRouter dictation</strong> &mdash; if you select OpenRouter as your dictation provider, connect an account or key, and choose a transcription model, the completed dictation recording is sent through OpenRouter to that selected upstream model. Processing is governed by OpenRouter's and the selected model provider's policies.</li>
     <li><strong>Meeting summarization (OpenAI API / OpenRouter)</strong> &mdash; if configured, meeting transcripts are sent to the selected API provider to generate summaries. This is governed by the respective provider's privacy policy.</li>
@@ -161,14 +163,15 @@
     <li><strong>Screen Recording</strong> &mdash; to capture system audio during meetings (via ScreenCaptureKit)</li>
     <li><strong>Accessibility</strong> &mdash; to paste transcribed text into other applications</li>
     <li><strong>Input Monitoring</strong> &mdash; to detect the global dictation hotkey</li>
-    <li><strong>Calendar</strong> &mdash; to read upcoming events from your local macOS calendar (EventKit)</li>
+    <li><strong>Calendar</strong> &mdash; to read upcoming events and their organizer and attendee names and email addresses from your local macOS calendar (EventKit)</li>
+    <li><strong>Contacts</strong> &mdash; only when you choose People features, to search and read selected contacts or to create a new contact at your request</li>
   </ul>
 
   <h2>Anonymous Usage Analytics</h2>
   <p>Muesli uses <a href="https://telemetrydeck.com">TelemetryDeck</a> to collect minimal, anonymized usage signals (e.g., which features are used and app launch counts). When Muesli detects a hard failure, it may also send an allowlisted diagnostic category, workflow stage, selected on-device transcription backend/model, app version and build, operating system and device model, and a random incident ID. These diagnostics never include raw error messages, audio, transcripts, meeting or calendar titles, clipboard or screen contents, API keys, auth tokens, local file paths, raw logs, database contents, or other personal content. TelemetryDeck does not store IP addresses, and identifiers used for anonymous user and session counts cannot be traced back to a person. You can learn more about TelemetryDeck's privacy practices on their <a href="https://telemetrydeck.com/privacy">privacy page</a>.</p>
 
   <h2>No Personal Data Collection</h2>
-  <p><strong>Muesli does not collect, transmit, or store personal data on external servers that we operate.</strong> Apart from the anonymous usage signals described above, data remains on your device unless you choose an optional cloud provider such as OpenAI or OpenRouter dictation, hosted cleanup or meeting summaries, or Google Calendar sync. The application remains functional without an internet connection when you use its local features.</p>
+  <p><strong>Muesli does not collect, transmit, or store personal data on external servers that we operate.</strong> Apart from the anonymous usage signals described above, data remains on your device unless you choose an optional cloud service such as private iCloud sync, OpenAI or OpenRouter dictation, hosted cleanup or meeting summaries, or Google Calendar sync. The application remains functional without an internet connection when you use its local features.</p>
 
   <h2>Open Source</h2>
   <p>Muesli's source code is publicly available on <a href="https://github.com/Muesli-HQ/muesli">GitHub</a> under the MIT license. You can inspect exactly what the application does with your data.</p>

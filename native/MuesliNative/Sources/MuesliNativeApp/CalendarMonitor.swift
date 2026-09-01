@@ -297,11 +297,12 @@ final class CalendarMonitor {
         let start = occurrence.originalStartTime.addingTimeInterval(-60)
         let end = occurrence.originalStartTime.addingTimeInterval(60)
         let predicate = freshStore.predicateForEvents(withStart: start, end: end, calendars: nil)
-        guard let event = freshStore.events(matching: predicate).first(where: {
-            Self.occurrenceReference(
-                for: $0,
-                eventID: $0.eventIdentifier ?? "",
-                startDate: $0.startDate
+        guard let event = freshStore.events(matching: predicate).first(where: { event in
+            guard let startDate = event.startDate else { return false }
+            return Self.occurrenceReference(
+                for: event,
+                eventID: event.eventIdentifier ?? "",
+                startDate: startDate
             ).identityKey == occurrence.identityKey
         }) else {
             return []

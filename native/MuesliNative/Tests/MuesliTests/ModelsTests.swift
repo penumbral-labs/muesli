@@ -2486,6 +2486,33 @@ struct HotkeyMonitorTests {
         #expect(toggleStopCount == 0)
     }
 
+    @Test("malformed combination configuration falls back to the default hotkey")
+    func malformedCombinationConfigurationUsesDefault() {
+        let monitor = HotkeyMonitor()
+        monitor.configure(keyCode: 55)
+
+        monitor.configure(HotkeyConfig.combination(modifiers: [], keyCode: 2))
+
+        #expect(!monitor.isCombinationMode)
+        #expect(monitor.targetKeyCode == HotkeyConfig.default.keyCode)
+    }
+
+    @Test("deinitialization does not invoke active-session callbacks")
+    func deinitializationDoesNotInvokeCallbacks() {
+        var monitor: HotkeyMonitor? = HotkeyMonitor()
+        weak var weakMonitor = monitor
+        var callbackCount = 0
+        monitor?.onStop = { callbackCount += 1 }
+        monitor?.onCancel = { callbackCount += 1 }
+        monitor?.onToggleStop = { callbackCount += 1 }
+        monitor?.setHoldRecordingActiveForTests()
+
+        monitor = nil
+
+        #expect(weakMonitor == nil)
+        #expect(callbackCount == 0)
+    }
+
     @Test("configuring a combination dictation hotkey enters combination mode and toggles")
     @MainActor
     func combinationDictationHotkeyEntersCombinationModeAndToggles() {

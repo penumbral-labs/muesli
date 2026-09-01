@@ -61,6 +61,7 @@ enum Qwen3AsrWarmupReadiness {
 @available(macOS 15, *)
 actor Qwen3AsrTranscriber {
     private var manager: MuesliQwen3AsrManager?
+    private var loadGeneration: UInt64 = 0
 
     enum TranscriberError: Error, LocalizedError {
         case notLoaded
@@ -79,6 +80,7 @@ actor Qwen3AsrTranscriber {
         progressSnapshot: ModelDownloadProgressHandler? = nil
     ) async throws {
         if manager != nil { return }
+        let generation = loadGeneration
 
         fputs("[qwen3-asr] downloading/loading models...\n", stderr)
         let plan = ManagedASRModelPlans.qwen3ASRInt8()
@@ -95,20 +97,19 @@ actor Qwen3AsrTranscriber {
             progressSnapshot?(preparing)
             let candidate = MuesliQwen3AsrManager()
             try await candidate.loadModels(from: modelDir)
-            self.manager = candidate
             fputs("[qwen3-asr] models loaded, running warmup inference...\n", stderr)
 
             // Warmup: run a tiny dummy audio through the pipeline to trigger CoreML compilation.
             // This moves the ~30s compilation cost from first dictation to preload time.
             let warmupSamples = [Float](repeating: 0, count: 16000) // 1 second of silence
-            do {
-                _ = try await candidate.transcribe(audioSamples: warmupSamples)
-                try Qwen3AsrWarmupReadiness.validate(isCurrent: manager === candidate)
-                return candidate
-            } catch {
-                if manager === candidate { manager = nil }
-                throw error
-            }
+            _ = try await candidate.transcribe(audioSamples: warmupSamples)
+            try Qwen3AsrWarmupReadiness.validate(isCurrent: generation == loadGeneration)
+            return candidate
+        }
+        // A shutdown() during load or warmup must invalidate the result instead
+        // of publishing a stale manager after shutdown returns.
+        guard generation == loadGeneration else {
+            throw CancellationError()
         }
         self.manager = mgr
         let preparing = ModelDownloadProgress.preparing(
@@ -135,5 +136,6 @@ actor Qwen3AsrTranscriber {
 
     func shutdown() {
         manager = nil
+        loadGeneration &+= 1
     }
 }

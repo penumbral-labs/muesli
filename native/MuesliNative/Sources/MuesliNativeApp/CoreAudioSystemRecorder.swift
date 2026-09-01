@@ -82,7 +82,11 @@ struct RebuildRetryPolicy: Equatable {
 /// - Doesn't require "Screen & System Audio Recording" permission for audio capture
 /// - Hardware-synchronized with mic input when used in an aggregate device
 final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnosticsProviding {
-    var onPCMSamples: (([Int16]) -> Void)?
+    private let pcmSamplesCallbackLock = OSAllocatedUnfairLock<(([Int16]) -> Void)?>(initialState: nil)
+    var onPCMSamples: (([Int16]) -> Void)? {
+        get { pcmSamplesCallbackLock.withLock { $0 } }
+        set { pcmSamplesCallbackLock.withLock { $0 = newValue } }
+    }
 
     private var tapID: AudioObjectID = kAudioObjectUnknown
     private var aggregateDeviceID: AudioDeviceID = kAudioObjectUnknown
@@ -107,8 +111,13 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
     /// capture is dead. Bridged to episode telemetry by MeetingSession.
     var onCaptureFailure: ((Error) -> Void)?
     /// True while a route-change/health rebuild (including retries) is in
-    /// flight; the watchdog treats this as a known-transient stall window.
-    private(set) var isRebuilding = false
+    /// flight; the watchdog reads this across queues, so publish it atomically
+    /// just like the recording and pause flags.
+    private let rebuildingFlag = ManagedAtomic(false)
+    private(set) var isRebuilding: Bool {
+        get { rebuildingFlag.load(ordering: .acquiring) }
+        set { rebuildingFlag.store(newValue, ordering: .releasing) }
+    }
     var supportsHeartbeatMonitoring: Bool { true }
     /// Set when a rebuild exhausts its retry budget. The recorder deliberately
     /// keeps isRecording/onPCMSamples alive in that state so the watchdog can
@@ -241,12 +250,12 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
         captureDeadFlag.store(false, ordering: .releasing)
 
         removeDefaultOutputDeviceListener()
-        // A rebuild retry pending on processingQueue must not fire after
-        // teardown (attemptTapRebuild also guards on isRecording, belt and
-        // suspenders).
-        rebuildRetryWorkItem?.cancel()
-        isRebuilding = false
         processingQueue.sync {
+            // Retry state is owned by processingQueue. Cancel it behind the
+            // teardown barrier so stop cannot race a retry replacing the item.
+            rebuildRetryWorkItem?.cancel()
+            rebuildRetryWorkItem = nil
+            isRebuilding = false
             teardownTapAndAudioDevice()
             onPCMSamples = nil
         }
@@ -468,7 +477,8 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
             state.bytesWritten += rawData.count
             state.postConversion.addInt16(int16Samples)
         }
-        onPCMSamples?(int16Samples)
+        let callback = pcmSamplesCallbackLock.withLock { $0 }
+        callback?(int16Samples)
     }
 
     private func resampleMonoFloatToInt16(_ samples: [Float], sourceSampleRate: Double) -> [Int16]? {
@@ -1042,6 +1052,9 @@ final class CoreAudioSystemRecorder: SystemAudioCapturing, SystemAudioDiagnostic
     private func cleanupFailedStart() {
         isRecording = false
         isPaused = false
+        // start() can fail on its caller while the processing queue drains an
+        // already-enqueued buffer, so callback retirement uses the same lock as
+        // normal delivery rather than relying on the stop() queue barrier.
         onPCMSamples = nil
 
         removeDefaultOutputDeviceListener()

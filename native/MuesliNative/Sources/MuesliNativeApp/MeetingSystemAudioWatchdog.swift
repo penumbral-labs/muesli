@@ -93,7 +93,7 @@ final class MeetingSystemAudioWatchdog {
         var recoveryReason: String?
         lock.lock()
         if !finished, !isPaused(), episode == nil {
-            var newEpisode = openEpisodeLocked(reason: reason, at: now())
+            var newEpisode = makeEpisode(reason: reason, at: now())
             eventToEmit = MeetingSystemAudioHealthEvent(
                 kind: .degraded,
                 reason: reason,
@@ -114,14 +114,14 @@ final class MeetingSystemAudioWatchdog {
         if let recoveryReason {
             let initiated = recoveryRequest(recoveryReason)
             if !initiated {
-                refundAttemptLocked(reason: recoveryReason)
+                refundAttempt(reason: recoveryReason)
             }
         }
     }
 
     /// Roll back the attempt count for a rejected request while keeping its
     /// cooldown timestamp for back-pressure.
-    private func refundAttemptLocked(reason: String) {
+    private func refundAttempt(reason: String) {
         lock.lock()
         defer { lock.unlock() }
         guard var active = episode, active.initialReason == reason,
@@ -179,7 +179,7 @@ final class MeetingSystemAudioWatchdog {
                     }
                 }
             } else if episode == nil {
-                episode = openEpisodeLocked(reason: "capture_heartbeat_stalled", at: timestamp)
+                episode = makeEpisode(reason: "capture_heartbeat_stalled", at: timestamp)
                 eventToEmit = MeetingSystemAudioHealthEvent(
                     kind: .degraded,
                     reason: "capture_heartbeat_stalled",
@@ -227,7 +227,7 @@ final class MeetingSystemAudioWatchdog {
             // refused request still has back-pressure.
             let initiated = recoveryRequest(recoveryReason)
             if !initiated {
-                refundAttemptLocked(reason: recoveryReason)
+                refundAttempt(reason: recoveryReason)
             }
         }
         if let micBridgeReason {
@@ -262,7 +262,7 @@ final class MeetingSystemAudioWatchdog {
     }
 
     @discardableResult
-    private func openEpisodeLocked(reason: String, at timestamp: Date) -> Episode {
+    private func makeEpisode(reason: String, at timestamp: Date) -> Episode {
         Episode(
             startedAt: timestamp,
             initialReason: reason,

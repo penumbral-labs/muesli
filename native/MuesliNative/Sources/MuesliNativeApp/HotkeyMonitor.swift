@@ -108,6 +108,10 @@ final class HotkeyMonitor {
         self.now = now
     }
 
+    deinit {
+        tearDownResources()
+    }
+
     func configureTriggerThreshold(milliseconds: Int) {
         finishActiveSessionBeforeReconfigure()
         prepareDelay = HotkeyTriggerTiming.prepareDelay(forThresholdMilliseconds: milliseconds)
@@ -164,23 +168,7 @@ final class HotkeyMonitor {
 
     func stop() {
         finishActiveSessionBeforeReconfigure()
-        cancelTimers()
-        if let globalMonitor {
-            NSEvent.removeMonitor(globalMonitor)
-        }
-        if let localMonitor {
-            NSEvent.removeMonitor(localMonitor)
-        }
-        globalMonitor = nil
-        localMonitor = nil
-        if let registeredHotKey {
-            UnregisterEventHotKey(registeredHotKey)
-            self.registeredHotKey = nil
-        }
-        if let registeredHotKeyHandler {
-            RemoveEventHandler(registeredHotKeyHandler)
-            self.registeredHotKeyHandler = nil
-        }
+        tearDownResources()
         targetKeyDown = false
         otherKeyPressed = false
         armed = false
@@ -202,7 +190,11 @@ final class HotkeyMonitor {
     func configure(combination config: HotkeyConfig) {
         guard config.isCombination,
               let mods = config.resolvedCombinationModifiers,
-              let kc = config.combinationKeyCode else { return }
+              !mods.isEmpty,
+              let kc = config.combinationKeyCode else {
+            configure(keyCode: HotkeyConfig.default.keyCode)
+            return
+        }
         finishActiveSessionBeforeReconfigure()
         targetKeyCode = UInt16.max
         combinationModifiers = mods
@@ -211,7 +203,7 @@ final class HotkeyMonitor {
     }
 
     func configure(_ config: HotkeyConfig) {
-        if config.isCombination {
+        if config.combinationModifiers != nil || config.combinationKeyCode != nil {
             configure(combination: config)
         } else {
             configure(keyCode: config.keyCode)
@@ -461,7 +453,8 @@ final class HotkeyMonitor {
     @discardableResult
     private func startRegisteredCombination() -> Bool {
         guard let keyCode = combinationKeyCode,
-              let modifiers = combinationModifiers else { return false }
+              let modifiers = combinationModifiers,
+              !modifiers.isEmpty else { return false }
         var eventTypes = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
@@ -784,6 +777,28 @@ final class HotkeyMonitor {
         startWorkItem = nil
         armCancelWorkItem = nil
         combinationWorkItem = nil
+    }
+
+    /// Releases system registrations and pending work without changing session
+    /// state or invoking lifecycle callbacks. Deinitialization must be silent.
+    private func tearDownResources() {
+        cancelTimers()
+        if let globalMonitor {
+            NSEvent.removeMonitor(globalMonitor)
+        }
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
+        }
+        globalMonitor = nil
+        localMonitor = nil
+        if let registeredHotKey {
+            UnregisterEventHotKey(registeredHotKey)
+            self.registeredHotKey = nil
+        }
+        if let registeredHotKeyHandler {
+            RemoveEventHandler(registeredHotKeyHandler)
+            self.registeredHotKeyHandler = nil
+        }
     }
 
     func setHoldRecordingActiveForTests() {

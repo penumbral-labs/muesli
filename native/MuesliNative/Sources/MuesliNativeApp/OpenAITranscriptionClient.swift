@@ -149,6 +149,7 @@ actor OpenAIRealtimeTranscriptionSession {
     private var completedItemIDs: [String] = []
     private var commitRequested = false
     private var terminalError: Error?
+    private var didTeardown = false
 
     init(configuration: OpenAIDictationConfiguration) {
         self.configuration = configuration
@@ -158,15 +159,24 @@ actor OpenAIRealtimeTranscriptionSession {
         let request = try OpenAIRealtimeProtocol.request(apiKey: configuration.apiKey)
         let socket = URLSession.shared.webSocketTask(with: request)
         self.socket = socket
-        try await withCheckedThrowingContinuation { continuation in
-            readyContinuation = continuation
-            socket.resume()
-            receiveTask = Task { [weak self] in await self?.receiveLoop() }
-            readyTimeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: timeout)
-                guard !Task.isCancelled else { return }
-                await self?.timeoutReady()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    teardown(closeCode: .goingAway)
+                    return
+                }
+                readyContinuation = continuation
+                socket.resume()
+                receiveTask = Task { [weak self] in await self?.receiveLoop() }
+                readyTimeoutTask = Task { [weak self] in
+                    try? await Task.sleep(for: timeout)
+                    guard !Task.isCancelled else { return }
+                    await self?.timeoutReady()
+                }
             }
+        } onCancel: {
+            Task { await self.cancel() }
         }
     }
 
@@ -180,33 +190,34 @@ actor OpenAIRealtimeTranscriptionSession {
     }
 
     func finish(timeout: Duration = .seconds(30)) async throws -> String {
-        if let terminalError { throw terminalError }
-        guard let socket else {
-            throw OpenAITranscriptionError.network(underlying: URLError(.notConnectedToInternet))
+        do {
+            if let terminalError { throw terminalError }
+            guard let socket else {
+                throw OpenAITranscriptionError.network(underlying: URLError(.notConnectedToInternet))
+            }
+            commitRequested = true
+            try await socket.send(.string(OpenAIRealtimeProtocol.commit))
+            return try await waitForFinalTranscript(timeout: timeout)
+        } catch {
+            teardown(closeCode: .goingAway)
+            throw error
         }
-        commitRequested = true
-        try await socket.send(.string(OpenAIRealtimeProtocol.commit))
-        return try await waitForFinalTranscript(timeout: timeout)
     }
 
     func cancel() {
-        socket?.cancel(with: .goingAway, reason: nil)
-        socket = nil
-        receiveTask?.cancel()
-        receiveTask = nil
-        readyTimeoutTask?.cancel()
-        finalTimeoutTask?.cancel()
         let error = CancellationError()
         readyContinuation?.resume(throwing: error)
         readyContinuation = nil
         finalContinuation?.resume(throwing: error)
         finalContinuation = nil
+        teardown(closeCode: .goingAway)
     }
 
     private func waitForFinalTranscript(timeout: Duration) async throws -> String {
         if let terminalError { throw terminalError }
         if let transcript = resolvedTranscript() {
             let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            teardown(closeCode: .normalClosure)
             guard !trimmed.isEmpty else { throw OpenAITranscriptionError.emptyTranscript }
             return trimmed
         }
@@ -275,12 +286,12 @@ actor OpenAIRealtimeTranscriptionSession {
         finalTimeoutTask?.cancel()
         finalTimeoutTask = nil
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        teardown(closeCode: .normalClosure)
         if trimmed.isEmpty {
             continuation.resume(throwing: OpenAITranscriptionError.emptyTranscript)
         } else {
             continuation.resume(returning: trimmed)
         }
-        socket?.cancel(with: .normalClosure, reason: nil)
     }
 
     private func resolvedTranscript() -> String? {
@@ -289,7 +300,7 @@ actor OpenAIRealtimeTranscriptionSession {
     }
 
     private func fail(_ error: Error) {
-        guard terminalError == nil else { return }
+        guard !didTeardown, terminalError == nil else { return }
         terminalError = error
         readyTimeoutTask?.cancel()
         finalTimeoutTask?.cancel()
@@ -297,7 +308,20 @@ actor OpenAIRealtimeTranscriptionSession {
         readyContinuation = nil
         finalContinuation?.resume(throwing: error)
         finalContinuation = nil
-        socket?.cancel(with: .goingAway, reason: nil)
+        teardown(closeCode: .goingAway)
+    }
+
+    private func teardown(closeCode: URLSessionWebSocketTask.CloseCode) {
+        guard !didTeardown else { return }
+        didTeardown = true
+        socket?.cancel(with: closeCode, reason: nil)
+        socket = nil
+        receiveTask?.cancel()
+        receiveTask = nil
+        readyTimeoutTask?.cancel()
+        readyTimeoutTask = nil
+        finalTimeoutTask?.cancel()
+        finalTimeoutTask = nil
     }
 
     private func timeoutReady() {
@@ -348,8 +372,16 @@ final class OpenAIRealtimeDictationStream: @unchecked Sendable {
 
     func finish() async throws -> String {
         continuation.finish()
-        try await uploadTask.value
-        guard !lock.withLock({ overflowed }) else { throw OpenAITranscriptionError.audioBackpressure }
+        do {
+            try await uploadTask.value
+        } catch {
+            await session.cancel()
+            throw error
+        }
+        guard !lock.withLock({ overflowed }) else {
+            await session.cancel()
+            throw OpenAITranscriptionError.audioBackpressure
+        }
         return try await session.finish()
     }
 

@@ -80,6 +80,13 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
     private var isGraphPrepared = false
     private var configurationChangeObserver: (any NSObjectProtocol)?
     private let configurationChangeQueue = DispatchQueue(label: "com.muesli.streaming-mic-recorder-config-change")
+    private let configurationChangeState = OSAllocatedUnfairLock(initialState: ConfigurationChangeState())
+
+    private struct ConfigurationChangeState {
+        var activeRecordingID: UUID?
+        var restartItem: DispatchWorkItem?
+        var restartToken: UUID?
+    }
 
     private struct FailureState {
         var activeRecordingID: UUID?
@@ -364,7 +371,6 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         return engine.inputNode.outputFormat(forBus: 0)
     }
 
-    private var configChangeRestartItem: DispatchWorkItem?
     /// Settle debounce for engine config-change restarts. A route transition
     /// fires a burst of notifications while the daemon negotiates, and
     /// restarting mid-churn reliably fails tap installation (measured live on
@@ -383,6 +389,12 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
     private func installConfigurationChangeObserverIfNeeded(recordingID: UUID) {
         guard recoversFromInputConfigurationChanges else { return }
         guard configurationChangeObserver == nil else { return }
+        configurationChangeState.withLock { state in
+            state.restartItem?.cancel()
+            state.activeRecordingID = recordingID
+            state.restartItem = nil
+            state.restartToken = nil
+        }
         let callbackQueue = configurationChangeQueue
         configurationChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
@@ -397,18 +409,44 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
 
     private func scheduleConfigurationChangeRestart(recordingID: UUID) {
         // On configurationChangeQueue. Each notification resets the settle
-        // timer; the restart fires once after the burst quiets.
-        configChangeRestartItem?.cancel()
+        // timer; the restart fires once after the burst quiets. The lock-backed
+        // token prevents a notification already queued during teardown from
+        // rearming the restart after stop()/cancel() disarms this recording.
+        let token = UUID()
         let item = DispatchWorkItem { [weak self] in
-            self?.handleEngineConfigurationChange(recordingID: recordingID)
+            guard let self else { return }
+            let shouldRestart = self.configurationChangeState.withLock { state -> Bool in
+                guard state.activeRecordingID == recordingID,
+                      state.restartToken == token else { return false }
+                state.restartItem = nil
+                state.restartToken = nil
+                return true
+            }
+            guard shouldRestart else { return }
+            self.handleEngineConfigurationChange(recordingID: recordingID)
         }
-        configChangeRestartItem = item
+        let shouldSchedule = configurationChangeState.withLock { state -> Bool in
+            guard state.activeRecordingID == recordingID else { return false }
+            state.restartItem?.cancel()
+            state.restartItem = item
+            state.restartToken = token
+            return true
+        }
+        guard shouldSchedule else { return }
         configurationChangeQueue.asyncAfter(deadline: .now() + configChangeSettleDelay, execute: item)
     }
 
+    private func disarmConfigurationChangeRestart() {
+        configurationChangeState.withLock { state in
+            state.activeRecordingID = nil
+            state.restartItem?.cancel()
+            state.restartItem = nil
+            state.restartToken = nil
+        }
+    }
+
     private func removeConfigurationChangeObserverIfNeeded() {
-        configChangeRestartItem?.cancel()
-        configChangeRestartItem = nil
+        disarmConfigurationChangeRestart()
         guard let observer = configurationChangeObserver else { return }
         NotificationCenter.default.removeObserver(observer)
         configurationChangeObserver = nil
@@ -418,7 +456,8 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
         graphLock.lock()
         defer { graphLock.unlock() }
 
-        guard runState.isRunning else { return }
+        guard configurationChangeState.withLock({ $0.activeRecordingID == recordingID }),
+              runState.isRunning else { return }
         let mayRestart = failureLock.withLock {
             $0.activeRecordingID == recordingID && !$0.hasReportedFailure
         }
@@ -473,6 +512,9 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
 
     /// Stop recording. Returns the final WAV URL.
     func stop() -> URL? {
+        // Disarm independently of graphLock so teardown never waits on the
+        // configuration queue while a restart is waiting for the graph.
+        disarmConfigurationChangeRestart()
         graphLock.lock()
         defer { graphLock.unlock() }
 
@@ -519,6 +561,9 @@ final class StreamingMicRecorder: StreamingDictationRecording, StreamingDictatio
     }
 
     func cancel() {
+        // See stop(): pending configuration work must become a synchronous
+        // no-op before teardown contends for the audio graph.
+        disarmConfigurationChangeRestart()
         graphLock.lock()
         defer { graphLock.unlock() }
 
