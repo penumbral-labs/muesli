@@ -387,7 +387,7 @@ public final class MuesliController: NSObject {
     private let computerUseHotkeyMonitor = HotkeyMonitor()
     private let quilHotkeyMonitor = HotkeyMonitor()
     private let meetingRecordingHotkeyMonitor = HotkeyMonitor()
-    private var isRecordingPasteShortcut = false
+    private var isCapturingShortcut = false
     private let computerUseRecorder = RouteAwareDictationRecorder()
     private let quilRecorder = RouteAwareDictationRecorder()
     private let dictationRecorder = RouteAwareDictationRecorder()
@@ -528,6 +528,8 @@ public final class MuesliController: NSObject {
     private var computerUseCommandStartedAt: Date?
     private var pendingComputerUseStopStartedAt: Date?
     private var pendingComputerUseStopSessionID: UUID?
+    private let computerUseQuestionPresenter = ComputerUseQuestionPresenter()
+    private var computerUseSettingsTaskID: UUID?
     private var computerUseCommandTask: Task<Void, Never>?
     private var computerUseCommandTaskID: UUID?
     private var hasRequestedComputerUseScreenRecordingAccess = false
@@ -751,9 +753,15 @@ public final class MuesliController: NSObject {
         hotkeyMonitor.onStart = { [weak self] in self?.handleStart() }
         hotkeyMonitor.onStop = { [weak self] in self?.handleStop() }
         hotkeyMonitor.onCancel = { [weak self] in self?.handleCancel() }
-        hotkeyMonitor.onToggleStart = { [weak self] in self?.handleToggleStart() }
+        hotkeyMonitor.onToggleStart = { [weak self] in
+            // A refused start must not leave the next press acting as a stop.
+            guard let self, !self.handleToggleStart() else { return }
+            self.hotkeyMonitor.cancelToggleMode()
+        }
         hotkeyMonitor.onToggleStop = { [weak self] in self?.handleToggleStop() }
         hotkeyMonitor.doubleTapEnabled = config.enableDoubleTapDictation
+        hotkeyMonitor.combinationActivation = config.dictationCombinationActivation
+        hotkeyMonitor.registersCombinationGlobally = true
         configureHotkeyMonitorTiming()
         computerUseHotkeyMonitor.onPrepare = { [weak self] in self?.handleComputerUsePrepare() }
         computerUseHotkeyMonitor.onStart = { [weak self] in self?.handleComputerUseStart() }
@@ -2879,6 +2887,46 @@ public final class MuesliController: NSObject {
         selectBackend(option, makePrimaryDictationModel: false)
     }
 
+    func settingsShortcutPermission(enabled: Bool, pushToTalk: Bool,
+                                    permissions: OnboardingPermissionSnapshot? = nil) -> String? {
+        guard enabled else { return nil }
+        let snapshot = permissions ?? currentOnboardingPermissionSnapshot()
+        let allowed = pushToTalk
+            ? PushToTalkEnablementPolicy.PermissionProfile.resolved(for: config.resolvedOnboardingUseCase).hasRequiredPermissions(snapshot)
+            : ShortcutFeatureEnablementPolicy.hasRequiredPermissions(snapshot)
+        return allowed ? nil : "Grant the required microphone, Accessibility and Input Monitoring permissions in Settings first."
+    }
+
+    func requestPushToTalkSettingsPermissions() {
+        requestMissingPushToTalkPermissions(currentOnboardingPermissionSnapshot(),
+            profile: .resolved(for: config.resolvedOnboardingUseCase))
+    }
+
+    func requestSettingsPermissions() {
+        requestMissingShortcutPermissions(currentOnboardingPermissionSnapshot(), requiresAccessibility: true)
+    }
+
+    func setSettingFromUI(_ id: String, value: String) {
+        Task { @MainActor in
+            do { try await applySetting(id, value: value) }
+            catch { presentErrorAlert(title: "Setting could not be changed", message: error.localizedDescription) }
+        }
+    }
+
+    func applySetting(_ id: String, value: String) async throws {
+        let definitions = settingsDefinitions()
+        _ = try await MuesliSettings.apply(.init(setting: id, value: value), settings: definitions,
+            snapshots: definitions.map { $0.snapshot(config: config, source: .manualUI) }, source: .manualUI, config: { self.config },
+            persistedConfig: {
+                try JSONDecoder().decode(AppConfig.self, from: Data(contentsOf: self.configStore.configPath()))
+            })
+    }
+
+    func selectPrimaryDictationModelForComputerUse(_ option: BackendOption) {
+        guard canChangePrimaryDictationModel() else { return }
+        selectBackend(option, makePrimaryDictationModel: true)
+    }
+
     private func selectBackend(
         _ option: BackendOption,
         makePrimaryDictationModel: Bool
@@ -4452,13 +4500,26 @@ public final class MuesliController: NSObject {
             isMeetingRecordingEnabled: config.enableMeetingRecordingHotkey
         )
         guard result.didUpdate else {
-            fputs("[hotkeys] rejected dictation hotkey because it matches computer use hotkey\n", stderr)
+            fputs("[hotkeys] rejected dictation hotkey: \(result.message ?? "invalid")\n", stderr)
             return result
+        }
+        // Muesli's own paste would trigger a dictation chord registered on the same keys.
+        if hotkey.isCombination,
+           let pasteChord = PasteKeyboardLayout.resolve(config.pasteShortcut),
+           ShortcutHotkeyPolicy.hotkeysConflict(hotkey, Self.hotkey(for: pasteChord)) {
+            return .conflict(message: ShortcutHotkeyPolicy.pasteConflictMessage)
         }
         updateConfig { $0.dictationHotkey = hotkey }
         hotkeyMonitor.configure(hotkey)
         configureComputerUseHotkeyMonitor()
         return result
+    }
+
+    func updateDictationCombinationActivation(_ activation: HotkeyMonitor.CombinationActivation) {
+        updateConfig { $0.dictationCombinationActivation = activation }
+        hotkeyMonitor.combinationActivation = activation
+        // Ends any session started under the previous activation before it can be misread.
+        hotkeyMonitor.configure(config.dictationHotkey)
     }
 
     @discardableResult
@@ -4637,6 +4698,7 @@ public final class MuesliController: NSObject {
     func resetShortcutDefaults() {
         updateConfig { config in
             config.dictationHotkey = .default
+            config.dictationCombinationActivation = .pushToTalk
             config.quilHotkey = .quilDefault
             config.enableQuilMode = false
             config.computerUseHotkey = .computerUseDefault
@@ -4648,6 +4710,7 @@ public final class MuesliController: NSObject {
             config.computerUseHotkeyTriggerThresholdMS = HotkeyTriggerTiming.defaultThresholdMilliseconds
             config.meetingRecordingHotkeyTriggerThresholdMS = HotkeyTriggerTiming.defaultMeetingThresholdMilliseconds
         }
+        hotkeyMonitor.combinationActivation = .pushToTalk
         hotkeyMonitor.configure(.default)
         quilHotkeyMonitor.stop()
         configureComputerUseHotkeyMonitor()
@@ -4825,9 +4888,9 @@ public final class MuesliController: NSObject {
         setState(.idle)
     }
 
-    func startHotkeyMonitor(keyCode: UInt16? = nil) {
-        if let keyCode {
-            hotkeyMonitor.configure(keyCode: keyCode)
+    func startHotkeyMonitor(hotkey: HotkeyConfig? = nil) {
+        if let hotkey {
+            hotkeyMonitor.configure(hotkey)
         }
         hotkeyMonitor.start()
         startComputerUseHotkeyMonitorIfNeeded()
@@ -4840,32 +4903,35 @@ public final class MuesliController: NSObject {
     }
 
     /// Recorder owns a temporary pause, never changes feature enablement/config.
-    func beginPasteShortcutCapture() -> Bool {
+    func beginShortcutCapture() -> Bool {
         let monitors = [hotkeyMonitor, computerUseHotkeyMonitor, quilHotkeyMonitor, meetingRecordingHotkeyMonitor]
-        guard !isRecordingPasteShortcut, dictationState == .idle,
+        guard !isCapturingShortcut, dictationState == .idle,
               !isMeetingRecording(), !isStartingMeetingRecording, !isMeetingAudioProcessing,
               !isDictationTestMode, quilTask == nil, computerUseCommandTask == nil,
               interactiveAudioSessionOwnership.canStart(.dictation),
               monitors.allSatisfy({ !$0.hasPendingOrActiveSession }) else { return false }
-        isRecordingPasteShortcut = true
+        isCapturingShortcut = true
         monitors.forEach { $0.suspendForShortcutCapture() }
         return true
     }
 
-    func endPasteShortcutCapture() {
-        guard isRecordingPasteShortcut else { return }
-        isRecordingPasteShortcut = false
+    func endShortcutCapture() {
+        guard isCapturingShortcut else { return }
+        isCapturingShortcut = false
         [hotkeyMonitor, computerUseHotkeyMonitor, quilHotkeyMonitor, meetingRecordingHotkeyMonitor]
             .forEach { $0.resumeAfterShortcutCapture() }
     }
 
+    private static func hotkey(for chord: PasteKeyChord) -> HotkeyConfig {
+        HotkeyConfig.combination(modifiers: NSEvent.ModifierFlags(rawValue: UInt(chord.modifiers)), keyCode: chord.keyCode)
+    }
+
+    /// Disabled shortcuts count too: re-enabling one does not revisit the paste
+    /// chord, and a registered chord would intercept Muesli's own paste.
     func pasteShortcutConflict(_ chord: PasteKeyChord) -> Bool {
-        let candidate = HotkeyConfig.combination(modifiers: NSEvent.ModifierFlags(rawValue: UInt(chord.modifiers)), keyCode: chord.keyCode)
-        return [(config.enablePushToTalk, config.dictationHotkey),
-                (config.enableComputerUseHotkey, config.computerUseHotkey),
-                (config.enableQuilMode, config.quilHotkey),
-                (config.enableMeetingRecordingHotkey, config.meetingRecordingHotkey)]
-            .contains { $0.0 && $0.1.isCombination && ShortcutHotkeyPolicy.hotkeysConflict(candidate, $0.1) }
+        let candidate = Self.hotkey(for: chord)
+        return [config.dictationHotkey, config.computerUseHotkey, config.quilHotkey, config.meetingRecordingHotkey]
+            .contains { $0.isCombination && ShortcutHotkeyPolicy.hotkeysConflict(candidate, $0) }
     }
 
     func downloadModelForOnboarding(
@@ -5033,7 +5099,7 @@ public final class MuesliController: NSObject {
             }
         }
         selectBackend(backend)
-        hotkeyMonitor.configure(keyCode: hotkey.keyCode)
+        hotkeyMonitor.configure(hotkey)
         configureComputerUseHotkeyMonitor()
         clearDictationTestLifecycle()
 
@@ -5426,8 +5492,7 @@ public final class MuesliController: NSObject {
             selectedBackendKey: config.sttBackend,
             selectedModelKey: config.sttModel,
             selectedCohereLanguageCode: config.cohereLanguage,
-            hotkeyKeyCode: config.dictationHotkey.keyCode,
-            hotkeyLabel: config.dictationHotkey.label,
+            hotkey: config.dictationHotkey,
             systemAudioRequested: false,
             onboardingUseCaseRawValue: config.onboardingUseCase
         )
@@ -5471,13 +5536,15 @@ public final class MuesliController: NSObject {
         showMeetingDocument(id: activeMeetingID)
     }
 
-    func openActiveMeetingNotes() {
-        guard ensureBasicDictationPermissionsBeforeDashboard() else { return }
+    @discardableResult
+    func openActiveMeetingNotes() -> Bool {
+        guard ensureBasicDictationPermissionsBeforeDashboard() else { return false }
         guard let activeMeetingID,
-              isMeetingRecording() || isStartingMeetingRecording else { return }
+              isMeetingRecording() || isStartingMeetingRecording else { return false }
         showMeetingDocument(id: activeMeetingID)
         appState.meetingNotesFocusRequest &+= 1
         presentHistoryWindow()
+        return true
     }
 
     func showMeetingTemplatesManager() {
@@ -9901,24 +9968,14 @@ public final class MuesliController: NSObject {
         meetingMonitor.refreshState()
     }
 
-    /// Denial must release an already armed session before any permission UI.
-    func ensureComputerUseScreenRecordingAccess(isGranted: Bool) -> Bool {
-        guard isGranted else {
-            handleComputerUseCancel()
-            return false
-        }
-        return true
-    }
-
-    private func handleComputerUseStart() {
-        guard canStartComputerUseCommand else { return }
-        guard ensureComputerUseScreenRecordingAccess(isGranted: CGPreflightScreenCaptureAccess()) else {
+    private func requestDesktopComputerUseScreenAccess() -> Bool {
+        guard CGPreflightScreenCaptureAccess() else {
             if !hasRequestedComputerUseScreenRecordingAccess {
                 hasRequestedComputerUseScreenRecordingAccess = true
                 // macOS owns this prompt and its Open System Settings action.
                 // Opening Settings ourselves as well leaves the prompt behind.
                 _ = CGRequestScreenCaptureAccess()
-                return
+                return false
             }
             // A denied request may no longer produce a system prompt. Offer a
             // Settings shortcut on a subsequent attempt, without requesting again.
@@ -9932,8 +9989,13 @@ public final class MuesliController: NSObject {
                     NSWorkspace.shared.open(url)
                 }
             }
-            return
+            return false
         }
+        return true
+    }
+
+    private func handleComputerUseStart() {
+        guard canStartComputerUseCommand else { return }
         fputs("[cua] recording start\n", stderr)
         indicator.instructionMode = .computerUse
         meetingMonitor.suppressWhileActive()
@@ -9966,7 +10028,7 @@ public final class MuesliController: NSObject {
         handleComputerUseStop()
     }
 
-    private func handleComputerUseCancel() {
+    func handleComputerUseCancel() {
         fputs("[cua] cancel\n", stderr)
         guard !interactiveAudioSessionOwnership.shouldIgnoreCleanup(for: .computerUse) else {
             fputs("[cua] ignoring cleanup while dictation owns interactive audio\n", stderr)
@@ -9974,6 +10036,10 @@ public final class MuesliController: NSObject {
             return
         }
         computerUseCommandTask?.cancel()
+        computerUseQuestionPresenter.cancel()
+        // Let the settings executor verify a setter that may already have committed.
+        // It returns promptly on cancellation while thinking or asking a question.
+        if let settingsTaskID = computerUseSettingsTaskID, settingsTaskID == computerUseCommandTaskID { return }
         activeComputerUseTrace?.finish(status: "cancelled", message: "Stopped by the user.")
         activeComputerUseTrace = nil
         indicator.setComputerUseCancellationAvailable(false)
@@ -10235,10 +10301,12 @@ public final class MuesliController: NSObject {
             self.syncAppState()
         }
         activeComputerUseTrace = runTrace
-        let runtime = ComputerUsePlannerRuntime(config: config) { [weak self] status in
+        runTrace.record(ComputerUseTraceEvent(kind: "routing", title: "Understanding command",
+                                            body: "Choosing Muesli settings or desktop tools.", status: "running"))
+        let runtime = ComputerUsePlannerRuntime(config: config, onStatus: { [weak self] status in
             guard let self, self.computerUseCommandTaskID == taskID else { return }
             self.presentComputerUseFloatingStatus(status)
-        }
+        })
         runtime.onEvent = { [weak self] event in
             guard let self, self.computerUseCommandTaskID == taskID else { return }
             runTrace.record(event)
@@ -10249,7 +10317,33 @@ public final class MuesliController: NSObject {
         }
 
         let result: ComputerUsePlannerRuntimeResult
-        if CGPreflightScreenCaptureAccess() {
+        computerUseSettingsTaskID = taskID
+        let settingsResult = await ComputerUseSettings.run(
+            command: transcript, settings: settingsDefinitions(),
+            config: { self.config }, persistedConfig: {
+                try JSONDecoder().decode(AppConfig.self, from: Data(contentsOf: self.configStore.configPath()))
+            }, refresh: { self.settingsDefinitions() }, prepare: { id in
+                if id == "apple_speech_language", #available(macOS 26.0, *),
+                   AppleSpeechAnalyzerTranscriber.isSupportedOnCurrentSystem {
+                    self.appState.settingsAppleSpeechLanguages = await AppleSpeechLanguageOption.supportedOptions()
+                }
+            }, ask: { question in
+                self.presentComputerUseFloatingStatus("Waiting for your answer")
+                runTrace.record(ComputerUseTraceEvent(kind: "question", title: "Question",
+                    body: question.question, status: "waiting"))
+                let answer = try await self.computerUseQuestionPresenter.ask(question, present: { session in
+                    self.indicator.showComputerUseQuestion(session, config: self.config)
+                }, dismiss: {
+                    self.indicator.hideComputerUseQuestion()
+                })
+                self.presentComputerUseFloatingStatus("Thinking...")
+                return answer
+            })
+        if computerUseSettingsTaskID == taskID { computerUseSettingsTaskID = nil }
+        guard computerUseCommandTaskID == taskID else { return }
+        if let settingsResult {
+            result = settingsResult
+        } else if requestDesktopComputerUseScreenAccess() {
             result = await runtime.run(command: transcript)
         } else {
             result = ComputerUsePlannerRuntimeResult(

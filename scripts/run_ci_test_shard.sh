@@ -19,6 +19,7 @@ case "${shard}" in
     filters=(
       ConfigStoreTests
       DictationStoreTests
+      ComputerUseSettingsTests
       ComputerUseExecutorTests
       ComputerUseObservationCaptureTests
       ComputerUseObservationTests
@@ -42,6 +43,7 @@ case "${shard}" in
       OnboardingFlowTests
       OnboardingProgressTests
       FloatingIndicatorVisibilityTests
+      FloatingIndicatorPointerInteractionTests
       IndicatorFrameSizeTests
       NotchIndicatorTests
       RecordingIndicatorStyleTests
@@ -104,6 +106,7 @@ case "${shard}" in
       InteractiveAudioSessionOwnershipTests
       DictationStateTests
       HotkeyConfigTests
+      HotkeyShortcutRecorderTests
       DictationStateIdleTests
       DictationCorrectionMonitorTests
       Nemotron35ModelStoreTests
